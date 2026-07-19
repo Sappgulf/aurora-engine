@@ -50,6 +50,15 @@ impl Camera2D {
         self.viewport / self.zoom.max(f32::EPSILON)
     }
 
+    /// Convert a normalized viewport fraction to world space.
+    ///
+    /// `(0, 0)` is bottom-left, `(1, 1)` is top-right, and `(0.5, 0.5)` is
+    /// the camera center. This is suited to HUD anchors that must stay pinned
+    /// to the screen as the camera moves or the window resizes.
+    pub fn world_from_viewport_fraction(&self, fraction: Vec2) -> Vec2 {
+        self.position + (fraction - Vec2::splat(0.5)) * self.visible_world_size()
+    }
+
     pub fn pan(&mut self, delta_world: Vec2) {
         self.position += delta_world;
     }
@@ -236,6 +245,20 @@ mod rig_tests {
         assert_eq!(camera.visible_world_size(), Vec2::new(1920.0, 1080.0));
         camera.zoom = 1.5;
         assert_eq!(camera.visible_world_size(), Vec2::new(1280.0, 720.0));
+    }
+
+    #[test]
+    fn viewport_fractions_pin_hud_anchors_to_visible_corners() {
+        let mut camera = Camera2D::new(1200.0, 800.0);
+        camera.position = Vec2::new(50.0, -20.0);
+        assert_eq!(
+            camera.world_from_viewport_fraction(Vec2::ZERO),
+            Vec2::new(-550.0, -420.0)
+        );
+        assert_eq!(
+            camera.world_from_viewport_fraction(Vec2::ONE),
+            Vec2::new(650.0, 380.0)
+        );
     }
 
     #[test]

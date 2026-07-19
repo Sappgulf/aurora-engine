@@ -800,10 +800,26 @@ impl Game for AuroraRun {
         spr.z = 1.0;
         ctx.renderer.draw_sprite(self.tex_player, spr);
 
-        // Compact in-world HUD: lives left, wave progress, dash charges and combo.
-        let hud = ctx.renderer.camera.position;
+        // Compact viewport-anchored HUD: life/dash left, score/combo right,
+        // and wave progress top-center. These anchors stay at the screen edge
+        // as the camera follows the player or the window changes size.
+        let hud_top_left = ctx
+            .renderer
+            .camera
+            .world_from_viewport_fraction(Vec2::new(0.0, 1.0))
+            + Vec2::new(42.0, -42.0);
+        let hud_top_right = ctx
+            .renderer
+            .camera
+            .world_from_viewport_fraction(Vec2::new(1.0, 1.0))
+            + Vec2::new(-42.0, -42.0);
+        let hud_top_center = ctx
+            .renderer
+            .camera
+            .world_from_viewport_fraction(Vec2::new(0.5, 1.0))
+            + Vec2::new(0.0, -42.0);
         for i in 0..self.dash_charges {
-            let p = hud + Vec2::new(-360.0 + i as f32 * 22.0, 205.0);
+            let p = hud_top_left + Vec2::new(i as f32 * 22.0, -28.0);
             ctx.renderer.draw_sprite(
                 self.tex_crystal,
                 Sprite::new(p, Vec2::splat(16.0))
@@ -812,7 +828,7 @@ impl Game for AuroraRun {
             );
         }
         for i in 0..self.lives.max(0) {
-            let p = hud + Vec2::new(-360.0 + i as f32 * 28.0, 240.0);
+            let p = hud_top_left + Vec2::new(i as f32 * 28.0, 0.0);
             ctx.renderer.draw_sprite(
                 self.tex_orb,
                 Sprite::new(p, Vec2::splat(18.0))
@@ -821,11 +837,7 @@ impl Game for AuroraRun {
             );
         }
         for i in 0..self.score.min(20) {
-            let p = hud
-                + Vec2::new(
-                    300.0 - (i % 10) as f32 * 16.0,
-                    240.0 - (i / 10) as f32 * 16.0,
-                );
+            let p = hud_top_right + Vec2::new(-((i % 10) as f32) * 16.0, -((i / 10) as f32) * 16.0);
             ctx.renderer.draw_sprite(
                 self.tex_orb,
                 Sprite::new(p, Vec2::splat(12.0))
@@ -839,21 +851,21 @@ impl Game for AuroraRun {
         let progress = 1.0 - alive / total;
         ctx.renderer.draw_sprite(
             self.tex_orb,
-            Sprite::new(hud + Vec2::new(0.0, 238.0), Vec2::new(220.0, 9.0))
+            Sprite::new(hud_top_center, Vec2::new(220.0, 9.0))
                 .with_color(Color::rgba(0.01, 0.08, 0.12, 0.85))
                 .with_z(5.0),
         );
         ctx.renderer.draw_sprite(
             self.tex_orb,
             Sprite::new(
-                hud + Vec2::new(-110.0 + progress * 110.0, 238.0),
+                hud_top_center + Vec2::new(-110.0 + progress * 110.0, 0.0),
                 Vec2::new(220.0 * progress, 7.0),
             )
             .with_color(Color::rgba(1.6, 0.85, 0.18, 0.9))
             .with_z(5.1),
         );
         for i in 0..self.wave.min(6) {
-            let p = hud + Vec2::new(-34.0 + i as f32 * 14.0, 215.0);
+            let p = hud_top_center + Vec2::new(-34.0 + i as f32 * 14.0, -23.0);
             ctx.renderer.draw_sprite(
                 self.tex_orb,
                 Sprite::new(p, Vec2::splat(8.0))
@@ -863,7 +875,7 @@ impl Game for AuroraRun {
         }
         if self.combo > 1 {
             for i in 0..self.combo.min(12) {
-                let p = hud + Vec2::new(290.0 - i as f32 * 11.0, 207.0);
+                let p = hud_top_right + Vec2::new(-(i as f32) * 11.0, -28.0);
                 ctx.renderer.draw_sprite(
                     self.tex_crystal,
                     Sprite::new(p, Vec2::splat(10.0 + (t * 5.0).sin().max(0.0) * 3.0))
