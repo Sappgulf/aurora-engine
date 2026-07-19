@@ -224,6 +224,7 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
 
         #[cfg(target_arch = "wasm32")]
         {
+            use wasm_bindgen::{closure::Closure, JsCast};
             use winit::platform::web::WindowExtWebSys;
             if let Some(canvas) = window.canvas() {
                 let style = canvas.style();
@@ -231,6 +232,20 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                 let _ = style.set_property("height", "100%");
                 let _ = style.set_property("display", "block");
                 let _ = style.set_property("background", "#0a0d1a");
+
+                // Last Light uses the standard RTS gesture: left-click to
+                // select, right-click to command. Browsers otherwise reserve
+                // right-click for their context menu, which steals the input
+                // before the winit canvas can turn it into a move order.
+                let prevent_context_menu =
+                    Closure::<dyn FnMut(web_sys::MouseEvent)>::new(|event: web_sys::MouseEvent| {
+                        event.prevent_default()
+                    });
+                let _ = canvas.add_event_listener_with_callback(
+                    "contextmenu",
+                    prevent_context_menu.as_ref().unchecked_ref(),
+                );
+                prevent_context_menu.forget();
             }
         }
 

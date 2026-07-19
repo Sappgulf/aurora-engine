@@ -308,6 +308,11 @@ impl LastLight {
         self.status = Some(("FABRICATOR READY — Q/E/F TO BUILD".to_owned(), 7.0));
 
         self.populate_mission();
+        // A mission opens with its field roster ready to command. This avoids
+        // making the very first interaction depend on discovering sprites
+        // beneath the tactical HUD or minimap.
+        self.world
+            .select_bounds(Aabb::from_center_size(Vec2::ZERO, MAP_SIZE), PLAYER, false);
     }
 
     fn populate_mission(&mut self) {
@@ -1085,6 +1090,21 @@ impl LastLight {
             .map(StructureKind::Relay)
     }
 
+    fn friendly_unit_at(&self, point: Vec2) -> bool {
+        self.world.units().iter().any(|unit| {
+            unit.faction == PLAYER
+                && unit.alive()
+                && unit.position.distance(point) <= unit.radius * 1.35
+        })
+    }
+
+    fn issue_move_order(&mut self, destination: Vec2) {
+        let selected_ids = self.world.selection().ids().to_vec();
+        self.world.issue_move(destination, 74.0);
+        self.route_around_obstacles(&selected_ids);
+        self.order_marker = Some((destination, 0.65));
+    }
+
     fn structure_position(&self, structure: StructureKind) -> Option<Vec2> {
         match structure {
             StructureKind::Relay(index) => self.relays.get(index).map(|relay| relay.position),
@@ -1167,6 +1187,17 @@ impl LastLight {
                 if drag.start.distance(drag.current) < 18.0 {
                     if let Some(structure) = self.structure_at(mouse_world) {
                         self.selected_structure = Some(structure);
+                    } else if !ctx.input.shift_down()
+                        && !self.world.selection().ids().is_empty()
+                        && !self.friendly_unit_at(mouse_world)
+                    {
+                        // A selected squad can also use the intuitive
+                        // select-then-left-click terrain command. This keeps
+                        // browser play viable when a secondary click is
+                        // intercepted by the host platform.
+                        self.selected_structure = None;
+                        self.issue_move_order(mouse_world);
+                        ctx.audio.collect();
                     } else {
                         self.selected_structure = None;
                         self.world
@@ -1187,8 +1218,7 @@ impl LastLight {
                     self.player_paths.remove(id);
                 }
             } else {
-                self.world.issue_move(mouse_world, 74.0);
-                self.route_around_obstacles(&selected_ids);
+                self.issue_move_order(mouse_world);
             }
             self.order_marker = Some((mouse_world, 0.65));
             ctx.audio.collect();
@@ -2409,9 +2439,9 @@ impl Game for LastLight {
             8.0,
         );
         let control_hint = if self.world.selection().ids().is_empty() {
-            "DRAG SELECT  •  RIGHT CLICK MOVE / ATTACK  •  B BEACON"
+            "DRAG SELECT  •  CLICK A SQUAD, THEN TERRAIN TO MOVE  •  B BEACON"
         } else {
-            "RIGHT CLICK COMMAND  •  H HOLD  •  T STOP  •  B BEACON"
+            "CLICK TERRAIN MOVE  •  RIGHT CLICK ATTACK  •  H HOLD  •  T STOP"
         };
         self.draw_text(
             ctx.renderer,
@@ -2734,6 +2764,7 @@ mod tests {
         assert_eq!(game.relays.len(), 3);
         assert!(game.reactor_position.is_some());
         assert_eq!(game.friendly_count(), 3);
+        assert_eq!(game.world.selection().ids().len(), 3);
         assert_eq!(
             game.world
                 .units()
@@ -2762,6 +2793,24 @@ mod tests {
             game.engineer_relay_status().as_deref(),
             Some("ENGINEER LINK // RELAY 1 — RESTORING 00%")
         );
+    }
+
+    #[test]
+    fn selected_squad_accepts_a_terrain_move_order() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        let selected = game.world.units()[0].id;
+        let destination = Vec2::new(-560.0, -120.0);
+        game.world
+            .select_point(game.world.unit(selected).unwrap().position, PLAYER, false);
+
+        game.issue_move_order(destination);
+
+        assert!(matches!(
+            game.world.unit(selected).unwrap().order,
+            UnitOrder::Move(target) if target.distance(destination) < 1.0
+        ));
+        assert_eq!(game.order_marker.map(|(point, _)| point), Some(destination));
     }
 
     #[test]

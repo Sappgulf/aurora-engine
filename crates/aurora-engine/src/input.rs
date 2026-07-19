@@ -118,14 +118,11 @@ impl Input {
             },
             WindowEvent::CursorMoved { position, .. } => {
                 let pos = Vec2::new(position.x as f32, position.y as f32);
-                #[cfg(target_arch = "wasm32")]
-                let pos = {
-                    let scale = web_sys::window()
-                        .map(|window| window.device_pixel_ratio() as f32)
-                        .unwrap_or(1.0)
-                        .max(1.0);
-                    pos / scale
-                };
+                // winit's web cursor positions are already in the canvas's
+                // CSS (logical) pixels. The renderer's viewport uses that
+                // same unit, so applying devicePixelRatio here would halve
+                // Retina cursor coordinates and send playfield clicks into
+                // unrelated HUD hit boxes.
                 if self.mouse_initialized {
                     self.mouse_delta += pos - self.prev_mouse;
                 }
