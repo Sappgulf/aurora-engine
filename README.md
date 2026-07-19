@@ -22,6 +22,7 @@ cargo run -p last_light
 | **Q / E / F** | Queue Warden / Engineer / Surveyor |
 | **B, then left click** | Preview and deploy a powered field beacon |
 | **H** | Hold selected units in position |
+| **T** | Stop selected units and clear their queued paths |
 | **Cmd/Ctrl + 1–5** | Assign a control group |
 | **1–5** | Recall and focus a control group |
 | **WASD / screen edge** | Pan tactical camera |
@@ -46,6 +47,12 @@ Bastion/Charter accords and `G` for Verdant Bloom/Briar covenants.
 Select the Engineer and command it near each of the three power relays. Active
 relays generate salvage for the Lantern fabricator; build reinforcements, hold
 the sector, defeat the Choir Canticle, and bring the auxiliary reactor online.
+
+**Combat roles:** Wardens are dependable front-line anchors; Surveyors trade
+damage for long-range fire; Engineers stay close to repair and operate
+objectives. Choir Needles skirmish, Canticles bombard from beyond Warden range,
+and Bell Mines are devastating only up close—focus them before they reach your
+line.
 
 ### Campaign and production guide
 

@@ -782,6 +782,7 @@ impl LastLight {
             (KeyCode::KeyE, "E  BUILD ENGINEER — 70".to_owned()),
             (KeyCode::KeyF, "F  BUILD SURVEYOR — 60".to_owned()),
             (KeyCode::KeyH, "H  HOLD SELECTED".to_owned()),
+            (KeyCode::KeyT, "T  STOP SELECTED".to_owned()),
             (
                 KeyCode::KeyB,
                 format!(
@@ -798,8 +799,14 @@ impl LastLight {
     }
 
     fn command_card_row_rect(card_text: Vec2, index: usize) -> Aabb {
-        let center = card_text + Vec2::new(150.0, -38.0 - index as f32 * 30.0);
-        Aabb::from_center_size(center, Vec2::new(420.0, 26.0))
+        // Production occupies the left column; squad utilities occupy the
+        // right. This keeps every command visible without making a compact
+        // browser viewport sacrifice the queue feedback below it.
+        let column = index / 3;
+        let row = index % 3;
+        let center =
+            card_text + Vec2::new(130.0 + column as f32 * 260.0, -38.0 - row as f32 * 30.0);
+        Aabb::from_center_size(center, Vec2::new(250.0, 26.0))
     }
 
     fn apply_command_action(&mut self, key: KeyCode) {
@@ -810,6 +817,11 @@ impl LastLight {
             KeyCode::KeyH => {
                 self.world.issue_hold();
                 self.status = Some(("SQUAD HOLDING POSITION".to_owned(), 2.0));
+            }
+            KeyCode::KeyT => {
+                self.world.issue_hold();
+                self.player_paths.clear();
+                self.status = Some(("SQUAD ORDERS STOPPED".to_owned(), 2.0));
             }
             KeyCode::KeyB => {
                 self.placing_beacon = !self.placing_beacon;
@@ -1281,11 +1293,14 @@ impl LastLight {
         );
     }
 
-    fn unit_engaged(&self, id: UnitId, range: f32) -> bool {
+    fn unit_engaged(&self, id: UnitId) -> bool {
         let Some(unit) = self.world.unit(id) else {
             return false;
         };
         let UnitOrder::Attack(target) = unit.order else {
+            return false;
+        };
+        let Some(range) = self.kinds.get(&id).map(|kind| kind.combat().range) else {
             return false;
         };
         self.world.unit(target).is_some_and(|target| {
@@ -1371,13 +1386,11 @@ impl LastLight {
             let Some((target_position, true)) = snapshot.get(&target).copied() else {
                 continue;
             };
-            if unit.position.distance(target_position) < 125.0 {
-                let mut dps = match self.kinds.get(&unit.id) {
-                    Some(UnitKind::Warden) => 34.0,
-                    Some(UnitKind::Canticle) => 24.0,
-                    Some(UnitKind::BellMine) => 28.0,
-                    _ => 18.0,
-                };
+            let Some(profile) = self.kinds.get(&unit.id).map(|kind| kind.combat()) else {
+                continue;
+            };
+            if unit.position.distance(target_position) < profile.range {
+                let mut dps = profile.damage_per_second;
                 if unit.faction == PLAYER
                     && self.specialist_module(SENA, SENA_DEEP_SCAN) == SENA_GHOST_MARK
                 {
@@ -1800,12 +1813,11 @@ impl Game for LastLight {
         for unit in self.world.units() {
             let kind = self.kinds.get(&unit.id).copied();
             let engaged = unit.alive()
-                && match kind {
-                    Some(UnitKind::Needle) => self.unit_engaged(unit.id, 155.0),
-                    Some(UnitKind::Canticle) => self.unit_engaged(unit.id, 260.0),
-                    Some(UnitKind::BellMine) => self.unit_engaged(unit.id, 220.0),
-                    _ => false,
-                };
+                && matches!(
+                    kind,
+                    Some(UnitKind::Needle | UnitKind::Canticle | UnitKind::BellMine)
+                )
+                && self.unit_engaged(unit.id);
             let Some(player) = self.animation_players.get_mut(&unit.id) else {
                 continue;
             };
@@ -2106,12 +2118,10 @@ impl Game for LastLight {
                     .with_color(glow_color)
                     .with_z(-0.2),
             );
-            let engaged = match kind {
-                UnitKind::Needle => self.unit_engaged(unit.id, 155.0),
-                UnitKind::Canticle => self.unit_engaged(unit.id, 260.0),
-                UnitKind::BellMine => self.unit_engaged(unit.id, 220.0),
-                _ => false,
-            };
+            let engaged = matches!(
+                kind,
+                UnitKind::Needle | UnitKind::Canticle | UnitKind::BellMine
+            ) && self.unit_engaged(unit.id);
             let animated = if self.damage_flash.contains_key(&unit.id) {
                 Some((self.tex_hit_reactions, &self.hit_reactions_atlas))
             } else {
@@ -2472,8 +2482,8 @@ impl Game for LastLight {
             }
             self.draw_text(
                 ctx.renderer,
-                "CMD/CTRL+1-5 OR CHIPS ASSIGN   1-5 OR CLICK RECALL",
-                card_text + Vec2::new(0.0, -184.0),
+                "CMD/CTRL+1-5 ASSIGN   1-5 OR CLICK RECALL",
+                card_text + Vec2::new(0.0, -142.0),
                 1.6,
                 Color::rgba(0.55, 0.7, 0.78, 0.9),
                 8.0,
@@ -2497,13 +2507,13 @@ impl Game for LastLight {
             self.draw_text(
                 ctx.renderer,
                 &queue_label,
-                card_text + Vec2::new(0.0, -206.0),
+                card_text + Vec2::new(0.0, -166.0),
                 2.0,
                 Color::rgb(1.15, 0.7, 0.25),
                 8.0,
             );
             if let Some(progress) = front_progress {
-                let bar_origin = card_text + Vec2::new(0.0, -226.0);
+                let bar_origin = card_text + Vec2::new(0.0, -188.0);
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
                     Sprite::new(bar_origin + Vec2::new(150.0, 0.0), Vec2::new(300.0, 8.0))
