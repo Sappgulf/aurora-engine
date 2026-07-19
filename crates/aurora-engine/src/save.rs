@@ -109,6 +109,10 @@ impl CampaignProgress {
         true
     }
 
+    pub fn has_decision(&self, decision: &str) -> bool {
+        self.decisions.iter().any(|recorded| recorded == decision)
+    }
+
     /// Atomically purchases a permanent campaign upgrade.
     pub fn purchase_upgrade(&mut self, upgrade: impl Into<String>, cost: u64) -> bool {
         let upgrade = upgrade.into();
@@ -530,6 +534,8 @@ mod tests {
         assert_eq!(campaign.unlocked_mission, 3);
         assert!(campaign.record_decision("wake-lumen"));
         assert!(!campaign.record_decision("wake-lumen"));
+        assert!(campaign.has_decision("wake-lumen"));
+        assert!(!campaign.has_decision("silence-lumen"));
     }
 
     #[test]

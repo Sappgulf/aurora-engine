@@ -105,6 +105,13 @@ pub struct AnimationPlayer {
 }
 
 impl AnimationPlayer {
+    /// Return to an unanimated state so a one-shot clip can be replayed later.
+    pub fn clear(&mut self) {
+        self.clip = None;
+        self.time = 0.0;
+        self.finished = false;
+    }
+
     pub fn play(&mut self, clip: AnimationClip) {
         if self
             .clip
@@ -231,5 +238,19 @@ mod tests {
         player.play(move_clip);
         assert_eq!(player.clip_name(), Some("move"));
         assert_eq!(player.frame(), 4);
+    }
+
+    #[test]
+    fn animation_player_can_replay_a_cleared_one_shot() {
+        let mut player = AnimationPlayer::default();
+        player.play(AnimationClip::once("hit", [0, 1, 2, 3], 12.0));
+        player.tick(1.0);
+        assert!(player.finished());
+        assert_eq!(player.frame(), 3);
+
+        player.clear();
+        player.play(AnimationClip::once("hit", [0, 1, 2, 3], 12.0));
+        assert!(!player.finished());
+        assert_eq!(player.frame(), 0);
     }
 }

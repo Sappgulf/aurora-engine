@@ -221,6 +221,7 @@ def _playtest_payload() -> dict[str, object]:
             "upgrades": "During briefing: Z Field Optics, X Reactive Plating, C Fabricator Overclock",
             "loadouts": "During briefing: V cycles Ivo; N cycles Sena; selections save immediately",
             "doctrines": "During briefing: M cycles Mara; O cycles Olan; selections save immediately",
+            "relationship": "After Lumen contact: L cycles Guardian or Witness protocol and saves",
             "pause": "Esc",
         },
         "acceptance_checks": [
@@ -236,6 +237,8 @@ def _playtest_payload() -> dict[str, object]:
             "Ivo and Sena loadout changes persist and alter relay, beacon, vision, or damage behavior.",
             "Mara and Olan doctrines persist and alter sustain, speed, relay income, or Choir damage.",
             "Canticle command and Bell Mine arming strips telegraph engagement before damage range.",
+            "All six unit kinds play hit reactions and hold a final shutdown wreck frame.",
+            "Lumen protocol stays locked before contact; Guardian or Witness persists after contact.",
             "Victory persists mission completion and unlocks mission three without duplicate rewards.",
             "HUD remains anchored and the camera remains map-bounded after resize.",
         ],

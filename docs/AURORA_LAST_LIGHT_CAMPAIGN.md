@@ -152,9 +152,18 @@ horizontal mission choices, not permanent power purchases: `V` cycles Ivo and
 | Olan Voss | Choir Decoder | Lantern damage rises 10% against engaged contacts | Olan weaponizes forbidden Choir research |
 
 The default mission posture is Relay Rigger, Deep Scan, Rescue Screen, and
-Lattice Audit. Later missions may gate alliance-specific modules behind
-relationship decisions, but must preserve the one-equipped-module-per-specialist
-contract.
+Lattice Audit. Completing Reclaim the Reactor records Lumen contact and unlocks
+an additional `L` briefing choice:
+
+| Relationship protocol | Mission effect | Character expression |
+|---|---|---|
+| Guardian Protocol | Powered infrastructure adds 4 health/s sustain, stacking with Rescue Screen | Lumen chooses protection through presence |
+| Witness Protocol | Surveyor and beacon vision gain 80 units; restored relays gain 1 salvage/s | Lumen chooses understanding through observation |
+
+The protocol is unavailable before contact, saves immediately, and uses the
+same one-equipped-module contract as named specialists. Later Meridian and
+Verdant abilities should be gated by their own relationship decisions rather
+than campaign currency alone.
 
 ## Campaign continuity data
 

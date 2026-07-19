@@ -99,8 +99,24 @@ unrelated images.
 | `needle-attack-strip-v001.png` | 6×1 | Choir Needle charge, lance, and recoil |
 | `canticle-command-strip-v001.png` | 6×1 | Canticle charge, command rings, and release |
 | `bell-mine-arm-strip-v001.png` | 6×1 | Mine apertures, warning arcs, and armed recoil |
+| `unit-hit-reactions-atlas-v001.png` | 4×6 | Full-roster impact, spark, and recovery reactions |
+| `unit-down-reactions-atlas-v001.png` | 4×6 | Full-roster non-gory shutdown and persistent wrecks |
 | `last-light-structures-atlas-v001.png` | 2×2 | Relay, fabricator, reactor, Choir tower |
 | `reactor-sector-v001.png` | single | 2600×1460 authored mission floor |
+
+### Reaction-atlas contract
+
+Both reaction atlases use four columns in narrative order: neutral, recoil or
+failure, peak faction-colored effect, recovery or final wreck. Rows are fixed:
+Warden, Engineer, Surveyor, Needle, Canticle, Bell Mine. Runtime cells are
+256×256 RGBA and the complete atlas is 1024×1536.
+
+Generated concept sheets may use unequal vertical safe zones. Normalize them
+with `tools/normalize_generated_strip.py`, passing four columns, six rows, and
+audited `--row-bounds` bands. The tool removes edge-connected checker/matte
+backgrounds, applies one shared scale per unit row, centers every silhouette,
+and preserves the existing one-row `--frames` workflow. Always inspect the
+normalized alpha atlas before integration; no silhouette may cross a cell edge.
 
 ## Environment kit
 

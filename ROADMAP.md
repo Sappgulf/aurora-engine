@@ -95,13 +95,14 @@ systems it uses can be adopted by a second 2D game without copying demo code.
 - [x] Per-entity clip state machine and Warden movement strip
 - [x] Engineer move, Surveyor scan, and Choir Needle attack strips
 - [x] Canticle command and Bell Mine arming action strips
-- [ ] Hit/down strips for the full six-unit roster
+- [x] Hit/down reaction atlases for the full six-unit roster
 - [x] Player-authored field-beacon placement and validation previews
 - [x] Tactical minimap with fog, contacts, camera frame, and navigation
 - [x] Persistent three-branch campaign upgrade foundation
 - [x] Persistent Ivo and Sena specialist loadouts with mission effects
 - [x] Persistent Olan analysis and Mara command doctrines
-- [ ] Late-campaign alliance and relationship-gated ability choices
+- [x] Lumen-contact-gated Guardian and Witness ability choices
+- [ ] Meridian and Verdant alliance-specific late-campaign abilities
 
 **Exit criteria:** select and command a Lantern squad, reveal the sector, restore
 three relays, defeat a Choir command unit, and complete the mission on native
