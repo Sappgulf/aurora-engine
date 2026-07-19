@@ -28,6 +28,12 @@ cargo run -p aurora_run
 Top-left teal pips = lives · gold crystals = score · green crystals = upgrades.
 Clear a wave to advance; each wave adds more varied drones.
 
+### Game flow
+
+Aurora Run opens on a keyboard-first title screen. Use **WASD/arrows** to move
+the menu cursor, **Enter/Space** to confirm, and **Esc** to go back or pause a
+run. The pause screen provides resume, restart, settings, and end-run actions.
+
 ## Other demos
 
 ```bash
@@ -50,6 +56,11 @@ cargo run -p triangle_demo   # M0 NDC triangle
 | Particles | ✅ |
 | WASM / Trunk scaffold | ✅ |
 | Feature-gated 3D camera conventions | ✅ foundation |
+| Menu flow + bitmap text UI | ✅ |
+| Save/settings + audio mixer contracts | ✅ |
+| Tile collisions/triggers + camera rig | ✅ |
+| Diagnostics + asset loading queue | ✅ foundation |
+| Feature-gated 3D mesh/material contract | ✅ foundation |
 
 ## Library sketch
 

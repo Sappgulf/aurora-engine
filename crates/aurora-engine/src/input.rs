@@ -15,6 +15,10 @@ pub enum Action {
     Pause,
     Restart,
     TogglePostFx,
+    MenuUp,
+    MenuDown,
+    MenuConfirm,
+    MenuBack,
 }
 
 /// Per-frame input snapshot maintained by the engine.
@@ -135,6 +139,10 @@ impl Input {
             Action::Pause => &[KeyCode::Escape],
             Action::Restart => &[KeyCode::KeyR],
             Action::TogglePostFx => &[KeyCode::KeyP],
+            Action::MenuUp => &[KeyCode::ArrowUp, KeyCode::KeyW],
+            Action::MenuDown => &[KeyCode::ArrowDown, KeyCode::KeyS],
+            Action::MenuConfirm => &[KeyCode::Enter, KeyCode::Space],
+            Action::MenuBack => &[KeyCode::Escape],
         }
     }
 

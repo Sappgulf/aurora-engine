@@ -1,5 +1,71 @@
 //! Lightweight sound: procedural beeps (native + web).
 
+/// Independent volume lanes. Their values are multiplied with `Master`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AudioChannel {
+    Master,
+    Music,
+    Sfx,
+    Ambience,
+    Ui,
+}
+
+/// Portable mixer state shared by native Rodio and Web Audio backends.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AudioMixer {
+    master: f32,
+    music: f32,
+    sfx: f32,
+    ambience: f32,
+    ui: f32,
+}
+
+impl Default for AudioMixer {
+    fn default() -> Self {
+        Self {
+            master: 1.0,
+            music: 0.8,
+            sfx: 0.85,
+            ambience: 0.7,
+            ui: 0.9,
+        }
+    }
+}
+
+impl AudioMixer {
+    pub fn set_volume(&mut self, channel: AudioChannel, volume: f32) {
+        *self.volume_mut(channel) = volume.clamp(0.0, 1.0);
+    }
+
+    pub fn volume(&self, channel: AudioChannel) -> f32 {
+        match channel {
+            AudioChannel::Master => self.master,
+            AudioChannel::Music => self.music,
+            AudioChannel::Sfx => self.sfx,
+            AudioChannel::Ambience => self.ambience,
+            AudioChannel::Ui => self.ui,
+        }
+    }
+
+    pub fn effective_volume(&self, channel: AudioChannel) -> f32 {
+        if channel == AudioChannel::Master {
+            self.master
+        } else {
+            self.master * self.volume(channel)
+        }
+    }
+
+    fn volume_mut(&mut self, channel: AudioChannel) -> &mut f32 {
+        match channel {
+            AudioChannel::Master => &mut self.master,
+            AudioChannel::Music => &mut self.music,
+            AudioChannel::Sfx => &mut self.sfx,
+            AudioChannel::Ambience => &mut self.ambience,
+            AudioChannel::Ui => &mut self.ui,
+        }
+    }
+}
+
 /// Simple game audio helper (no asset files required).
 pub struct Audio {
     #[cfg(not(target_arch = "wasm32"))]
@@ -7,6 +73,7 @@ pub struct Audio {
     #[cfg(target_arch = "wasm32")]
     inner: web::WebAudio,
     enabled: bool,
+    mixer: AudioMixer,
 }
 
 impl Audio {
@@ -14,6 +81,7 @@ impl Audio {
         Self {
             inner: Default::default(),
             enabled: true,
+            mixer: AudioMixer::default(),
         }
     }
 
@@ -25,6 +93,14 @@ impl Audio {
         self.enabled
     }
 
+    pub fn mixer(&self) -> &AudioMixer {
+        &self.mixer
+    }
+
+    pub fn mixer_mut(&mut self) -> &mut AudioMixer {
+        &mut self.mixer
+    }
+
     /// Resume browser audio after a user gesture; a no-op on native platforms.
     pub fn resume(&self) {
         self.inner.resume();
@@ -32,26 +108,37 @@ impl Audio {
 
     /// Play a short sine beep.
     pub fn beep(&self, frequency_hz: f32, duration_secs: f32, volume: f32) {
+        self.beep_on(AudioChannel::Sfx, frequency_hz, duration_secs, volume);
+    }
+
+    /// Play a procedural tone routed through a mixer channel.
+    pub fn beep_on(
+        &self,
+        channel: AudioChannel,
+        frequency_hz: f32,
+        duration_secs: f32,
+        volume: f32,
+    ) {
         if !self.enabled {
             return;
         }
         self.inner.beep(
             frequency_hz.max(20.0),
             duration_secs.max(0.01),
-            volume.clamp(0.0, 1.0),
+            (volume * self.mixer.effective_volume(channel)).clamp(0.0, 1.0),
         );
     }
 
     pub fn collect(&self) {
-        self.beep(880.0, 0.07, 0.25);
+        self.beep_on(AudioChannel::Sfx, 880.0, 0.07, 0.25);
     }
 
     pub fn hurt(&self) {
-        self.beep(140.0, 0.15, 0.3);
+        self.beep_on(AudioChannel::Sfx, 140.0, 0.15, 0.3);
     }
 
     pub fn start(&self) {
-        self.beep(523.0, 0.08, 0.2);
+        self.beep_on(AudioChannel::Ui, 523.0, 0.08, 0.2);
         // second note slightly delayed is hard without threads; single chirp is fine
     }
 
@@ -63,6 +150,22 @@ impl Audio {
 impl Default for Audio {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mixer_clamps_lanes_and_applies_master_gain() {
+        let mut mixer = AudioMixer::default();
+        mixer.set_volume(AudioChannel::Master, 0.5);
+        mixer.set_volume(AudioChannel::Sfx, 2.0);
+        mixer.set_volume(AudioChannel::Music, -1.0);
+        assert_eq!(mixer.volume(AudioChannel::Sfx), 1.0);
+        assert_eq!(mixer.volume(AudioChannel::Music), 0.0);
+        assert_eq!(mixer.effective_volume(AudioChannel::Sfx), 0.5);
     }
 }
 

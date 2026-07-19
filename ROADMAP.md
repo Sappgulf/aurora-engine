@@ -66,14 +66,14 @@
 
 ## Milestone 2.5 — World, feel, and shipping foundations
 
-- [ ] Light components + composited 2D point-light pass
-- [ ] Tile maps, collision layers, and environment props
-- [ ] Lightweight scenes/entities and reusable movement/steering helpers
-- [ ] Asset manifest with stable IDs for texture, audio, animation, and FX domains
-- [ ] SDF/bitmap text plus compact HUD, pause, settings, and debug overlays
-- [ ] Dash, hit-stop, knockback, combo, waves, and progression in Aurora Run
-- [ ] Quality tiers, performance counters, and native/browser visual regression captures
-- [ ] Saveable high score and deployed browser build
+- [x] Light components + composited 2D point-light pass
+- [x] Tile maps, collision layers, and trigger regions
+- [x] Lightweight scenes/entities and reusable camera rig helpers
+- [x] Asset manifest with stable IDs plus load-state queue
+- [x] Bitmap text, title/pause/settings/results menus, and debug diagnostic snapshots
+- [x] Dash, combo, waves, upgrades, and progression in Aurora Run
+- [x] Quality tiers, performance counters, and native/browser visual regression captures
+- [x] Save/settings and channel-aware audio mixer contracts
 
 **Exit criteria:** Aurora Run is a 5–10 minute replayable vertical slice, and the
 systems it uses can be adopted by a second 2D game without copying demo code.

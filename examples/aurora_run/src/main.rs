@@ -1,8 +1,9 @@
 //! Aurora Run — collect orbs, dodge hazards. Showcases M2 systems.
 
 use aurora_engine::{
-    run, Aabb, Animation, Color, FrameCtx, Game, ParticleSystem, PointLight, Renderer, RngLite,
-    Sprite, Texture, TextureAtlas, TextureHandle, XorShift32,
+    run, Aabb, Action, Animation, BitmapText, Color, FrameCtx, Game, GameFlow, MenuCommand,
+    MenuInput, MenuScreen, MenuState, ParticleSystem, PointLight, Renderer, RngLite, Sprite,
+    Texture, TextureAtlas, TextureHandle, XorShift32,
 };
 use glam::Vec2;
 use winit::keyboard::KeyCode;
@@ -41,6 +42,7 @@ struct AuroraRun {
     tex_crystal: TextureHandle,
     tex_hazard: TextureHandle,
     tex_floor: TextureHandle,
+    tex_ui: TextureHandle,
     player_atlas: TextureAtlas,
     drone_atlas: TextureAtlas,
     player_anim: Animation,
@@ -57,7 +59,6 @@ struct AuroraRun {
     game_over: bool,
     win: bool,
     spawn_timer: f32,
-    paused: bool,
     wave: u32,
     combo: u32,
     combo_timer: f32,
@@ -65,6 +66,7 @@ struct AuroraRun {
     dash_cooldown: f32,
     dash_charges: u32,
     facing: Vec2,
+    menu: MenuState,
 }
 
 impl AuroraRun {
@@ -75,6 +77,7 @@ impl AuroraRun {
             tex_crystal: TextureHandle::default(),
             tex_hazard: TextureHandle::default(),
             tex_floor: TextureHandle::default(),
+            tex_ui: TextureHandle::default(),
             player_atlas: TextureAtlas::new(TextureHandle::default(), 4, 2, COMBAT_ATLAS_SIZE),
             drone_atlas: TextureAtlas::new(TextureHandle::default(), 4, 2, COMBAT_ATLAS_SIZE),
             player_anim: Animation::new([0, 1, 2, 3, 2, 1], 10.0),
@@ -91,7 +94,6 @@ impl AuroraRun {
             game_over: false,
             win: false,
             spawn_timer: 0.0,
-            paused: false,
             wave: 1,
             combo: 0,
             combo_timer: 0.0,
@@ -99,6 +101,7 @@ impl AuroraRun {
             dash_cooldown: 0.0,
             dash_charges: 2,
             facing: Vec2::Y,
+            menu: MenuState::new(),
         }
     }
 
@@ -143,7 +146,6 @@ impl AuroraRun {
         self.game_over = false;
         self.win = false;
         self.spawn_timer = 0.0;
-        self.paused = false;
         self.wave = 1;
         self.combo = 0;
         self.combo_timer = 0.0;
@@ -161,6 +163,158 @@ impl AuroraRun {
     fn player_aabb(&self) -> Aabb {
         Aabb::from_center_size(self.player, Vec2::splat(PLAYER_SIZE * 0.7))
     }
+
+    fn menu_input(ctx: &FrameCtx<'_>) -> Option<MenuInput> {
+        if ctx.input.action_pressed(Action::MenuUp) {
+            Some(MenuInput::Up)
+        } else if ctx.input.action_pressed(Action::MenuDown) {
+            Some(MenuInput::Down)
+        } else if ctx.input.action_pressed(Action::MenuConfirm) {
+            Some(MenuInput::Confirm)
+        } else if ctx.input.action_pressed(Action::MenuBack) {
+            Some(MenuInput::Back)
+        } else {
+            None
+        }
+    }
+
+    fn handle_menu_command(&mut self, command: MenuCommand, ctx: &mut FrameCtx<'_>) {
+        match command {
+            MenuCommand::StartRun | MenuCommand::RestartRun => self.reset(true, ctx.audio),
+            MenuCommand::Resume => self.shake = 0.05,
+            MenuCommand::TogglePostFx => ctx.renderer.post_fx.enabled = self.menu.post_fx,
+            MenuCommand::ToggleReducedMotion => {
+                if self.menu.reduced_motion {
+                    self.shake = 0.0;
+                }
+            }
+            MenuCommand::EndRun | MenuCommand::ReturnToMain => {
+                self.game_over = false;
+                self.win = false;
+                self.player_velocity = Vec2::ZERO;
+            }
+            MenuCommand::None | MenuCommand::Open(_) => {}
+        }
+    }
+
+    fn draw_text(
+        &self,
+        renderer: &mut Renderer,
+        text: &str,
+        origin: Vec2,
+        pixel_size: f32,
+        color: Color,
+        z: f32,
+    ) {
+        for cell in BitmapText::glyphs(text, origin, pixel_size) {
+            renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(cell.position, Vec2::splat(cell.size))
+                    .with_color(color)
+                    .with_z(z),
+            );
+        }
+    }
+
+    fn draw_menu(&self, ctx: &mut FrameCtx<'_>, screen: MenuScreen, t: f32) {
+        let camera = ctx.renderer.camera.position;
+        ctx.renderer.draw_sprite(
+            self.tex_ui,
+            Sprite::new(camera, Vec2::new(840.0, 560.0))
+                .with_color(Color::rgba(0.01, 0.025, 0.08, 0.84))
+                .with_z(10.0),
+        );
+        ctx.renderer.draw_sprite(
+            self.tex_ui,
+            Sprite::new(camera + Vec2::new(0.0, 224.0), Vec2::new(720.0, 4.0))
+                .with_color(Color::rgba(0.1, 1.4, 1.15, 0.7))
+                .with_z(10.1),
+        );
+        let title = match screen {
+            MenuScreen::Main => "AURORA RUN",
+            MenuScreen::HowTo => "HOW TO PLAY",
+            MenuScreen::Settings => "SETTINGS",
+            MenuScreen::Pause => "PAUSED",
+            MenuScreen::Results if self.win => "RUN COMPLETE",
+            MenuScreen::Results => "SYSTEM FAILURE",
+        };
+        let title_pixel = if title.len() > 10 { 8.0 } else { 11.0 };
+        self.draw_text(
+            ctx.renderer,
+            title,
+            camera + Vec2::new(-260.0, 170.0),
+            title_pixel,
+            Color::rgba(0.25, 1.8, 1.5, 0.95 + 0.05 * (t * 2.0).sin()),
+            11.0,
+        );
+
+        let items: &[&str] = match screen {
+            MenuScreen::Main => &["START RUN", "HOW TO PLAY", "SETTINGS"],
+            MenuScreen::HowTo => &["WASD MOVE  SPACE DASH", "COLLECT CRYSTALS", "ESC BACK"],
+            MenuScreen::Settings => &[
+                if self.menu.post_fx {
+                    "POST FX ON"
+                } else {
+                    "POST FX OFF"
+                },
+                if self.menu.reduced_motion {
+                    "MOTION LOW"
+                } else {
+                    "MOTION FULL"
+                },
+                "BACK TO MENU",
+            ],
+            MenuScreen::Pause => &["RESUME", "RESTART RUN", "SETTINGS", "END RUN"],
+            MenuScreen::Results => &["RUN AGAIN", "MAIN MENU"],
+        };
+        for (index, item) in items.iter().enumerate() {
+            let selected = index == self.menu.selected() && !matches!(screen, MenuScreen::HowTo);
+            let y = 78.0 - index as f32 * 57.0;
+            if selected {
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(camera + Vec2::new(0.0, y + 5.0), Vec2::new(520.0, 38.0))
+                        .with_color(Color::rgba(0.05, 0.85, 0.72, 0.18))
+                        .with_z(10.2),
+                );
+            }
+            let label = if selected {
+                format!("> {}", item)
+            } else {
+                (*item).to_string()
+            };
+            self.draw_text(
+                ctx.renderer,
+                &label,
+                camera + Vec2::new(-235.0, y),
+                6.0,
+                if selected {
+                    Color::rgb(0.9, 1.7, 1.35)
+                } else {
+                    Color::rgba(0.62, 0.78, 0.9, 0.9)
+                },
+                11.0,
+            );
+        }
+        if matches!(screen, MenuScreen::Results) {
+            self.draw_text(
+                ctx.renderer,
+                &format!("SCORE {}  WAVE {}", self.score, self.wave),
+                camera + Vec2::new(-235.0, -140.0),
+                5.0,
+                Color::rgb(1.5, 0.85, 0.25),
+                11.0,
+            );
+        }
+        self.draw_text(
+            ctx.renderer,
+            "ARROWS OR WASD  ENTER SELECT  ESC BACK",
+            camera + Vec2::new(-300.0, -220.0),
+            3.5,
+            Color::rgba(0.35, 0.65, 0.82, 0.75),
+            11.0,
+        );
+    }
 }
 
 impl Game for AuroraRun {
@@ -169,7 +323,7 @@ impl Game for AuroraRun {
     }
 
     fn on_start(&mut self, renderer: &mut Renderer) {
-        let (player_tex, orb, crystal, floor) = {
+        let (player_tex, orb, crystal, floor, ui) = {
             let gpu = renderer.gpu();
             (
                 Texture::from_bytes(
@@ -181,6 +335,7 @@ impl Game for AuroraRun {
                 Texture::soft_circle(&gpu, 48, Color::rgb(0.95, 0.85, 0.3)),
                 Texture::crystal(&gpu, 64, Color::rgb(1.0, 0.72, 0.16)),
                 Texture::arena_floor(&gpu, 512),
+                Texture::solid(&gpu, Color::WHITE),
             )
         };
         self.tex_player = renderer.add_texture(player_tex);
@@ -188,6 +343,7 @@ impl Game for AuroraRun {
         self.tex_crystal = renderer.add_texture(crystal);
         self.tex_hazard = self.tex_player;
         self.tex_floor = renderer.add_texture(floor);
+        self.tex_ui = renderer.add_texture(ui);
         self.player_atlas = TextureAtlas::new(self.tex_player, 4, 2, COMBAT_ATLAS_SIZE);
         self.drone_atlas = TextureAtlas::new(self.tex_player, 4, 2, COMBAT_ATLAS_SIZE);
 
@@ -203,13 +359,17 @@ impl Game for AuroraRun {
         self.score = 0;
         self.lives = 3;
         self.begin_wave();
-        log::info!(
-            "Aurora Run — WASD move, SPACE dash, ESC pause, collect crystals, avoid drones. P toggles post-FX. R restart."
-        );
+        log::info!("Aurora Run — title menu ready. Arrows/WASD navigate, Enter/Space select.");
     }
 
     fn on_fixed_update(&mut self, ctx: &mut FrameCtx<'_>) {
         let dt = ctx.time.fixed_dt;
+
+        if let Some(input) = Self::menu_input(ctx) {
+            let command = self.menu.handle(input);
+            self.handle_menu_command(command, ctx);
+            return;
+        }
 
         if ctx.input.key_pressed(KeyCode::KeyR) {
             self.reset(true, ctx.audio);
@@ -218,12 +378,8 @@ impl Game for AuroraRun {
         if ctx.input.key_pressed(KeyCode::KeyP) {
             ctx.renderer.post_fx.enabled = !ctx.renderer.post_fx.enabled;
         }
-        if ctx.input.key_pressed(KeyCode::Escape) && !self.game_over && !self.win {
-            self.paused = !self.paused;
-            self.shake = 0.08;
-        }
-
-        if self.game_over || self.win || self.paused {
+        if self.game_over || self.win {
+            self.menu.open(MenuScreen::Results);
             return;
         }
 
@@ -364,6 +520,7 @@ impl Game for AuroraRun {
             );
             if self.wave > 6 {
                 self.win = true;
+                self.menu.open(MenuScreen::Results);
             } else {
                 self.begin_wave();
             }
@@ -393,6 +550,7 @@ impl Game for AuroraRun {
                     );
                     if self.lives <= 0 {
                         self.game_over = true;
+                        self.menu.open(MenuScreen::Results);
                     }
                     break;
                 }
@@ -691,21 +849,10 @@ impl Game for AuroraRun {
             }
         }
 
-        // Win / lose overlay pulses
-        if self.game_over || self.win || self.paused {
-            let c = if self.win {
-                Color::rgba(0.2, 1.0, 0.8, 0.25 + 0.1 * (t * 3.0).sin())
-            } else if self.paused {
-                Color::rgba(0.08, 0.25, 0.42, 0.28 + 0.06 * (t * 2.0).sin())
-            } else {
-                Color::rgba(1.0, 0.1, 0.2, 0.2 + 0.1 * (t * 4.0).sin())
-            };
-            ctx.renderer.draw_sprite(
-                self.tex_orb,
-                Sprite::new(ctx.renderer.camera.position, Vec2::new(1400.0, 900.0))
-                    .with_color(c)
-                    .with_z(10.0),
-            );
+        // Menus are a separate game-flow layer over the live arena. They stop
+        // simulation in fixed update while retaining the scene as atmosphere.
+        if let GameFlow::Menu(screen) = self.menu.flow {
+            self.draw_menu(ctx, screen, t);
         }
     }
 }
