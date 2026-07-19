@@ -161,9 +161,25 @@ an additional `L` briefing choice:
 | Witness Protocol | Surveyor and beacon vision gain 80 units; restored relays gain 1 salvage/s | Lumen chooses understanding through observation |
 
 The protocol is unavailable before contact, saves immediately, and uses the
-same one-equipped-module contract as named specialists. Later Meridian and
-Verdant abilities should be gated by their own relationship decisions rather
-than campaign currency alone.
+same one-equipped-module contract as named specialists.
+
+## Alliance doctrines
+
+Mission-four and mission-five decisions unlock two additional saved briefing
+choices. They cannot be purchased with Lumen and remain locked unless the
+corresponding relationship decision was earned.
+
+| Key | Alliance choice | Gameplay effect | Required decision |
+|---|---|---|---|
+| `P` | Meridian Bastion Accord | Lantern incoming damage falls 18% | `meridian-allied` |
+| `P` | Meridian Salvage Charter | Beacons cost 10 less and relays produce +1 salvage/s | `meridian-allied` |
+| `G` | Verdant Bloom Covenant | Beacons add 5 health/s sustain within 340 units | `verdant-cultivated` |
+| `G` | Verdant Briar Covenant | Beacons deal 8 damage/s to Choir within 220 units | `verdant-cultivated` |
+
+These effects deliberately stack with specialist and Lumen choices. An allied
+Compact does not become a second Lantern faction; it changes fortification
+economics. A cultivated Wake does not become conventional artillery; it changes
+the meaning of territory around the player's living beacon network.
 
 ## Campaign continuity data
 

@@ -43,6 +43,14 @@ const LUMEN: &str = "lumen-voice";
 const LUMEN_CONTACT: &str = "lumen-contact-established";
 const LUMEN_GUARDIAN: &str = "guardian-protocol";
 const LUMEN_WITNESS: &str = "witness-protocol";
+const MERIDIAN: &str = "meridian-compact";
+const MERIDIAN_ALLIED: &str = "meridian-allied";
+const MERIDIAN_BASTION: &str = "bastion-accord";
+const MERIDIAN_CHARTER: &str = "salvage-charter";
+const VERDANT: &str = "verdant-wake";
+const VERDANT_CULTIVATED: &str = "verdant-cultivated";
+const VERDANT_BLOOM: &str = "bloom-covenant";
+const VERDANT_BRIAR: &str = "briar-covenant";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnitKind {
@@ -434,17 +442,16 @@ impl LastLight {
     }
 
     fn beacon_cost(&self) -> u32 {
-        if self.specialist_module(IVO, IVO_RIGGER) == IVO_SMITH {
-            40
-        } else {
-            BEACON_COST
-        }
+        let smith_discount = u32::from(self.specialist_module(IVO, IVO_RIGGER) == IVO_SMITH) * 10;
+        let charter_discount = u32::from(self.meridian_accord() == Some(MERIDIAN_CHARTER)) * 10;
+        BEACON_COST.saturating_sub(smith_discount + charter_discount)
     }
 
     fn relay_income(&self) -> u32 {
         let lattice_bonus = u32::from(self.specialist_module(OLAN, OLAN_LATTICE) == OLAN_LATTICE);
         let witness_bonus = u32::from(self.lumen_protocol() == Some(LUMEN_WITNESS));
-        3 + lattice_bonus + witness_bonus
+        let charter_bonus = u32::from(self.meridian_accord() == Some(MERIDIAN_CHARTER));
+        3 + lattice_bonus + witness_bonus + charter_bonus
     }
 
     fn lumen_protocol(&self) -> Option<&str> {
@@ -460,6 +467,42 @@ impl LastLight {
             return;
         }
         self.cycle_specialist(LUMEN, LUMEN_GUARDIAN, LUMEN_WITNESS, "LUMEN");
+    }
+
+    fn relationship_module<'a>(
+        &'a self,
+        decision: &str,
+        faction: &str,
+        default: &'a str,
+    ) -> Option<&'a str> {
+        self.save_data
+            .campaign
+            .has_decision(decision)
+            .then(|| self.specialist_module(faction, default))
+    }
+
+    fn meridian_accord(&self) -> Option<&str> {
+        self.relationship_module(MERIDIAN_ALLIED, MERIDIAN, MERIDIAN_BASTION)
+    }
+
+    fn verdant_covenant(&self) -> Option<&str> {
+        self.relationship_module(VERDANT_CULTIVATED, VERDANT, VERDANT_BLOOM)
+    }
+
+    fn cycle_relationship(
+        &mut self,
+        decision: &'static str,
+        faction: &'static str,
+        first: &'static str,
+        second: &'static str,
+        label: &str,
+        locked: &str,
+    ) {
+        if !self.save_data.campaign.has_decision(decision) {
+            self.status = Some((locked.to_owned(), 3.5));
+            return;
+        }
+        self.cycle_specialist(faction, first, second, label);
     }
 
     fn handle_briefing_upgrades(&mut self, ctx: &FrameCtx<'_>) {
@@ -486,6 +529,26 @@ impl LastLight {
         }
         if ctx.input.key_pressed(KeyCode::KeyL) {
             self.cycle_lumen_protocol();
+        }
+        if ctx.input.key_pressed(KeyCode::KeyP) {
+            self.cycle_relationship(
+                MERIDIAN_ALLIED,
+                MERIDIAN,
+                MERIDIAN_BASTION,
+                MERIDIAN_CHARTER,
+                "MERIDIAN",
+                "MERIDIAN ACCORD LOCKED — COMPLETE TERMS OF SALVAGE",
+            );
+        }
+        if ctx.input.key_pressed(KeyCode::KeyG) {
+            self.cycle_relationship(
+                VERDANT_CULTIVATED,
+                VERDANT,
+                VERDANT_BLOOM,
+                VERDANT_BRIAR,
+                "VERDANT",
+                "VERDANT COVENANT LOCKED — COMPLETE THE GARDEN BELOW",
+            );
         }
     }
 
@@ -860,7 +923,8 @@ impl LastLight {
     fn update_specialist_doctrines(&mut self, dt: f32) {
         let rescue_screen = self.specialist_module(MARA, MARA_RESCUE) == MARA_RESCUE;
         let guardian_protocol = self.lumen_protocol() == Some(LUMEN_GUARDIAN);
-        if !rescue_screen && !guardian_protocol {
+        let bloom_covenant = self.verdant_covenant() == Some(VERDANT_BLOOM);
+        if !rescue_screen && !guardian_protocol && !bloom_covenant {
             return;
         }
         let mut sustain_sources = vec![self.fabricator_position];
@@ -875,8 +939,16 @@ impl LastLight {
                 .iter()
                 .any(|source| source.distance(unit.position) <= 300.0)
             {
-                let healing = if rescue_screen { 3.0 } else { 0.0 }
+                let mut healing = if rescue_screen { 3.0 } else { 0.0 }
                     + if guardian_protocol { 4.0 } else { 0.0 };
+                if bloom_covenant
+                    && self
+                        .field_beacons
+                        .iter()
+                        .any(|beacon| beacon.position.distance(unit.position) <= 340.0)
+                {
+                    healing += 5.0;
+                }
                 unit.health = (unit.health + dt.max(0.0) * healing).min(unit.max_health);
             }
         }
@@ -918,9 +990,31 @@ impl LastLight {
                 self.attack_flash.insert(unit.id, 0.08);
             }
         }
+        if self.verdant_covenant() == Some(VERDANT_BRIAR) {
+            for unit in self
+                .world
+                .units()
+                .iter()
+                .filter(|unit| unit.faction == CHOIR && unit.alive())
+            {
+                if self
+                    .field_beacons
+                    .iter()
+                    .any(|beacon| beacon.position.distance(unit.position) <= 220.0)
+                {
+                    damage.push((unit.id, 8.0 * dt.max(0.0)));
+                }
+            }
+        }
+        let bastion_accord = self.meridian_accord() == Some(MERIDIAN_BASTION);
         for (target, amount) in damage {
             if let Some(unit) = self.world.unit_mut(target) {
                 let was_alive = unit.alive();
+                let amount = if unit.faction == PLAYER && bastion_accord {
+                    amount * 0.82
+                } else {
+                    amount
+                };
                 unit.health = (unit.health - amount).max(0.0);
                 self.damage_flash.insert(target, 0.34);
                 if was_alive && !unit.alive() {
@@ -1801,7 +1895,15 @@ impl Game for LastLight {
                     center,
                     Vec2::new(
                         (view.x * 0.78).min(900.0),
-                        if self.briefing { 470.0 } else { 300.0 },
+                        if self.briefing {
+                            if compact_briefing {
+                                520.0
+                            } else {
+                                550.0
+                            }
+                        } else {
+                            300.0
+                        },
                     ),
                 )
                 .with_color(Color::rgba(0.012, 0.025, 0.055, 0.92))
@@ -1860,7 +1962,7 @@ impl Game for LastLight {
                     ),
                     center
                         + if compact_briefing {
-                            Vec2::new(-335.0, -122.0)
+                            Vec2::new(-335.0, -112.0)
                         } else {
                             Vec2::new(-410.0, -122.0)
                         },
@@ -1875,7 +1977,7 @@ impl Game for LastLight {
                         self.specialist_module(IVO, IVO_RIGGER).to_uppercase(),
                         self.specialist_module(SENA, SENA_DEEP_SCAN).to_uppercase()
                     ),
-                    center + Vec2::new(-245.0, -154.0),
+                    center + Vec2::new(-245.0, if compact_briefing { -140.0 } else { -154.0 }),
                     1.8,
                     Color::rgba(0.82, 0.68, 0.36, 0.98),
                     11.0,
@@ -1887,7 +1989,7 @@ impl Game for LastLight {
                         self.specialist_module(MARA, MARA_RESCUE).to_uppercase(),
                         self.specialist_module(OLAN, OLAN_LATTICE).to_uppercase()
                     ),
-                    center + Vec2::new(-265.0, -184.0),
+                    center + Vec2::new(-265.0, if compact_briefing { -168.0 } else { -184.0 }),
                     1.8,
                     Color::rgba(0.7, 0.62, 0.9, 0.98),
                     11.0,
@@ -1899,9 +2001,33 @@ impl Game for LastLight {
                 self.draw_text(
                     ctx.renderer,
                     &format!("L LUMEN {lumen_protocol}"),
-                    center + Vec2::new(-245.0, -214.0),
+                    center + Vec2::new(-245.0, if compact_briefing { -196.0 } else { -214.0 }),
                     1.8,
                     Color::rgba(0.38, 0.9, 1.0, 0.98),
+                    11.0,
+                );
+                let meridian_accord = self
+                    .meridian_accord()
+                    .map(str::to_uppercase)
+                    .unwrap_or_else(|| "LOCKED — TERMS OF SALVAGE".to_owned());
+                self.draw_text(
+                    ctx.renderer,
+                    &format!("P MERIDIAN {meridian_accord}"),
+                    center + Vec2::new(-245.0, if compact_briefing { -224.0 } else { -244.0 }),
+                    1.65,
+                    Color::rgba(0.9, 0.82, 0.72, 0.98),
+                    11.0,
+                );
+                let verdant_covenant = self
+                    .verdant_covenant()
+                    .map(str::to_uppercase)
+                    .unwrap_or_else(|| "LOCKED — GARDEN BELOW".to_owned());
+                self.draw_text(
+                    ctx.renderer,
+                    &format!("G VERDANT {verdant_covenant}"),
+                    center + Vec2::new(-245.0, if compact_briefing { -252.0 } else { -274.0 }),
+                    1.65,
+                    Color::rgba(0.48, 1.15, 0.5, 0.98),
                     11.0,
                 );
             }
@@ -1911,4 +2037,45 @@ impl Game for LastLight {
 
 fn main() {
     run(LastLight::new());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alliance_modules_require_their_campaign_decisions() {
+        let mut game = LastLight::new();
+        assert_eq!(game.meridian_accord(), None);
+        assert_eq!(game.verdant_covenant(), None);
+
+        game.save_data.campaign.record_decision(MERIDIAN_ALLIED);
+        game.save_data.campaign.record_decision(VERDANT_CULTIVATED);
+        assert_eq!(game.meridian_accord(), Some(MERIDIAN_BASTION));
+        assert_eq!(game.verdant_covenant(), Some(VERDANT_BLOOM));
+
+        game.save_data
+            .campaign
+            .equip_specialist(MERIDIAN, MERIDIAN_CHARTER);
+        game.save_data
+            .campaign
+            .equip_specialist(VERDANT, VERDANT_BRIAR);
+        assert_eq!(game.meridian_accord(), Some(MERIDIAN_CHARTER));
+        assert_eq!(game.verdant_covenant(), Some(VERDANT_BRIAR));
+    }
+
+    #[test]
+    fn salvage_charter_stacks_with_existing_economy_loadouts() {
+        let mut game = LastLight::new();
+        assert_eq!(game.beacon_cost(), 50);
+        assert_eq!(game.relay_income(), 4);
+
+        game.save_data.campaign.record_decision(MERIDIAN_ALLIED);
+        game.save_data
+            .campaign
+            .equip_specialist(MERIDIAN, MERIDIAN_CHARTER);
+        game.save_data.campaign.equip_specialist(IVO, IVO_SMITH);
+        assert_eq!(game.beacon_cost(), 30);
+        assert_eq!(game.relay_income(), 5);
+    }
 }

@@ -102,7 +102,7 @@ systems it uses can be adopted by a second 2D game without copying demo code.
 - [x] Persistent Ivo and Sena specialist loadouts with mission effects
 - [x] Persistent Olan analysis and Mara command doctrines
 - [x] Lumen-contact-gated Guardian and Witness ability choices
-- [ ] Meridian and Verdant alliance-specific late-campaign abilities
+- [x] Meridian and Verdant alliance-specific late-campaign abilities
 
 **Exit criteria:** select and command a Lantern squad, reveal the sector, restore
 three relays, defeat a Choir command unit, and complete the mission on native

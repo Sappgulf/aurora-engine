@@ -64,6 +64,30 @@ At gameplay size, identify faction first, class second, current action third.
 - **Assembler** — enemy builder that grows signal towers.
 - **Sentinel** — boss-scale concentric machine with breakable outer vanes.
 
+### Meridian Compact
+
+- **Aegis Wedge** — sealed ivory shield carrier with a regulatory-red prow;
+  visual source for the Bastion Accord's damage-mitigation field.
+- **Charter Rig** — standardized navy fabrication crawler with numbered ivory
+  hardpoints; communicates cheaper, higher-yield allied infrastructure.
+- **Horizon Battery** — long ivory chassis with a red rangefinder slit and
+  folding stabilizers; never reuse the Choir's radial symmetry.
+
+### Verdant Wake
+
+- **Bloom Heart** — black-green rooted shell with turquoise capillaries and a
+  soft lime spore halo; healing effect remains a separate additive layer.
+- **Briar Node** — asymmetric thorn cluster with lime warning pulses and a
+  220-unit hazard ring; the core silhouette remains readable without bloom.
+- **Wake Tender** — low mobile organism with three uneven fronds, used to show
+  that Verdant growth can be cultivated rather than merely destroyed.
+
+Meridian alliance sheets use four columns: idle, deploy, active field, recover.
+Verdant alliance sheets use four columns: dormant, unfurl, peak emission,
+settle. Both follow the same transparent 256×256 runtime-cell contract as unit
+reactions, but live in faction-specific atlases to avoid coupling their palette
+and animation cadence to Lantern or Choir rows.
+
 ## Required animation clips
 
 | Class | Clips | Frames | Playback |

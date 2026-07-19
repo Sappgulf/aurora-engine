@@ -34,7 +34,8 @@ Reactive Plating, and Fabricator Overclock upgrades with campaign Lumen. `V`
 cycles Ivo's field module and `N` cycles Sena's sensor module; both loadouts save
 immediately. `M` cycles Mara's command doctrine and `O` cycles Olan's analysis
 package. After establishing contact with Lumen, `L` cycles the relationship-gated
-Guardian and Witness protocols.
+Guardian and Witness protocols. Later campaign decisions unlock `P` for Meridian
+Bastion/Charter accords and `G` for Verdant Bloom/Briar covenants.
 
 Select the Engineer and command it near each of the three power relays. Active
 relays generate salvage for the Lantern fabricator; build reinforcements, hold
@@ -80,6 +81,7 @@ cargo run -p triangle_demo   # M0 NDC triangle
 | Full-roster hit reactions and persistent shutdown wrecks | ✅ |
 | Four persistent named-specialist doctrine/loadout pairs | ✅ |
 | Relationship-gated Lumen Guardian/Witness protocols | ✅ |
+| Meridian and Verdant alliance doctrine foundations | ✅ |
 | Versioned campaign progress with v1 save migration | ✅ |
 | Last Light point-and-click campaign mission | ✅ vertical slice |
 
