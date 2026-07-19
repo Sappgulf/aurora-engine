@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "aurora-engine": {
+      "command": "python3",
+      "args": ["mcp/aurora_mcp.py"],
+      "cwd": "/absolute/path/to/aurora-engine"
+    }
+  }
+}

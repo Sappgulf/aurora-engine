@@ -90,6 +90,15 @@ cargo install trunk
 cd examples/aurora_run && trunk serve
 ```
 
+## MCP support for coding agents
+
+Aurora includes a local, repository-scoped MCP server for model-assisted engine
+work. It provides a systems map, bounded source slices, the Aurora Run playtest
+contract, and explicitly selected Cargo validation lanes—never arbitrary shell
+commands or arbitrary filesystem reads. See [mcp/README.md](mcp/README.md) for
+installation, client configuration, security boundaries, and the stdio protocol
+smoke test.
+
 ## License
 
 MIT OR Apache-2.0 · Repo: https://github.com/Sappgulf/aurora-engine

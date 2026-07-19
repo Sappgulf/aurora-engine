@@ -2,8 +2,8 @@
 
 use aurora_engine::{
     run, Aabb, Action, Animation, BitmapText, Color, FrameCtx, Game, GameFlow, MenuCommand,
-    MenuInput, MenuScreen, MenuState, ParticleSystem, PointLight, Renderer, RngLite, Sprite,
-    Texture, TextureAtlas, TextureHandle, XorShift32,
+    MenuInput, MenuScreen, MenuState, ParticleSystem, PointLight, Renderer, RngLite, SaveData,
+    SaveStore, Sprite, Texture, TextureAtlas, TextureHandle, XorShift32,
 };
 use glam::Vec2;
 use winit::keyboard::KeyCode;
@@ -14,6 +14,17 @@ const PLAYER_ACCEL_RESPONSE: f32 = 13.0;
 const PLAYER_BRAKE_RESPONSE: f32 = 8.5;
 const PLAYER_SIZE: f32 = 40.0;
 const COMBAT_ATLAS_SIZE: Vec2 = Vec2::new(1774.0, 887.0);
+
+/// Painted-in set dressing that gives the otherwise procedural arena a few
+/// intentional landmarks. It is deliberately data-only: gameplay collision
+/// remains in the simple world bounds, while the presentation can evolve
+/// without changing the run's movement contract.
+struct ArenaProp {
+    pos: Vec2,
+    size: Vec2,
+    accent: Color,
+    rotation: f32,
+}
 
 struct Collectible {
     pos: Vec2,
@@ -42,6 +53,7 @@ struct AuroraRun {
     tex_crystal: TextureHandle,
     tex_hazard: TextureHandle,
     tex_floor: TextureHandle,
+    tex_decal: TextureHandle,
     tex_ui: TextureHandle,
     player_atlas: TextureAtlas,
     drone_atlas: TextureAtlas,
@@ -67,6 +79,10 @@ struct AuroraRun {
     dash_charges: u32,
     facing: Vec2,
     menu: MenuState,
+    arena_props: Vec<ArenaProp>,
+    save: SaveData,
+    save_store: SaveStore,
+    run_recorded: bool,
 }
 
 impl AuroraRun {
@@ -77,6 +93,7 @@ impl AuroraRun {
             tex_crystal: TextureHandle::default(),
             tex_hazard: TextureHandle::default(),
             tex_floor: TextureHandle::default(),
+            tex_decal: TextureHandle::default(),
             tex_ui: TextureHandle::default(),
             player_atlas: TextureAtlas::new(TextureHandle::default(), 4, 2, COMBAT_ATLAS_SIZE),
             drone_atlas: TextureAtlas::new(TextureHandle::default(), 4, 2, COMBAT_ATLAS_SIZE),
@@ -102,6 +119,35 @@ impl AuroraRun {
             dash_charges: 2,
             facing: Vec2::Y,
             menu: MenuState::new(),
+            save: SaveData::default(),
+            save_store: SaveStore::new("aurora-run"),
+            run_recorded: false,
+            arena_props: vec![
+                ArenaProp {
+                    pos: Vec2::new(-438.0, 208.0),
+                    size: Vec2::new(174.0, 66.0),
+                    accent: Color::rgba(0.12, 0.95, 1.3, 0.9),
+                    rotation: -0.08,
+                },
+                ArenaProp {
+                    pos: Vec2::new(438.0, -208.0),
+                    size: Vec2::new(174.0, 66.0),
+                    accent: Color::rgba(1.1, 0.24, 0.62, 0.9),
+                    rotation: -0.08,
+                },
+                ArenaProp {
+                    pos: Vec2::new(-472.0, -136.0),
+                    size: Vec2::new(76.0, 150.0),
+                    accent: Color::rgba(0.3, 0.55, 1.4, 0.85),
+                    rotation: 0.04,
+                },
+                ArenaProp {
+                    pos: Vec2::new(472.0, 136.0),
+                    size: Vec2::new(76.0, 150.0),
+                    accent: Color::rgba(0.95, 0.28, 0.9, 0.85),
+                    rotation: 0.04,
+                },
+            ],
         }
     }
 
@@ -153,6 +199,7 @@ impl AuroraRun {
         self.dash_cooldown = 0.0;
         self.dash_charges = 2;
         self.facing = Vec2::Y;
+        self.run_recorded = false;
         self.particles = ParticleSystem::new(1500);
         self.begin_wave();
         if audio_start {
@@ -182,11 +229,17 @@ impl AuroraRun {
         match command {
             MenuCommand::StartRun | MenuCommand::RestartRun => self.reset(true, ctx.audio),
             MenuCommand::Resume => self.shake = 0.05,
-            MenuCommand::TogglePostFx => ctx.renderer.post_fx.enabled = self.menu.post_fx,
+            MenuCommand::TogglePostFx => {
+                self.save.settings.post_fx_enabled = self.menu.post_fx;
+                ctx.renderer.post_fx.enabled = self.menu.post_fx;
+                self.persist_save();
+            }
             MenuCommand::ToggleReducedMotion => {
+                self.save.settings.reduced_motion = self.menu.reduced_motion;
                 if self.menu.reduced_motion {
                     self.shake = 0.0;
                 }
+                self.persist_save();
             }
             MenuCommand::EndRun | MenuCommand::ReturnToMain => {
                 self.game_over = false;
@@ -195,6 +248,24 @@ impl AuroraRun {
             }
             MenuCommand::None | MenuCommand::Open(_) => {}
         }
+    }
+
+    fn persist_save(&self) {
+        if let Err(error) = self.save_store.save(&self.save) {
+            log::warn!("could not save Aurora Run progress: {error}");
+        }
+    }
+
+    fn complete_run(&mut self) {
+        if self.run_recorded {
+            return;
+        }
+        self.run_recorded = true;
+        let new_best = self.save.record_run(self.score.into());
+        if new_best {
+            log::info!("Aurora Run new high score: {}", self.score);
+        }
+        self.persist_save();
     }
 
     fn draw_text(
@@ -216,19 +287,117 @@ impl AuroraRun {
         }
     }
 
+    fn draw_arena_architecture(&self, ctx: &mut FrameCtx<'_>, t: f32) {
+        // Four inset floor seams make the play space read as a constructed
+        // arena rather than an infinite texture. The little corner lights also
+        // give players stable spatial references when the camera is moving.
+        let half = WORLD * 0.5;
+        let seam_color = Color::rgba(0.12, 0.62, 0.9, 0.34);
+        for (pos, size) in [
+            (
+                Vec2::new(0.0, half.y - 34.0),
+                Vec2::new(WORLD.x - 108.0, 3.0),
+            ),
+            (
+                Vec2::new(0.0, -half.y + 34.0),
+                Vec2::new(WORLD.x - 108.0, 3.0),
+            ),
+            (
+                Vec2::new(half.x - 34.0, 0.0),
+                Vec2::new(3.0, WORLD.y - 108.0),
+            ),
+            (
+                Vec2::new(-half.x + 34.0, 0.0),
+                Vec2::new(3.0, WORLD.y - 108.0),
+            ),
+        ] {
+            ctx.renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(pos, size).with_color(seam_color).with_z(-3.8),
+            );
+        }
+
+        for prop in &self.arena_props {
+            // Deep shadow, armored panel, then a circuit face. The rotated
+            // panel breaks up the old grid-only arena with deliberately shaped
+            // scenery while still leaving the combat lanes clear.
+            ctx.renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(
+                    prop.pos + Vec2::new(8.0, -8.0),
+                    prop.size + Vec2::splat(14.0),
+                )
+                .with_rotation(prop.rotation)
+                .with_color(Color::rgba(0.0, 0.01, 0.045, 0.82))
+                .with_z(-3.7),
+            );
+            ctx.renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(prop.pos, prop.size)
+                    .with_rotation(prop.rotation)
+                    .with_color(Color::rgba(0.035, 0.11, 0.22, 0.96))
+                    .with_z(-3.65),
+            );
+            ctx.renderer.draw_sprite(
+                self.tex_decal,
+                Sprite::new(prop.pos, prop.size * 0.88)
+                    .with_rotation(prop.rotation)
+                    .with_color(prop.accent)
+                    .with_z(-3.6),
+            );
+            let pulse = 0.58 + 0.25 * (t * 2.2 + prop.pos.x * 0.01).sin();
+            ctx.renderer.draw_light(PointLight::new(
+                prop.pos,
+                prop.accent,
+                prop.size.length() * 0.58,
+                pulse * 0.18,
+            ));
+        }
+
+        for corner in [
+            Vec2::new(-half.x + 54.0, -half.y + 54.0),
+            Vec2::new(half.x - 54.0, -half.y + 54.0),
+            Vec2::new(-half.x + 54.0, half.y - 54.0),
+            Vec2::new(half.x - 54.0, half.y - 54.0),
+        ] {
+            let pulse = 0.5 + 0.22 * (t * 3.0 + corner.x * 0.007).sin();
+            ctx.renderer.draw_sprite(
+                self.tex_crystal,
+                Sprite::new(corner, Vec2::splat(24.0 + pulse * 8.0))
+                    .with_rotation(t * 0.35)
+                    .with_color(Color::rgba(0.18, 1.25, 1.18, 0.76))
+                    .with_z(-3.45),
+            );
+            ctx.renderer.draw_light(PointLight::new(
+                corner,
+                Color::rgb(0.1, 0.9, 1.2),
+                64.0,
+                0.16 + pulse * 0.08,
+            ));
+        }
+    }
+
     fn draw_menu(&self, ctx: &mut FrameCtx<'_>, screen: MenuScreen, t: f32) {
         let camera = ctx.renderer.camera.position;
+        let view = ctx.renderer.camera.visible_world_size();
+        let panel_size = Vec2::new(
+            (view.x * 0.82).clamp(520.0, 840.0),
+            (view.y * 0.84).clamp(390.0, 560.0),
+        );
         ctx.renderer.draw_sprite(
             self.tex_ui,
-            Sprite::new(camera, Vec2::new(840.0, 560.0))
+            Sprite::new(camera, panel_size)
                 .with_color(Color::rgba(0.01, 0.025, 0.08, 0.84))
                 .with_z(10.0),
         );
         ctx.renderer.draw_sprite(
             self.tex_ui,
-            Sprite::new(camera + Vec2::new(0.0, 224.0), Vec2::new(720.0, 4.0))
-                .with_color(Color::rgba(0.1, 1.4, 1.15, 0.7))
-                .with_z(10.1),
+            Sprite::new(
+                camera + Vec2::new(0.0, panel_size.y * 0.4),
+                Vec2::new(panel_size.x * 0.86, 4.0),
+            )
+            .with_color(Color::rgba(0.1, 1.4, 1.15, 0.7))
+            .with_z(10.1),
         );
         let title = match screen {
             MenuScreen::Main => "AURORA RUN",
@@ -323,7 +492,7 @@ impl Game for AuroraRun {
     }
 
     fn on_start(&mut self, renderer: &mut Renderer) {
-        let (player_tex, orb, crystal, floor, ui) = {
+        let (player_tex, orb, crystal, floor, decal, ui) = {
             let gpu = renderer.gpu();
             (
                 Texture::from_bytes(
@@ -335,6 +504,7 @@ impl Game for AuroraRun {
                 Texture::soft_circle(&gpu, 48, Color::rgb(0.95, 0.85, 0.3)),
                 Texture::crystal(&gpu, 64, Color::rgb(1.0, 0.72, 0.16)),
                 Texture::arena_floor(&gpu, 512),
+                circuit_decal(&gpu),
                 Texture::solid(&gpu, Color::WHITE),
             )
         };
@@ -343,11 +513,19 @@ impl Game for AuroraRun {
         self.tex_crystal = renderer.add_texture(crystal);
         self.tex_hazard = self.tex_player;
         self.tex_floor = renderer.add_texture(floor);
+        self.tex_decal = renderer.add_texture(decal);
         self.tex_ui = renderer.add_texture(ui);
         self.player_atlas = TextureAtlas::new(self.tex_player, 4, 2, COMBAT_ATLAS_SIZE);
         self.drone_atlas = TextureAtlas::new(self.tex_player, 4, 2, COMBAT_ATLAS_SIZE);
 
-        renderer.post_fx.enabled = true;
+        match self.save_store.load() {
+            Ok(Some(save)) => self.save = save,
+            Ok(None) => {}
+            Err(error) => log::warn!("could not load Aurora Run progress: {error}"),
+        }
+        self.menu.post_fx = self.save.settings.post_fx_enabled;
+        self.menu.reduced_motion = self.save.settings.reduced_motion;
+        renderer.post_fx.enabled = self.save.settings.post_fx_enabled;
         renderer.post_fx.bloom_intensity = 1.0;
         renderer.post_fx.vignette = 0.6;
         renderer.post_fx.chromatic = 0.003;
@@ -526,6 +704,7 @@ impl Game for AuroraRun {
             );
             if self.wave > 6 {
                 self.win = true;
+                self.complete_run();
                 self.menu.open(MenuScreen::Results);
             } else {
                 self.begin_wave();
@@ -556,6 +735,7 @@ impl Game for AuroraRun {
                     );
                     if self.lives <= 0 {
                         self.game_over = true;
+                        self.complete_run();
                         self.menu.open(MenuScreen::Results);
                     }
                     break;
@@ -638,6 +818,7 @@ impl Game for AuroraRun {
             self.tex_floor,
             Sprite::new(arena_center, arena_size).with_z(-5.0),
         );
+        self.draw_arena_architecture(ctx, t);
 
         // Soft emissive pools make the player and hazards read as lights while
         // leaving the silhouette and collision geometry crisp.
@@ -754,6 +935,52 @@ impl Game for AuroraRun {
             };
             drone.z = 0.2;
             ctx.renderer.draw_sprite(self.tex_hazard, drone);
+
+            // The old hazard glow was intentionally abstract; these sharp
+            // accents give each behavior a silhouette that can be read while
+            // moving quickly. They are visual-only, so collision stays tied
+            // to the same reliable AABB used by the engine demo.
+            let accent = match h.pattern {
+                HazardPattern::Bounce => Color::rgba(1.7, 0.46, 0.32, 0.9),
+                HazardPattern::Orbit => Color::rgba(1.18, 0.42, 1.5, 0.9),
+                HazardPattern::Hunter => Color::rgba(2.0, 0.16, 0.25, 0.96),
+            };
+            match h.pattern {
+                HazardPattern::Bounce => {
+                    for rotation in [0.0, std::f32::consts::FRAC_PI_2] {
+                        ctx.renderer.draw_sprite(
+                            self.tex_ui,
+                            Sprite::new(h.pos, Vec2::new(h.size * 3.1, h.size * 0.36))
+                                .with_rotation(rotation + t * 1.4)
+                                .with_color(accent)
+                                .with_z(0.27),
+                        );
+                    }
+                }
+                HazardPattern::Orbit => {
+                    for rotation in [0.0, std::f32::consts::FRAC_PI_2] {
+                        ctx.renderer.draw_sprite(
+                            self.tex_ui,
+                            Sprite::new(h.pos, Vec2::new(h.size * 3.35, h.size * 0.24))
+                                .with_rotation(rotation + h.phase * 0.8)
+                                .with_color(accent)
+                                .with_z(0.27),
+                        );
+                    }
+                }
+                HazardPattern::Hunter => {
+                    ctx.renderer.draw_sprite(
+                        self.tex_crystal,
+                        Sprite::new(
+                            h.pos + heading * h.size * 0.75,
+                            Vec2::new(h.size * 2.1, h.size * 1.15),
+                        )
+                        .with_rotation(heading_rotation - std::f32::consts::FRAC_PI_2)
+                        .with_color(accent)
+                        .with_z(0.28),
+                    );
+                }
+            }
         }
 
         // Particles
@@ -895,4 +1122,30 @@ impl Game for AuroraRun {
 
 fn main() {
     run(AuroraRun::new());
+}
+
+/// A transparent hard-surface decal used by the sample's arena props. Keeping
+/// this local demonstrates that a game can supply authored procedural art via
+/// the public texture API without adding a special renderer path.
+fn circuit_decal(gpu: &aurora_engine::GpuContext<'_>) -> Texture {
+    const SIZE: u32 = 96;
+    let mut rgba = vec![0_u8; (SIZE * SIZE * 4) as usize];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let edge = x < 3 || y < 3 || x >= SIZE - 3 || y >= SIZE - 3;
+            let spine = (x as i32 - y as i32).abs() < 2 || (x + y > 91 && x + y < 96);
+            let node = ((x as i32 - 22).pow(2) + (y as i32 - 24).pow(2) < 34)
+                || ((x as i32 - 74).pow(2) + (y as i32 - 70).pow(2) < 34)
+                || ((x as i32 - 48).pow(2) + (y as i32 - 48).pow(2) < 24);
+            if !(edge || spine || node) {
+                continue;
+            }
+            let i = ((y * SIZE + x) * 4) as usize;
+            rgba[i] = 132;
+            rgba[i + 1] = 224;
+            rgba[i + 2] = 255;
+            rgba[i + 3] = if node { 238 } else { 156 };
+        }
+    }
+    Texture::from_rgba(gpu, SIZE, SIZE, &rgba, "aurora circuit decal")
 }

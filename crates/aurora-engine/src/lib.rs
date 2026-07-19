@@ -48,7 +48,9 @@ pub use particles::{ParticleSystem, RngLite, XorShift32};
 pub use post::PostFxSettings;
 pub use renderer::{GpuContext, PointLight, RenderQuality, Renderer};
 pub use renderer::{RenderStats, TextureHandle};
-pub use save::{GameSettings, SaveData, SAVE_FORMAT_VERSION};
+pub use save::{
+    GameSettings, SaveData, SaveError, SaveStore, DEFAULT_SAVE_SLOT, SAVE_FORMAT_VERSION,
+};
 pub use scene::{EntityId, Scene};
 pub use sprite::{QueuedSprite, Sprite, SpriteBatch};
 pub use texture::Texture;

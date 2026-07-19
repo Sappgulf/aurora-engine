@@ -1,0 +1,2 @@
+# Official Python SDK for the Model Context Protocol server in aurora_mcp.py.
+mcp>=1.12,<2

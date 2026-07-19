@@ -263,8 +263,11 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
 
                 self.time.tick();
 
-                // Fixed steps then variable frame update.
-                loop {
+                // Fixed steps then variable frame update. A bounded catch-up
+                // policy preserves responsive input/rendering after a hitch.
+                const MAX_FIXED_STEPS_PER_FRAME: usize = 5;
+                let mut fixed_steps = 0;
+                while fixed_steps < MAX_FIXED_STEPS_PER_FRAME {
                     if !self.time.step_fixed() {
                         break;
                     }
@@ -275,6 +278,10 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                         audio: &mut self.audio,
                     };
                     game.on_fixed_update(&mut ctx);
+                    fixed_steps += 1;
+                }
+                if fixed_steps == MAX_FIXED_STEPS_PER_FRAME {
+                    self.time.discard_fixed_backlog();
                 }
 
                 {
