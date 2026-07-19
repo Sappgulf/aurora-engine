@@ -126,7 +126,7 @@ impl Texture {
         let mut data = vec![0u8; (size * size * 4) as usize];
         for y in 0..size {
             for x in 0..size {
-                let on = ((x / cell) + (y / cell)) % 2 == 0;
+                let on = ((x / cell) + (y / cell)) & 1 == 0;
                 let c = if on { a } else { b };
                 let i = ((y * size + x) * 4) as usize;
                 data[i] = (c.r * 255.0) as u8;
@@ -155,13 +155,22 @@ impl Texture {
     }
 
     /// Horizontal strip of soft orbs with slight size variation (4 frames) for animation.
-    pub fn orb_atlas_strip(gpu: &GpuContext<'_>, frame_size: u32, frames: u32, color: Color) -> Self {
+    pub fn orb_atlas_strip(
+        gpu: &GpuContext<'_>,
+        frame_size: u32,
+        frames: u32,
+        color: Color,
+    ) -> Self {
         let frames = frames.max(1);
         let w = frame_size * frames;
         let h = frame_size;
         let mut data = vec![0u8; (w * h * 4) as usize];
         for f in 0..frames {
-            let scale = 0.75 + 0.25 * ((f as f32 / frames as f32) * std::f32::consts::TAU).sin().abs();
+            let scale = 0.75
+                + 0.25
+                    * ((f as f32 / frames as f32) * std::f32::consts::TAU)
+                        .sin()
+                        .abs();
             let cxy = (frame_size as f32 - 1.0) * 0.5;
             let r = frame_size as f32 * 0.5 * scale;
             for y in 0..frame_size {

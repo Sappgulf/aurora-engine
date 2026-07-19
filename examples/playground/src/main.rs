@@ -37,7 +37,7 @@ impl Playground {
             player: Vec2::ZERO,
             orbs: Vec::new(),
             particles: ParticleSystem::new(2048),
-            rng: XorShift32::new(0xA40_A_u32),
+            rng: XorShift32::new(0xA40A_u32),
             burst_cooldown: 0.0,
         }
     }
@@ -123,7 +123,11 @@ impl Game for Playground {
 
         // Zoom
         if ctx.input.scroll.abs() > 0.0 {
-            let factor = if ctx.input.scroll > 0.0 { 1.12 } else { 1.0 / 1.12 };
+            let factor = if ctx.input.scroll > 0.0 {
+                1.12
+            } else {
+                1.0 / 1.12
+            };
             let screen = ctx.input.mouse_position;
             ctx.renderer.camera.zoom_at(factor, screen);
         }
@@ -139,7 +143,9 @@ impl Game for Playground {
             && self.burst_cooldown <= 0.0
         {
             let world = if ctx.input.mouse_pressed(MouseButton::Left) {
-                ctx.renderer.camera.screen_to_world(ctx.input.mouse_position)
+                ctx.renderer
+                    .camera
+                    .screen_to_world(ctx.input.mouse_position)
             } else {
                 self.player
             };
@@ -152,8 +158,7 @@ impl Game for Playground {
         // Trail while moving
         if ctx.input.axis_wasd().length_squared() > 0.0 {
             let c = Color::rgba(0.2, 0.95, 0.8, 0.85);
-            self.particles
-                .emit_trail(self.player, c, &mut self.rng);
+            self.particles.emit_trail(self.player, c, &mut self.rng);
         }
 
         if ctx.input.key_pressed(KeyCode::KeyT) {

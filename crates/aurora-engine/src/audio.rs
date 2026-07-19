@@ -30,8 +30,11 @@ impl Audio {
         if !self.enabled {
             return;
         }
-        self.inner
-            .beep(frequency_hz.max(20.0), duration_secs.max(0.01), volume.clamp(0.0, 1.0));
+        self.inner.beep(
+            frequency_hz.max(20.0),
+            duration_secs.max(0.01),
+            volume.clamp(0.0, 1.0),
+        );
     }
 
     pub fn collect(&self) {
@@ -108,8 +111,6 @@ mod native {
 
 #[cfg(target_arch = "wasm32")]
 mod web {
-    use wasm_bindgen::JsCast;
-
     pub struct WebAudio;
 
     impl Default for WebAudio {

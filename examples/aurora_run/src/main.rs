@@ -291,12 +291,8 @@ impl Game for AuroraRun {
         } else {
             Vec2::ZERO
         };
-        ctx.renderer.camera.position = ctx
-            .renderer
-            .camera
-            .position
-            .lerp(self.player, 0.14)
-            + shake_off;
+        ctx.renderer.camera.position =
+            ctx.renderer.camera.position.lerp(self.player, 0.14) + shake_off;
 
         // Recover chromatic
         let target_ca = 0.003;
@@ -386,9 +382,8 @@ impl Game for AuroraRun {
         ctx.renderer.draw_sprite(self.tex_player, spr);
 
         // HUD-ish world markers for score/lives (simple dots)
-        for i in 0..self.lives.max(0) as i32 {
-            let p = ctx.renderer.camera.position
-                + Vec2::new(-360.0 + i as f32 * 28.0, 240.0);
+        for i in 0..self.lives.max(0) {
+            let p = ctx.renderer.camera.position + Vec2::new(-360.0 + i as f32 * 28.0, 240.0);
             ctx.renderer.draw_sprite(
                 self.tex_player,
                 Sprite::new(p, Vec2::splat(18.0))
@@ -398,7 +393,10 @@ impl Game for AuroraRun {
         }
         for i in 0..self.score.min(20) {
             let p = ctx.renderer.camera.position
-                + Vec2::new(300.0 - (i % 10) as f32 * 16.0, 240.0 - (i / 10) as f32 * 16.0);
+                + Vec2::new(
+                    300.0 - (i % 10) as f32 * 16.0,
+                    240.0 - (i / 10) as f32 * 16.0,
+                );
             ctx.renderer.draw_sprite(
                 self.tex_orb,
                 Sprite::new(p, Vec2::splat(12.0))

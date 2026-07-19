@@ -8,7 +8,9 @@ use winit::window::Window;
 use crate::camera::Camera2D;
 use crate::color::Color;
 use crate::post::{PostFxSettings, PostPipeline, PostUniforms};
-use crate::sprite::{camera_uniform, CameraUniform, QueuedSprite, Sprite, SpriteBatch, SpriteVertex};
+use crate::sprite::{
+    camera_uniform, CameraUniform, QueuedSprite, Sprite, SpriteBatch, SpriteVertex,
+};
 use crate::texture::Texture;
 
 /// Shared GPU objects games use to create textures.
@@ -88,8 +90,7 @@ impl Renderer {
                     label: Some("Aurora Device"),
                     required_features: wgpu::Features::empty(),
                     required_limits: if cfg!(target_arch = "wasm32") {
-                        wgpu::Limits::downlevel_webgl2_defaults()
-                            .using_resolution(adapter.limits())
+                        wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits())
                     } else {
                         wgpu::Limits::default()
                     },

@@ -40,6 +40,7 @@ impl ParticleSystem {
         self.particles.is_empty()
     }
 
+    #[allow(clippy::too_many_arguments)] // Keeps call sites readable for one-shot particle effects.
     pub fn emit_burst(
         &mut self,
         origin: Vec2,
