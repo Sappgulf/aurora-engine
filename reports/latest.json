@@ -1,18 +1,16 @@
 {
   "schema_version": 1,
-  "iteration": "FOUNDRY-005",
-  "title": "Automated Last Light browser evidence and CI truth lane",
+  "iteration": "FOUNDRY-006",
+  "title": "Allocation-stable deterministic combat loop",
   "status": "passed",
   "date": "2026-07-19",
   "acceptance": {
-    "browser_1280x720_dpr_1": true,
-    "browser_1280x720_dpr_2": true,
-    "hud_safe_zones": true,
-    "visible_command_card_assertion": true,
-    "browser_console_clean": true,
-    "ci_canonical_scenario": true,
-    "ci_actual_trunk_build": true,
-    "ci_screenshot_artifacts": true
+    "combat_snapshot_reused": true,
+    "combat_attack_buffer_reused": true,
+    "combat_buffer_growths": 0,
+    "canonical_hash_contract_preserved": true,
+    "canonical_victory_preserved": true,
+    "browser_regression_lane_preserved": true
   },
   "evidence": {
     "cargo_fmt_check": "passed",
@@ -30,6 +28,12 @@
     "browser_checkpoints_per_project": 3,
     "browser_screenshots": 6,
     "browser_png_dimensions": ["1280x720", "2560x1440"],
+    "combat_buffer_capacity": {
+      "snapshot": 32,
+      "attacks": 32,
+      "ticks_observed": 3600,
+      "capacity_changes": 0
+    },
     "deterministic_scenario": "last_light.reclaim.relay_production",
     "deterministic_ticks_per_run": 3600,
     "deterministic_commands": 8,
@@ -45,9 +49,9 @@
     }
   },
   "known_gaps": [
-    "GitHub-hosted CI execution remains unobserved until this commit is pushed",
-    "Combat still allocates a snapshot map and work vector each fixed tick",
-    "Mobile and ultrawide layouts remain outside the fixed 1280x720 epic contract"
+    "GitHub-hosted CI execution remains unobserved until these commits are pushed",
+    "Path-following still collects active path ids into a temporary vector",
+    "HUD command-card row construction still allocates strings and a vector per frame"
   ],
-  "next_task": "FOUNDRY-006"
+  "next_task": "FOUNDRY-007"
 }

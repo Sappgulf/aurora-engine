@@ -47,3 +47,10 @@
 - HUD geometry is an explicit game-owned contract: objective, pause, minimap, and command-card regions cannot overlap one another or the protected central playfield.
 - PNG pixel inspection verifies that the production command card is actually visible, preventing a pause overlay or blank renderer from satisfying geometry alone.
 - Playwright 1.61.1 and pngjs 7.0.0 install with zero audited vulnerabilities; generated screenshots and test traces remain ignored evidence, not source assets.
+
+## 2026-07-19 — FOUNDRY-006
+
+- The combat roster is bounded enough that a 32-entry linear snapshot is simpler and faster than rebuilding a `HashMap` every fixed tick.
+- Simulation-owned snapshot and attack vectors preserve capacity across the full 3600-tick Reclaim victory trace, including one produced Warden and two Canticle reinforcements.
+- The existing command order, damage order, event order, final victory, and matching state hashes remained unchanged after removing the temporary collections.
+- Preallocating the pending presentation-event queue also removes its first-combat growth without changing the existing 256-event bound.

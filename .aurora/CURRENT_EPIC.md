@@ -36,8 +36,12 @@ pause, and production at 1280×720 under DPR 1 and 2 with safe-zone, backing
 store, visible-HUD, and console assertions. CI runs the canonical scenario,
 actual Trunk build, browser lane, and uploads screenshot evidence.
 
+`FOUNDRY-006`: Combat snapshot and attack work now reuse simulation-owned
+32-entry buffers. The canonical 3600-tick victory trace asserts both buffer
+capacities remain unchanged while preserving matching final hashes.
+
 ## Next iteration
 
-`FOUNDRY-006`: Remove the combat loop's per-tick snapshot/work allocations,
-add deterministic allocation-budget evidence, and preserve the canonical
-Reclaim outcome hash contract.
+`FOUNDRY-007`: Remove path-following and HUD command-card transient frame
+allocations, add capacity/budget assertions for both, and preserve native and
+browser interaction behavior.

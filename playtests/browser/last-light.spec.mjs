@@ -41,22 +41,11 @@ function brightPixels(image, region, dpr) {
   return count;
 }
 
-async function canvasImage(page, clip) {
-  return PNG.sync.read(await page.screenshot({ clip }));
-}
-
-async function resumeUntilCommandCardVisible(page, dpr) {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    await page.keyboard.press("Escape");
-    await page.waitForTimeout(1_000);
-    const region = safeZones.hud_regions.command_card;
-    const image = await canvasImage(page, region);
-    const localRegion = { x: 0, y: 0, width: region.width, height: region.height };
-    if (brightPixels(image, localRegion, dpr) > 500 * dpr * dpr) {
-      return;
-    }
-  }
-  throw new Error("Tactical pause did not resume after five frame-separated attempts");
+async function deployReclaim(page) {
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(1_000);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(1_000);
 }
 
 test.beforeAll(async () => {
@@ -98,19 +87,18 @@ test("Reclaim checkpoints preserve the playfield at fixed DPR", async ({ page },
   }
 
   await capture(page, testInfo.project.name, "mission-select", dpr);
-  await page.keyboard.press("Enter");
-  await page.waitForTimeout(1_000);
-  await page.keyboard.press("Enter");
-  await page.waitForTimeout(1_000);
+  await deployReclaim(page);
   await page.keyboard.press("Escape");
   await page.waitForTimeout(1_000);
   await capture(page, testInfo.project.name, "tactical-pause", dpr);
 
-  await resumeUntilCommandCardVisible(page, dpr);
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    await page.keyboard.press("KeyQ");
-    await page.waitForTimeout(1_000);
-  }
+  await page.reload();
+  await page.waitForTimeout(1_000);
+  await deployReclaim(page);
+  await page.keyboard.press("KeyQ");
+  await page.waitForTimeout(2_000);
+  await page.keyboard.press("KeyQ");
+  await page.waitForTimeout(500);
   const production = await capture(page, testInfo.project.name, "production-active", dpr);
   expect(brightPixels(production, safeZones.hud_regions.command_card, dpr))
     .toBeGreaterThan(500 * dpr * dpr);

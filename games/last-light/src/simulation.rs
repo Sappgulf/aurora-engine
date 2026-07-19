@@ -18,6 +18,7 @@ pub const MAP_SIZE: Vec2 = Vec2::new(2600.0, 1460.0);
 pub const NAV_CELL_SIZE: f32 = 40.0;
 const DEFAULT_FIXED_TICK_HZ: u32 = 60;
 const EVENT_LOG_CAPACITY: usize = 256;
+const COMBAT_BUFFER_CAPACITY: usize = 32;
 pub const FABRICATOR_NODE: PowerNodeId = PowerNodeId(0);
 
 pub const SELECT_ALL_ACTION: &str = "last_light.select_all";
@@ -116,6 +117,8 @@ pub struct MissionSimulation {
     boss_reinforced: bool,
     events: VecDeque<SimulationEvent>,
     pending_events: VecDeque<SimulationEvent>,
+    combat_snapshot: Vec<(UnitId, Vec2, bool)>,
+    combat_attacks: Vec<(UnitId, UnitId, f32)>,
 }
 
 impl MissionSimulation {
@@ -171,7 +174,9 @@ impl MissionSimulation {
             victory_condition: mission.victory,
             boss_reinforced: false,
             events: VecDeque::with_capacity(EVENT_LOG_CAPACITY),
-            pending_events: VecDeque::new(),
+            pending_events: VecDeque::with_capacity(EVENT_LOG_CAPACITY),
+            combat_snapshot: Vec::with_capacity(COMBAT_BUFFER_CAPACITY),
+            combat_attacks: Vec::with_capacity(COMBAT_BUFFER_CAPACITY),
         };
         for spawn in &mission.player_spawns {
             let id = simulation.spawn(
@@ -461,25 +466,31 @@ impl MissionSimulation {
     }
 
     fn update_combat(&mut self, dt: f32) {
-        let snapshot: HashMap<UnitId, (Vec2, bool)> = self
-            .world
-            .units()
-            .iter()
-            .map(|unit| (unit.id, (unit.position, unit.alive())))
-            .collect();
-        let attacks: Vec<(UnitId, UnitId, f32)> = self
-            .world
-            .units()
-            .iter()
-            .filter_map(|unit| {
-                let UnitOrder::Attack(target) = unit.order else {
-                    return None;
-                };
-                let (target_position, true) = snapshot.get(&target).copied()? else {
-                    return None;
-                };
-                let profile = self.kinds.get(&unit.id)?.combat();
-                (unit.position.distance(target_position) < profile.range).then_some((
+        self.combat_snapshot.clear();
+        self.combat_snapshot.extend(
+            self.world
+                .units()
+                .iter()
+                .map(|unit| (unit.id, unit.position, unit.alive())),
+        );
+        self.combat_attacks.clear();
+        for unit in self.world.units() {
+            let UnitOrder::Attack(target) = unit.order else {
+                continue;
+            };
+            let Some((_, target_position, true)) = self
+                .combat_snapshot
+                .iter()
+                .find(|(id, _, _)| *id == target)
+                .copied()
+            else {
+                continue;
+            };
+            let Some(profile) = self.kinds.get(&unit.id).map(|kind| kind.combat()) else {
+                continue;
+            };
+            if unit.position.distance(target_position) < profile.range {
+                self.combat_attacks.push((
                     unit.id,
                     target,
                     profile.damage_per_second
@@ -489,11 +500,12 @@ impl MissionSimulation {
                         } else {
                             1.0
                         },
-                ))
-            })
-            .collect();
+                ));
+            }
+        }
 
-        for (attacker, target, amount) in attacks {
+        for index in 0..self.combat_attacks.len() {
+            let (attacker, target, amount) = self.combat_attacks[index];
             let Some(target_faction) = self.world.unit(target).map(|unit| unit.faction) else {
                 continue;
             };
@@ -521,6 +533,14 @@ impl MissionSimulation {
                 });
             }
         }
+    }
+
+    #[cfg(test)]
+    fn combat_buffer_capacities(&self) -> (usize, usize) {
+        (
+            self.combat_snapshot.capacity(),
+            self.combat_attacks.capacity(),
+        )
     }
 
     fn update_boss_phase(&mut self) {
@@ -773,6 +793,8 @@ mod tests {
         let trace = reclaim_truth_trace();
         let mut first = MissionSimulation::from_mission(&mission, SimulationModifiers::default());
         let mut second = MissionSimulation::from_mission(&mission, SimulationModifiers::default());
+        let first_combat_budget = first.combat_buffer_capacities();
+        let second_combat_budget = second.combat_buffer_capacities();
 
         let first_report = run_trace(&mut first, &trace).unwrap();
         let second_report = run_trace(&mut second, &trace).unwrap();
@@ -782,6 +804,10 @@ mod tests {
             second_report.final_state_hash
         );
         assert_eq!(first_report.commands_applied, 8);
+        assert_eq!(first.combat_buffer_capacities(), first_combat_budget);
+        assert_eq!(second.combat_buffer_capacities(), second_combat_budget);
+        assert!(first_combat_budget.0 >= COMBAT_BUFFER_CAPACITY);
+        assert!(first_combat_budget.1 >= COMBAT_BUFFER_CAPACITY);
         assert!(first.relays.iter().all(|relay| relay.active));
         assert_eq!(first.outcome, MissionOutcome::Victory);
         assert_eq!(
