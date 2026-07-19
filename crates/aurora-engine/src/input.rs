@@ -5,6 +5,18 @@ use std::collections::HashSet;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
+/// Semantic controls used by games; physical key bindings remain centralized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Action {
+    MoveUp,
+    MoveDown,
+    MoveLeft,
+    MoveRight,
+    Pause,
+    Restart,
+    TogglePostFx,
+}
+
 /// Per-frame input snapshot maintained by the engine.
 #[derive(Debug, Default, Clone)]
 pub struct Input {
@@ -102,6 +114,30 @@ impl Input {
         self.keys_released.contains(&key)
     }
 
+    pub fn action_down(&self, action: Action) -> bool {
+        self.action_keys(action)
+            .iter()
+            .any(|key| self.key_down(*key))
+    }
+
+    pub fn action_pressed(&self, action: Action) -> bool {
+        self.action_keys(action)
+            .iter()
+            .any(|key| self.key_pressed(*key))
+    }
+
+    fn action_keys(&self, action: Action) -> &'static [KeyCode] {
+        match action {
+            Action::MoveUp => &[KeyCode::KeyW, KeyCode::ArrowUp],
+            Action::MoveDown => &[KeyCode::KeyS, KeyCode::ArrowDown],
+            Action::MoveLeft => &[KeyCode::KeyA, KeyCode::ArrowLeft],
+            Action::MoveRight => &[KeyCode::KeyD, KeyCode::ArrowRight],
+            Action::Pause => &[KeyCode::Escape],
+            Action::Restart => &[KeyCode::KeyR],
+            Action::TogglePostFx => &[KeyCode::KeyP],
+        }
+    }
+
     pub fn mouse_down(&self, button: MouseButton) -> bool {
         self.mouse_buttons_down.contains(&button)
     }
@@ -117,16 +153,16 @@ impl Input {
     /// WASD / arrow movement vector (normalized if non-zero).
     pub fn axis_wasd(&self) -> Vec2 {
         let mut v = Vec2::ZERO;
-        if self.key_down(KeyCode::KeyW) || self.key_down(KeyCode::ArrowUp) {
+        if self.action_down(Action::MoveUp) {
             v.y += 1.0;
         }
-        if self.key_down(KeyCode::KeyS) || self.key_down(KeyCode::ArrowDown) {
+        if self.action_down(Action::MoveDown) {
             v.y -= 1.0;
         }
-        if self.key_down(KeyCode::KeyA) || self.key_down(KeyCode::ArrowLeft) {
+        if self.action_down(Action::MoveLeft) {
             v.x -= 1.0;
         }
-        if self.key_down(KeyCode::KeyD) || self.key_down(KeyCode::ArrowRight) {
+        if self.action_down(Action::MoveRight) {
             v.x += 1.0;
         }
         if v.length_squared() > 0.0 {
@@ -134,5 +170,18 @@ impl Input {
         } else {
             v
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actions_keep_physical_bindings_out_of_game_logic() {
+        let mut input = Input::new();
+        input.keys_down.insert(KeyCode::ArrowUp);
+        assert!(input.action_down(Action::MoveUp));
+        assert_eq!(input.axis_wasd(), Vec2::Y);
     }
 }

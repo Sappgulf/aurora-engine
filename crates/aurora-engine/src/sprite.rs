@@ -4,6 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec2};
 
 use crate::color::Color;
+use crate::renderer::TextureHandle;
 use crate::texture::Texture;
 
 /// One sprite instance to draw this frame.
@@ -136,6 +137,29 @@ impl SpriteBatch {
         self.count = 0;
     }
 
+    /// Grow GPU buffers before upload instead of dropping sprites above a fixed cap.
+    pub fn ensure_capacity(&mut self, device: &wgpu::Device, required_sprites: usize) {
+        if required_sprites <= self.capacity_sprites {
+            return;
+        }
+        let capacity_sprites = required_sprites.next_power_of_two().max(16);
+        let v_size = (capacity_sprites * 4 * std::mem::size_of::<SpriteVertex>()) as u64;
+        let i_size = (capacity_sprites * 6 * std::mem::size_of::<u32>()) as u64;
+        self.vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Sprite VB (grown)"),
+            size: v_size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Sprite IB (grown)"),
+            size: i_size,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.capacity_sprites = capacity_sprites;
+    }
+
     pub fn push(&mut self, sprite: &Sprite) {
         if self.count as usize >= self.capacity_sprites {
             return;
@@ -202,7 +226,7 @@ impl SpriteBatch {
 
 /// A draw command: one texture + its batch content.
 pub struct SpriteLayer {
-    pub texture_index: usize,
+    pub texture: TextureHandle,
 }
 
 pub(crate) fn camera_uniform(view_proj: Mat4) -> CameraUniform {
@@ -213,13 +237,13 @@ pub(crate) fn camera_uniform(view_proj: Mat4) -> CameraUniform {
 
 /// Draw queue entry for multi-texture frames.
 pub struct QueuedSprite {
-    pub texture: usize,
+    pub texture: TextureHandle,
     pub sprite: Sprite,
 }
 
 /// Groups sprites by texture index for fewer state changes.
 pub fn sort_by_texture(queue: &mut [QueuedSprite]) {
-    queue.sort_by_key(|q| q.texture);
+    queue.sort_by_key(|q| q.texture.0);
 }
 
 /// Placeholder to keep Texture referenced in docs.

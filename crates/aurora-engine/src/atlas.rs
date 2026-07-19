@@ -2,13 +2,14 @@
 
 use glam::Vec2;
 
+use crate::renderer::TextureHandle;
 use crate::sprite::Sprite;
 
 /// Grid atlas over a texture (row-major frames).
 #[derive(Debug, Clone)]
 pub struct TextureAtlas {
     /// Texture handle in the renderer.
-    pub texture: usize,
+    pub texture: TextureHandle,
     pub columns: u32,
     pub rows: u32,
     /// Full texture pixel size (for docs / tooling).
@@ -16,7 +17,7 @@ pub struct TextureAtlas {
 }
 
 impl TextureAtlas {
-    pub fn new(texture: usize, columns: u32, rows: u32, texture_size: Vec2) -> Self {
+    pub fn new(texture: TextureHandle, columns: u32, rows: u32, texture_size: Vec2) -> Self {
         Self {
             texture,
             columns: columns.max(1),
@@ -116,5 +117,20 @@ impl Animation {
 
     pub fn finished(&self) -> bool {
         self.finished
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atlas_wraps_frames_and_animation_finishes_once() {
+        let atlas = TextureAtlas::new(TextureHandle::default(), 2, 2, Vec2::splat(64.0));
+        assert_eq!(atlas.uv_rect(5), atlas.uv_rect(1));
+        let mut animation = Animation::once(vec![3, 4], 10.0);
+        animation.tick(1.0);
+        assert!(animation.finished());
+        assert_eq!(animation.frame(), 4);
     }
 }

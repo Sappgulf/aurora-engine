@@ -228,6 +228,12 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
     ) {
         // Input first so RedrawRequested sees this frame's keys/mouse.
         self.input.handle_event(&event);
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. }
+        ) {
+            self.audio.resume();
+        }
 
         if let Some(game) = self.game.as_mut() {
             if game.on_event(&event) {

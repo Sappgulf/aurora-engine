@@ -52,3 +52,16 @@ impl Aabb {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_corners_and_detects_touching_edges() {
+        let a = Aabb::new(Vec2::new(3.0, 3.0), Vec2::new(1.0, 1.0));
+        let b = Aabb::new(Vec2::new(3.0, 1.5), Vec2::new(5.0, 2.5));
+        assert_eq!(a.min, Vec2::ONE);
+        assert!(a.intersects(b));
+    }
+}

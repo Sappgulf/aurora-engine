@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Aurora Run — WebGPU</title>
+    <link data-trunk rel="rust" data-bin="aurora_run" data-wasm-opt="z" />
+    <style>
+      :root { color-scheme: dark; --ink:#e9f5ff; --muted:#a8bdd1; --cyan:#46f2d0; --panel:rgba(7,12,28,.74); }
+      * { box-sizing:border-box; }
+      body { margin:0; min-height:100vh; color:var(--ink); font:16px/1.45 system-ui,sans-serif; background:radial-gradient(circle at 50% -10%,#25205a,#060914 62%); }
+      main { max-width:1100px; margin:auto; padding:24px 16px 40px; }
+      .topline { display:flex; align-items:baseline; justify-content:space-between; gap:16px; margin-bottom:12px; }
+      h1 { margin:0; font-size:clamp(1.45rem,4vw,2.25rem); letter-spacing:-.04em; color:var(--cyan); }
+      .status { color:var(--muted); font-size:.88rem; }
+      .stage { position:relative; overflow:hidden; border:1px solid rgba(112,238,216,.25); border-radius:16px; background:#080d1d; box-shadow:0 28px 90px #0009; }
+      #aurora-canvas { width:100%; display:block; aspect-ratio:16/9; }
+      .hud { pointer-events:none; position:absolute; inset:0; padding:14px; display:flex; justify-content:space-between; align-items:flex-end; }
+      .chip { max-width:28rem; padding:8px 10px; border:1px solid #ffffff20; border-radius:9px; background:var(--panel); backdrop-filter:blur(8px); color:var(--muted); font-size:.8rem; }
+      kbd { color:var(--ink); font:inherit; padding:1px 4px; border-radius:4px; background:#ffffff18; }
+      @media (max-width:600px) { main{padding:14px 0 24px}.topline{padding:0 14px}.stage{border-radius:0}.hud{padding:8px}.chip{font-size:.7rem} }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="topline"><h1>Aurora Run</h1><span class="status">WebGPU vertical slice</span></div>
+      <div class="stage">
+        <canvas id="aurora-canvas" width="1280" height="720"></canvas>
+        <div class="hud"><div class="chip"><kbd>WASD</kbd>/<kbd>arrows</kbd> move · collect gold · avoid red</div><div class="chip"><kbd>P</kbd> effects · <kbd>R</kbd> restart</div></div>
+      </div>
+    </main>
+  </body>
+</html>

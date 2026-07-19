@@ -25,6 +25,11 @@ impl Audio {
         self.enabled
     }
 
+    /// Resume browser audio after a user gesture; a no-op on native platforms.
+    pub fn resume(&self) {
+        self.inner.resume();
+    }
+
     /// Play a short sine beep.
     pub fn beep(&self, frequency_hz: f32, duration_secs: f32, volume: f32) {
         if !self.enabled {
@@ -92,6 +97,8 @@ mod native {
     }
 
     impl NativeAudio {
+        pub fn resume(&self) {}
+
         pub fn beep(&self, frequency_hz: f32, duration_secs: f32, volume: f32) {
             let Some(handle) = &self.handle else {
                 return;
@@ -111,17 +118,37 @@ mod native {
 
 #[cfg(target_arch = "wasm32")]
 mod web {
-    pub struct WebAudio;
+    use std::cell::RefCell;
+
+    pub struct WebAudio {
+        context: RefCell<Option<web_sys::AudioContext>>,
+    }
 
     impl Default for WebAudio {
         fn default() -> Self {
-            Self
+            Self {
+                context: RefCell::new(None),
+            }
         }
     }
 
     impl WebAudio {
+        fn context(&self) -> Option<web_sys::AudioContext> {
+            if self.context.borrow().is_none() {
+                let context = web_sys::AudioContext::new().ok()?;
+                *self.context.borrow_mut() = Some(context);
+            }
+            self.context.borrow().clone()
+        }
+
+        pub fn resume(&self) {
+            if let Some(ctx) = self.context() {
+                let _ = ctx.resume();
+            }
+        }
+
         pub fn beep(&self, frequency_hz: f32, duration_secs: f32, volume: f32) {
-            let Ok(ctx) = web_sys::AudioContext::new() else {
+            let Some(ctx) = self.context() else {
                 return;
             };
             let Ok(osc) = ctx.create_oscillator() else {
@@ -138,8 +165,6 @@ mod web {
             let end = ctx.current_time() + duration_secs as f64;
             let _ = gain.gain().exponential_ramp_to_value_at_time(0.001, end);
             let _ = osc.stop_with_when(end);
-            // Keep context alive briefly via forget of closures — Oscillator stops itself.
-            std::mem::forget(ctx);
         }
     }
 }

@@ -71,8 +71,7 @@ impl Game for MyGame {
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install trunk
-cd examples/aurora_run   # add Trunk.toml/index if needed, or use playground
-# playground: cd examples/playground && trunk serve
+cd examples/aurora_run && trunk serve
 ```
 
 ## License

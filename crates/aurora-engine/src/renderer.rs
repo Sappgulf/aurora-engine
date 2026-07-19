@@ -13,6 +13,18 @@ use crate::sprite::{
 };
 use crate::texture::Texture;
 
+/// Stable handle returned when a texture is registered with the renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct TextureHandle(pub(crate) usize);
+
+/// Per-frame render counters for debug HUDs and performance tests.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RenderStats {
+    pub queued_sprites: usize,
+    pub drawn_sprites: usize,
+    pub draw_calls: usize,
+}
+
 /// Shared GPU objects games use to create textures.
 pub struct GpuContext<'a> {
     /// Logical device.
@@ -56,6 +68,7 @@ pub struct Renderer {
     pub post_fx: PostFxSettings,
 
     pub camera: Camera2D,
+    stats: RenderStats,
     #[allow(dead_code)]
     window: Arc<Window>,
 }
@@ -374,6 +387,7 @@ impl Renderer {
             post,
             post_fx: PostFxSettings::default(),
             camera,
+            stats: RenderStats::default(),
             window,
         }
     }
@@ -404,15 +418,15 @@ impl Renderer {
         self.show_debug_triangle
     }
 
-    /// Upload a texture and return its handle index.
-    pub fn add_texture(&mut self, texture: Texture) -> usize {
+    /// Upload a texture and return a stable, typed handle.
+    pub fn add_texture(&mut self, texture: Texture) -> TextureHandle {
         let idx = self.textures.len();
         self.textures.push(texture);
-        idx
+        TextureHandle(idx)
     }
 
-    pub fn texture(&self, index: usize) -> Option<&Texture> {
-        self.textures.get(index)
+    pub fn texture(&self, handle: TextureHandle) -> Option<&Texture> {
+        self.textures.get(handle.0)
     }
 
     pub fn texture_count(&self) -> usize {
@@ -420,10 +434,14 @@ impl Renderer {
     }
 
     /// Queue a sprite for the next frame (call during `on_update`).
-    pub fn draw_sprite(&mut self, texture: usize, sprite: Sprite) {
-        if texture < self.textures.len() {
+    pub fn draw_sprite(&mut self, texture: TextureHandle, sprite: Sprite) {
+        if texture.0 < self.textures.len() {
             self.draw_queue.push(QueuedSprite { texture, sprite });
         }
+    }
+
+    pub fn stats(&self) -> RenderStats {
+        self.stats
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -463,12 +481,19 @@ impl Renderer {
         );
 
         // Sort and take ownership so we can build meshes before the pass.
+        // Preserve transparent layer order; texture is only a secondary key.
         self.draw_queue
-            .sort_by_key(|q| (q.texture, q.sprite.z.to_bits()));
+            .sort_by_key(|q| (q.sprite.z.to_bits(), q.texture.0));
         let queue = std::mem::take(&mut self.draw_queue);
+        self.stats = RenderStats {
+            queued_sprites: queue.len(),
+            drawn_sprites: queue.len(),
+            draw_calls: 0,
+        };
+        self.batch.ensure_capacity(&self.device, queue.len());
 
         struct DrawRange {
-            texture: usize,
+            texture: TextureHandle,
             index_start: u32,
             index_count: u32,
         }
@@ -484,24 +509,14 @@ impl Renderer {
                 let vert_base_start = all_vertices.len() as u32;
                 let mut local_verts = 0u32;
                 while i < queue.len() && queue[i].texture == tex {
-                    // Cap to batch capacity
-                    if (all_vertices.len() / 4) >= SpriteBatch::DEFAULT_CAPACITY {
-                        break;
-                    }
                     push_sprite_mesh(&queue[i].sprite, &mut all_vertices, &mut all_indices);
                     local_verts += 4;
                     i += 1;
                     let _ = (vert_base_start, local_verts);
                 }
-                // If we hit capacity mid-texture, advance i to skip remainder next frame
-                while i < queue.len()
-                    && queue[i].texture == tex
-                    && (all_vertices.len() / 4) >= SpriteBatch::DEFAULT_CAPACITY
-                {
-                    i += 1;
-                }
                 let index_count = all_indices.len() as u32 - index_start;
                 if index_count > 0 {
+                    self.stats.draw_calls += 1;
                     ranges.push(DrawRange {
                         texture: tex,
                         index_start,
@@ -578,7 +593,7 @@ impl Renderer {
                 );
 
                 for range in &ranges {
-                    let Some(texture) = self.textures.get(range.texture) else {
+                    let Some(texture) = self.textures.get(range.texture.0) else {
                         continue;
                     };
                     pass.set_bind_group(1, &texture.bind_group, &[]);

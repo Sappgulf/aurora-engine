@@ -2,7 +2,7 @@
 
 use aurora_engine::{
     run, Aabb, Animation, Color, FrameCtx, Game, ParticleSystem, Renderer, RngLite, Sprite,
-    Texture, TextureAtlas, XorShift32,
+    Texture, TextureAtlas, TextureHandle, XorShift32,
 };
 use glam::Vec2;
 use winit::keyboard::KeyCode;
@@ -23,10 +23,10 @@ struct Hazard {
 }
 
 struct AuroraRun {
-    tex_player: usize,
-    tex_orb: usize,
-    tex_hazard: usize,
-    tex_floor: usize,
+    tex_player: TextureHandle,
+    tex_orb: TextureHandle,
+    tex_hazard: TextureHandle,
+    tex_floor: TextureHandle,
     player_atlas: TextureAtlas,
     player_anim: Animation,
     player: Vec2,
@@ -46,11 +46,11 @@ struct AuroraRun {
 impl AuroraRun {
     fn new() -> Self {
         Self {
-            tex_player: 0,
-            tex_orb: 0,
-            tex_hazard: 0,
-            tex_floor: 0,
-            player_atlas: TextureAtlas::new(0, 4, 1, Vec2::new(256.0, 64.0)),
+            tex_player: TextureHandle::default(),
+            tex_orb: TextureHandle::default(),
+            tex_hazard: TextureHandle::default(),
+            tex_floor: TextureHandle::default(),
+            player_atlas: TextureAtlas::new(TextureHandle::default(), 4, 1, Vec2::new(256.0, 64.0)),
             player_anim: Animation::new([0, 1, 2, 3, 2, 1], 10.0),
             player: Vec2::ZERO,
             collectibles: Vec::new(),
