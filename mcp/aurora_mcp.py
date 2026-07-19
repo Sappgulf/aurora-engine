@@ -219,6 +219,7 @@ def _playtest_payload() -> dict[str, object]:
             "groups": "Command or Control plus 1-5 assigns; 1-5 recalls",
             "camera": "WASD or screen edge pans; wheel zooms; minimap click navigates",
             "upgrades": "During briefing: Z Field Optics, X Reactive Plating, C Fabricator Overclock",
+            "loadouts": "During briefing: V cycles Ivo; N cycles Sena; selections save immediately",
             "pause": "Esc",
         },
         "acceptance_checks": [
@@ -230,6 +231,8 @@ def _playtest_payload() -> dict[str, object]:
             "Beacon previews distinguish powered, obstructed, and out-of-bounds positions.",
             "Minimap contacts respect fog and its camera rectangle moves after a minimap click.",
             "Campaign upgrades spend Lumen once and survive a native or browser reload.",
+            "Engineer move, Surveyor scan, and Needle attack strips animate without checker backgrounds.",
+            "Ivo and Sena loadout changes persist and alter relay, beacon, vision, or damage behavior.",
             "Victory persists mission completion and unlocks mission three without duplicate rewards.",
             "HUD remains anchored and the camera remains map-bounded after resize.",
         ],

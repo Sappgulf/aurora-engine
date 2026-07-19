@@ -56,8 +56,8 @@ pub use rts::{
     UnitOrder,
 };
 pub use save::{
-    CampaignProgress, GameSettings, SaveData, SaveError, SaveStore, DEFAULT_SAVE_SLOT,
-    SAVE_FORMAT_VERSION,
+    CampaignProgress, GameSettings, SaveData, SaveError, SaveStore, SpecialistLoadout,
+    DEFAULT_SAVE_SLOT, SAVE_FORMAT_VERSION,
 };
 pub use scene::{EntityId, Scene};
 pub use sprite::{QueuedSprite, Sprite, SpriteBatch};

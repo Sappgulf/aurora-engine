@@ -93,11 +93,13 @@ systems it uses can be adopted by a second 2D game without copying demo code.
 - [x] Control groups and viewport-anchored command-card UI
 - [x] Versioned campaign persistence and mission unlock state
 - [x] Per-entity clip state machine and Warden movement strip
-- [ ] Engineer, Surveyor, and Choir action strips
+- [x] Engineer move, Surveyor scan, and Choir Needle attack strips
+- [ ] Canticle/Bell Mine actions plus hit/down strips for the full roster
 - [x] Player-authored field-beacon placement and validation previews
 - [x] Tactical minimap with fog, contacts, camera frame, and navigation
 - [x] Persistent three-branch campaign upgrade foundation
-- [ ] Named-specialist loadouts and mission-specific ability choices
+- [x] Persistent Ivo and Sena specialist loadouts with mission effects
+- [ ] Olan, Mara, and late-campaign specialist ability choices
 
 **Exit criteria:** select and command a Lantern squad, reveal the sector, restore
 three relays, defeat a Choir command unit, and complete the mission on native

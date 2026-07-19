@@ -11,7 +11,7 @@ use std::fmt;
 use std::{fs, path::PathBuf};
 
 /// Increment this when the meaning of persisted data changes.
-pub const SAVE_FORMAT_VERSION: u32 = 3;
+pub const SAVE_FORMAT_VERSION: u32 = 4;
 
 /// The default slot used by games that do not need multiple player profiles.
 pub const DEFAULT_SAVE_SLOT: &str = "default";
@@ -57,6 +57,13 @@ impl GameSettings {
 
 /// Renderer-independent continuity shared by campaign-style games.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecialistLoadout {
+    pub specialist: String,
+    pub module: String,
+}
+
+/// Renderer-independent continuity shared by campaign-style games.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CampaignProgress {
     pub unlocked_mission: u32,
     pub completed_missions: Vec<String>,
@@ -64,6 +71,8 @@ pub struct CampaignProgress {
     pub decisions: Vec<String>,
     #[serde(default)]
     pub upgrades: Vec<String>,
+    #[serde(default)]
+    pub specialist_loadouts: Vec<SpecialistLoadout>,
 }
 
 impl Default for CampaignProgress {
@@ -74,6 +83,7 @@ impl Default for CampaignProgress {
             currency: 0,
             decisions: Vec::new(),
             upgrades: Vec::new(),
+            specialist_loadouts: Vec::new(),
         }
     }
 }
@@ -114,6 +124,40 @@ impl CampaignProgress {
         self.upgrades.iter().any(|owned| owned == upgrade)
     }
 
+    pub fn equip_specialist(
+        &mut self,
+        specialist: impl Into<String>,
+        module: impl Into<String>,
+    ) -> bool {
+        let specialist = specialist.into();
+        let module = module.into();
+        if specialist.trim().is_empty() || module.trim().is_empty() {
+            return false;
+        }
+        if let Some(loadout) = self
+            .specialist_loadouts
+            .iter_mut()
+            .find(|loadout| loadout.specialist == specialist)
+        {
+            if loadout.module == module {
+                return false;
+            }
+            loadout.module = module;
+            return true;
+        }
+        self.specialist_loadouts
+            .push(SpecialistLoadout { specialist, module });
+        true
+    }
+
+    pub fn specialist_module<'a>(&'a self, specialist: &str, default: &'a str) -> &'a str {
+        self.specialist_loadouts
+            .iter()
+            .find(|loadout| loadout.specialist == specialist)
+            .map(|loadout| loadout.module.as_str())
+            .unwrap_or(default)
+    }
+
     fn sanitize(&mut self) {
         self.unlocked_mission = self.unlocked_mission.max(1);
         self.completed_missions.retain(|id| !id.trim().is_empty());
@@ -126,6 +170,13 @@ impl CampaignProgress {
         self.upgrades.retain(|upgrade| !upgrade.trim().is_empty());
         self.upgrades.sort();
         self.upgrades.dedup();
+        self.specialist_loadouts.retain(|loadout| {
+            !loadout.specialist.trim().is_empty() && !loadout.module.trim().is_empty()
+        });
+        self.specialist_loadouts
+            .sort_by(|a, b| a.specialist.cmp(&b.specialist));
+        self.specialist_loadouts
+            .dedup_by(|a, b| a.specialist == b.specialist);
     }
 }
 
@@ -493,6 +544,27 @@ mod tests {
         assert!(!campaign.purchase_upgrade("field-optics", 60));
         assert!(!campaign.purchase_upgrade("reactive-plating", 80));
         assert_eq!(campaign.currency, 40);
+    }
+
+    #[test]
+    fn specialist_loadouts_replace_one_module_per_character() {
+        let mut campaign = CampaignProgress::default();
+        assert_eq!(
+            campaign.specialist_module("ivo", "relay-rigger"),
+            "relay-rigger"
+        );
+        assert!(campaign.equip_specialist("ivo", "salvage-smith"));
+        assert_eq!(
+            campaign.specialist_module("ivo", "relay-rigger"),
+            "salvage-smith"
+        );
+        assert!(!campaign.equip_specialist("ivo", "salvage-smith"));
+        assert!(campaign.equip_specialist("ivo", "relay-rigger"));
+        assert_eq!(campaign.specialist_loadouts.len(), 1);
+        assert_eq!(
+            campaign.specialist_module("ivo", "fallback"),
+            "relay-rigger"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -94,6 +94,9 @@ unrelated images.
 |---|---:|---|
 | `last-light-units-atlas-v001.png` | 3×2 | Six unit idle silhouettes |
 | `warden-move-strip-v001.png` | 6×1 | Per-Warden locomotion clip |
+| `engineer-move-strip-v001.png` | 6×1 | Engineer manipulator locomotion |
+| `surveyor-scan-strip-v001.png` | 6×1 | Survey mast sweep and cyan scan fan |
+| `needle-attack-strip-v001.png` | 6×1 | Choir Needle charge, lance, and recoil |
 | `last-light-structures-atlas-v001.png` | 2×2 | Relay, fabricator, reactor, Choir tower |
 | `reactor-sector-v001.png` | single | 2600×1460 authored mission floor |
 
@@ -154,6 +157,23 @@ examples/last_light/assets/
 Stable engine manifest keys use dots, independent of filenames:
 `lantern.warden.move`, `choir.sentinel.idle`, `sector.reactor.floor`,
 `ui.cursor.repair`.
+
+## Generated-strip normalization recipe
+
+Generated candidates may arrive with a baked checkerboard even when the prompt
+requests transparency. Never rename that file and ship it directly. Run:
+
+```bash
+python3 tools/normalize_generated_strip.py \
+  --input <generated-candidate.png> \
+  --output examples/last_light/assets/<unit>-<clip>-strip-v###.png \
+  --frames 6 --frame-size 256
+```
+
+The tool flood-removes only neutral bright background connected to the slot
+edges, removes small detached islands, computes one scale from the largest frame,
+and writes a centered RGBA 1536×256 strip. Always inspect the final strip on a
+black background and confirm `(0, 255)` alpha extrema before integration.
 
 ## Acceptance gates
 

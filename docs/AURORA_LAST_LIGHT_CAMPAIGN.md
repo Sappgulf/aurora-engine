@@ -134,6 +134,23 @@ diplomacy), **Guardian** (survival and rescue), and **Forge** (production and
 fortification). Specialist loadouts in later missions should require one branch
 choice plus one character relationship, so progression remains tied to story.
 
+## Specialist field loadouts
+
+Specialist modules are selected during briefing and save immediately. They are
+horizontal mission choices, not permanent power purchases: `V` cycles Ivo and
+`N` cycles Sena.
+
+| Specialist | Module | Mission effect | Character expression |
+|---|---|---|---|
+| Ivo Rook | Relay Rigger | Relay restoration is 50% faster | Ivo prioritizes rescuing Aurora's infrastructure |
+| Ivo Rook | Salvage Smith | Field beacons cost 40 instead of 50 salvage | Ivo improvises more territory from less material |
+| Sena Quill | Deep Scan | Surveyor vision increases from 440 to 540 | Sena listens farther into the station |
+| Sena Quill | Ghost Mark | Lantern damage rises 15% against engaged contacts | Sena converts Choir harmonics into targeting data |
+
+The default mission pairing is Relay Rigger plus Deep Scan. Later missions may
+gate Olan, Mara, and alliance-specific modules behind relationship decisions,
+but must preserve the one-equipped-module-per-specialist contract.
+
 ## Campaign continuity data
 
 - Named specialist survival and trust.

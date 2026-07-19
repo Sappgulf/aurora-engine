@@ -26,6 +26,12 @@ const BEACON_COST: u32 = 50;
 const UPGRADE_OPTICS: &str = "field-optics";
 const UPGRADE_PLATING: &str = "reactive-plating";
 const UPGRADE_OVERCLOCK: &str = "fabricator-overclock";
+const IVO: &str = "ivo-rook";
+const SENA: &str = "sena-quill";
+const IVO_RIGGER: &str = "relay-rigger";
+const IVO_SMITH: &str = "salvage-smith";
+const SENA_DEEP_SCAN: &str = "deep-scan";
+const SENA_GHOST_MARK: &str = "ghost-mark";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnitKind {
@@ -104,11 +110,17 @@ struct LastLight {
     tex_environment: TextureHandle,
     tex_units: TextureHandle,
     tex_warden_move: TextureHandle,
+    tex_engineer_move: TextureHandle,
+    tex_surveyor_scan: TextureHandle,
+    tex_needle_attack: TextureHandle,
     tex_structures: TextureHandle,
     tex_glow: TextureHandle,
     tex_ui: TextureHandle,
     unit_atlas: TextureAtlas,
     warden_move_atlas: TextureAtlas,
+    engineer_move_atlas: TextureAtlas,
+    surveyor_scan_atlas: TextureAtlas,
+    needle_attack_atlas: TextureAtlas,
     animation_players: HashMap<UnitId, AnimationPlayer>,
     structure_atlas: TextureAtlas,
     world: RtsWorld,
@@ -164,6 +176,9 @@ impl LastLight {
             tex_environment: TextureHandle::default(),
             tex_units: TextureHandle::default(),
             tex_warden_move: TextureHandle::default(),
+            tex_engineer_move: TextureHandle::default(),
+            tex_surveyor_scan: TextureHandle::default(),
+            tex_needle_attack: TextureHandle::default(),
             tex_structures: TextureHandle::default(),
             tex_glow: TextureHandle::default(),
             tex_ui: TextureHandle::default(),
@@ -173,6 +188,24 @@ impl LastLight {
                 6,
                 1,
                 Vec2::new(2172.0, 724.0),
+            ),
+            engineer_move_atlas: TextureAtlas::new(
+                TextureHandle::default(),
+                6,
+                1,
+                Vec2::new(1536.0, 256.0),
+            ),
+            surveyor_scan_atlas: TextureAtlas::new(
+                TextureHandle::default(),
+                6,
+                1,
+                Vec2::new(1536.0, 256.0),
+            ),
+            needle_attack_atlas: TextureAtlas::new(
+                TextureHandle::default(),
+                6,
+                1,
+                Vec2::new(1536.0, 256.0),
             ),
             animation_players: HashMap::new(),
             structure_atlas: TextureAtlas::new(
@@ -318,6 +351,39 @@ impl LastLight {
         });
     }
 
+    fn specialist_module<'a>(&'a self, specialist: &str, default: &'a str) -> &'a str {
+        self.save_data
+            .campaign
+            .specialist_module(specialist, default)
+    }
+
+    fn cycle_specialist(
+        &mut self,
+        specialist: &'static str,
+        first: &'static str,
+        second: &'static str,
+        label: &str,
+    ) {
+        let next = if self.specialist_module(specialist, first) == first {
+            second
+        } else {
+            first
+        };
+        self.save_data.campaign.equip_specialist(specialist, next);
+        self.status = Some(match self.save_store.save(&self.save_data) {
+            Ok(()) => (format!("{label} LOADOUT: {}", next.to_uppercase()), 3.5),
+            Err(error) => (format!("LOADOUT SAVE FAILED: {error}"), 5.0),
+        });
+    }
+
+    fn beacon_cost(&self) -> u32 {
+        if self.specialist_module(IVO, IVO_RIGGER) == IVO_SMITH {
+            40
+        } else {
+            BEACON_COST
+        }
+    }
+
     fn handle_briefing_upgrades(&mut self, ctx: &FrameCtx<'_>) {
         if ctx.input.key_pressed(KeyCode::KeyZ) {
             self.purchase_upgrade(UPGRADE_OPTICS, "FIELD OPTICS", 60);
@@ -327,6 +393,12 @@ impl LastLight {
         }
         if ctx.input.key_pressed(KeyCode::KeyC) {
             self.purchase_upgrade(UPGRADE_OVERCLOCK, "FABRICATOR OVERCLOCK", 100);
+        }
+        if ctx.input.key_pressed(KeyCode::KeyV) {
+            self.cycle_specialist(IVO, IVO_RIGGER, IVO_SMITH, "IVO");
+        }
+        if ctx.input.key_pressed(KeyCode::KeyN) {
+            self.cycle_specialist(SENA, SENA_DEEP_SCAN, SENA_GHOST_MARK, "SENA");
         }
     }
 
@@ -563,8 +635,9 @@ impl LastLight {
                 return;
             }
             if self.placing_beacon {
+                let beacon_cost = self.beacon_cost();
                 match self.placement_rules().validate(mouse_world, 54.0) {
-                    Ok(()) if self.resources.spend(BEACON_COST) => {
+                    Ok(()) if self.resources.spend(beacon_cost) => {
                         self.field_beacons.push(FieldBeacon {
                             position: mouse_world,
                         });
@@ -573,7 +646,7 @@ impl LastLight {
                         ctx.audio.collect();
                     }
                     Ok(()) => {
-                        self.status = Some(("BEACON REQUIRES 50 SALVAGE".to_owned(), 3.0));
+                        self.status = Some((format!("BEACON REQUIRES {beacon_cost} SALVAGE"), 3.0));
                     }
                     Err(reason) => {
                         let reason = match reason {
@@ -701,11 +774,16 @@ impl LastLight {
                 continue;
             };
             if unit.position.distance(target_position) < 125.0 {
-                let dps = if self.kinds.get(&unit.id) == Some(&UnitKind::Warden) {
+                let mut dps = if self.kinds.get(&unit.id) == Some(&UnitKind::Warden) {
                     34.0
                 } else {
                     18.0
                 };
+                if unit.faction == PLAYER
+                    && self.specialist_module(SENA, SENA_DEEP_SCAN) == SENA_GHOST_MARK
+                {
+                    dps *= 1.15;
+                }
                 damage.push((target, dps * dt));
                 self.attack_flash.insert(unit.id, 0.08);
             }
@@ -730,7 +808,11 @@ impl LastLight {
             .filter(|unit| unit.faction == PLAYER && unit.alive())
         {
             let radius = if self.kinds.get(&unit.id) == Some(&UnitKind::Surveyor) {
-                440.0
+                if self.specialist_module(SENA, SENA_DEEP_SCAN) == SENA_DEEP_SCAN {
+                    540.0
+                } else {
+                    440.0
+                }
             } else {
                 300.0
             };
@@ -791,7 +873,17 @@ impl Game for LastLight {
     }
 
     fn on_start(&mut self, renderer: &mut Renderer) {
-        let (environment, units, warden_move, structures, glow, ui) = {
+        let (
+            environment,
+            units,
+            warden_move,
+            engineer_move,
+            surveyor_scan,
+            needle_attack,
+            structures,
+            glow,
+            ui,
+        ) = {
             let gpu = renderer.gpu();
             (
                 Texture::from_bytes(
@@ -814,6 +906,24 @@ impl Game for LastLight {
                 .expect("Warden animation must decode"),
                 Texture::from_bytes(
                     &gpu,
+                    include_bytes!("../assets/engineer-move-strip-v001.png"),
+                    "Engineer move animation",
+                )
+                .expect("Engineer animation must decode"),
+                Texture::from_bytes(
+                    &gpu,
+                    include_bytes!("../assets/surveyor-scan-strip-v001.png"),
+                    "Surveyor scan animation",
+                )
+                .expect("Surveyor animation must decode"),
+                Texture::from_bytes(
+                    &gpu,
+                    include_bytes!("../assets/needle-attack-strip-v001.png"),
+                    "Choir Needle attack animation",
+                )
+                .expect("Needle animation must decode"),
+                Texture::from_bytes(
+                    &gpu,
                     include_bytes!("../assets/last-light-structures-atlas-v001.png"),
                     "Last Light structures",
                 )
@@ -825,12 +935,21 @@ impl Game for LastLight {
         self.tex_environment = renderer.add_texture(environment);
         self.tex_units = renderer.add_texture(units);
         self.tex_warden_move = renderer.add_texture(warden_move);
+        self.tex_engineer_move = renderer.add_texture(engineer_move);
+        self.tex_surveyor_scan = renderer.add_texture(surveyor_scan);
+        self.tex_needle_attack = renderer.add_texture(needle_attack);
         self.tex_structures = renderer.add_texture(structures);
         self.tex_glow = renderer.add_texture(glow);
         self.tex_ui = renderer.add_texture(ui);
         self.unit_atlas = TextureAtlas::new(self.tex_units, 3, 2, UNIT_ATLAS_SIZE);
         self.warden_move_atlas =
             TextureAtlas::new(self.tex_warden_move, 6, 1, Vec2::new(2172.0, 724.0));
+        self.engineer_move_atlas =
+            TextureAtlas::new(self.tex_engineer_move, 6, 1, Vec2::new(1536.0, 256.0));
+        self.surveyor_scan_atlas =
+            TextureAtlas::new(self.tex_surveyor_scan, 6, 1, Vec2::new(1536.0, 256.0));
+        self.needle_attack_atlas =
+            TextureAtlas::new(self.tex_needle_attack, 6, 1, Vec2::new(1536.0, 256.0));
         self.structure_atlas = TextureAtlas::new(self.tex_structures, 2, 2, STRUCTURE_ATLAS_SIZE);
         renderer.camera.position = Vec2::new(-700.0, -260.0);
         renderer.camera.zoom = 1.1;
@@ -873,10 +992,24 @@ impl Game for LastLight {
             let Some(player) = self.animation_players.get_mut(&unit.id) else {
                 continue;
             };
-            if self.kinds.get(&unit.id) == Some(&UnitKind::Warden)
-                && unit.velocity.length_squared() > 1.0
-            {
-                player.play(AnimationClip::looping("move", [0, 1, 2, 3, 4, 5], 10.0));
+            let kind = self.kinds.get(&unit.id).copied();
+            let clip = match kind {
+                Some(UnitKind::Warden) if unit.velocity.length_squared() > 1.0 => {
+                    Some(AnimationClip::looping("move", [0, 1, 2, 3, 4, 5], 10.0))
+                }
+                Some(UnitKind::Engineer) if unit.velocity.length_squared() > 1.0 => {
+                    Some(AnimationClip::looping("move", [0, 1, 2, 3, 4, 5], 9.0))
+                }
+                Some(UnitKind::Surveyor) => {
+                    Some(AnimationClip::looping("scan", [0, 1, 2, 3, 4, 5], 7.0))
+                }
+                Some(UnitKind::Needle) if self.attack_flash.contains_key(&unit.id) => {
+                    Some(AnimationClip::looping("attack", [0, 1, 2, 3, 4, 5], 11.0))
+                }
+                _ => None,
+            };
+            if let Some(clip) = clip {
+                player.play(clip);
                 player.tick(dt);
             }
         }
@@ -897,7 +1030,12 @@ impl Game for LastLight {
             }
             let position = self.relays[index].position;
             if self.selected_engineer_near(position) {
-                self.relays[index].progress += dt;
+                let rate = if self.specialist_module(IVO, IVO_RIGGER) == IVO_RIGGER {
+                    1.5
+                } else {
+                    1.0
+                };
+                self.relays[index].progress += dt * rate;
                 if self.relays[index].progress >= 3.0 {
                     self.relays[index].progress = 3.0;
                     self.relays[index].active = true;
@@ -1048,8 +1186,8 @@ impl Game for LastLight {
                 );
                 self.draw_selection_brackets(ctx.renderer, *source, 62.0);
             }
-            let valid =
-                rules.validate(position, 54.0).is_ok() && self.resources.amount() >= BEACON_COST;
+            let valid = rules.validate(position, 54.0).is_ok()
+                && self.resources.amount() >= self.beacon_cost();
             let mut preview = self.structure_atlas.sprite(position, Vec2::splat(108.0), 0);
             preview.color = if valid {
                 Color::rgba(0.28, 1.25, 1.05, 0.64)
@@ -1093,20 +1231,26 @@ impl Game for LastLight {
                     .with_color(glow_color)
                     .with_z(-0.2),
             );
-            let (texture, mut sprite) =
-                if kind == UnitKind::Warden && unit.velocity.length_squared() > 1.0 {
-                    (
-                        self.tex_warden_move,
-                        self.warden_move_atlas.sprite(
-                            unit.position,
-                            Vec2::splat(kind.scale()),
-                            self.animation_players
-                                .get(&unit.id)
-                                .map(AnimationPlayer::frame)
-                                .unwrap_or(0),
-                        ),
-                    )
-                } else {
+            let frame = self
+                .animation_players
+                .get(&unit.id)
+                .map(AnimationPlayer::frame)
+                .unwrap_or(0);
+            let animated = match kind {
+                UnitKind::Warden if unit.velocity.length_squared() > 1.0 => {
+                    Some((self.tex_warden_move, &self.warden_move_atlas))
+                }
+                UnitKind::Engineer if unit.velocity.length_squared() > 1.0 => {
+                    Some((self.tex_engineer_move, &self.engineer_move_atlas))
+                }
+                UnitKind::Surveyor => Some((self.tex_surveyor_scan, &self.surveyor_scan_atlas)),
+                UnitKind::Needle if self.attack_flash.contains_key(&unit.id) => {
+                    Some((self.tex_needle_attack, &self.needle_attack_atlas))
+                }
+                _ => None,
+            };
+            let (texture, mut sprite) = animated.map_or_else(
+                || {
                     (
                         self.tex_units,
                         self.unit_atlas.sprite(
@@ -1115,7 +1259,14 @@ impl Game for LastLight {
                             kind.atlas_frame(),
                         ),
                     )
-                };
+                },
+                |(texture, atlas)| {
+                    (
+                        texture,
+                        atlas.sprite(unit.position, Vec2::splat(kind.scale()), frame),
+                    )
+                },
+            );
             if unit.velocity.length_squared() > 1.0 {
                 sprite.rotation =
                     unit.velocity.y.atan2(unit.velocity.x) - std::f32::consts::FRAC_PI_2;
@@ -1326,7 +1477,7 @@ impl Game for LastLight {
             );
             self.draw_text(
                 ctx.renderer,
-                "F SURVEYOR 60   H HOLD   B BEACON 50",
+                &format!("F SURVEYOR 60   H HOLD   B BEACON {}", self.beacon_cost()),
                 card_text + Vec2::new(0.0, -70.0),
                 2.0,
                 Color::rgb(0.88, 0.92, 0.92),
@@ -1393,9 +1544,15 @@ impl Game for LastLight {
         if let Some((title, story, prompt)) = overlay {
             ctx.renderer.draw_sprite(
                 self.tex_ui,
-                Sprite::new(center, Vec2::new((view.x * 0.78).min(900.0), 300.0))
-                    .with_color(Color::rgba(0.012, 0.025, 0.055, 0.92))
-                    .with_z(10.0),
+                Sprite::new(
+                    center,
+                    Vec2::new(
+                        (view.x * 0.78).min(900.0),
+                        if self.briefing { 360.0 } else { 300.0 },
+                    ),
+                )
+                .with_color(Color::rgba(0.012, 0.025, 0.055, 0.92))
+                .with_z(10.0),
             );
             self.draw_text(
                 ctx.renderer,
@@ -1441,6 +1598,18 @@ impl Game for LastLight {
                     center + Vec2::new(-410.0, -122.0),
                     1.65,
                     Color::rgba(0.55, 0.82, 0.88, 0.94),
+                    11.0,
+                );
+                self.draw_text(
+                    ctx.renderer,
+                    &format!(
+                        "V IVO {}  N SENA {}",
+                        self.specialist_module(IVO, IVO_RIGGER).to_uppercase(),
+                        self.specialist_module(SENA, SENA_DEEP_SCAN).to_uppercase()
+                    ),
+                    center + Vec2::new(-245.0, -154.0),
+                    1.8,
+                    Color::rgba(0.82, 0.68, 0.36, 0.98),
                     11.0,
                 );
             }
