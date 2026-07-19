@@ -17,13 +17,19 @@ cargo run -p last_light
 |--------|--------|
 | **Space / Enter** | Deploy from mission briefing |
 | **Left click / drag** | Select one unit or a squad |
+| **Shift + select** | Add units to the current selection |
 | **Right click** | Move or attack contextually |
+| **Q / E / F** | Queue Warden / Engineer / Surveyor |
+| **H** | Hold selected units in position |
+| **Cmd/Ctrl + 1–5** | Assign a control group |
+| **1–5** | Recall and focus a control group |
 | **WASD / screen edge** | Pan tactical camera |
 | **Mouse wheel** | Zoom around cursor |
 | **Esc** | Tactical pause |
 
-Select the Engineer and command it near each of the three power relays. Hold the
-sector, defeat the Choir Canticle, and bring the auxiliary reactor online.
+Select the Engineer and command it near each of the three power relays. Active
+relays generate salvage for the Lantern fabricator; build reinforcements, hold
+the sector, defeat the Choir Canticle, and bring the auxiliary reactor online.
 
 ### Campaign and production guide
 
@@ -59,6 +65,8 @@ cargo run -p triangle_demo   # M0 NDC triangle
 | Diagnostics + asset loading queue | ✅ foundation |
 | Feature-gated 3D mesh/material contract | ✅ foundation |
 | RTS selection, formations, orders, navigation, fog | ✅ |
+| RTS economy, production queues, power graphs, control groups | ✅ |
+| Versioned campaign progress with v1 save migration | ✅ |
 | Last Light point-and-click campaign mission | ✅ vertical slice |
 
 ## Library sketch

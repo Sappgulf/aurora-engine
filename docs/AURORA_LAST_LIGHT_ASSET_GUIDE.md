@@ -99,6 +99,10 @@ unrelated images.
 
 UI panels use dark translucent steel with one bright state color. Keep the
 center and lower-middle playfield clear outside explicit selection moments.
+The production card anchors to the lower-right viewport edge and exposes no more
+than three primary recipes at once. Show salvage, power, unit cap, queue depth,
+and build progress with text plus color; never communicate affordability by
+color alone.
 
 ## Audio identity
 

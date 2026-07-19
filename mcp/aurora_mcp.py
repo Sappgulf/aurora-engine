@@ -57,13 +57,13 @@ SOURCE_MAP: dict[str, tuple[str, str]] = {
     "engine_app": ("crates/aurora-engine/src/app.rs", "Application loop and Game callbacks."),
     "engine_renderer": ("crates/aurora-engine/src/renderer.rs", "wgpu sprite renderer and render targets."),
     "engine_camera": ("crates/aurora-engine/src/camera.rs", "2D camera projection and viewport helpers."),
-    "engine_input": ("crates/aurora-engine/src/input.rs", "Frame input and semantic actions."),
+    "engine_input": ("crates/aurora-engine/src/input.rs", "Frame input, modifiers, and semantic actions."),
     "engine_scene": ("crates/aurora-engine/src/scene.rs", "Generation-safe scene/entity storage."),
     "engine_tilemap": ("crates/aurora-engine/src/tilemap.rs", "Tile layers, solid tiles, and triggers."),
     "engine_audio": ("crates/aurora-engine/src/audio.rs", "Audio mixer and sound cues."),
-    "engine_save": ("crates/aurora-engine/src/save.rs", "Portable save/settings data contracts."),
+    "engine_save": ("crates/aurora-engine/src/save.rs", "Portable settings and versioned campaign progress."),
     "engine_diagnostics": ("crates/aurora-engine/src/diagnostics.rs", "Frame timing and render diagnostics."),
-    "engine_rts": ("crates/aurora-engine/src/rts.rs", "RTS selection, orders, navigation, and fog contracts."),
+    "engine_rts": ("crates/aurora-engine/src/rts.rs", "RTS orders, economy, production, power, navigation, and fog."),
     "engine_3d": ("crates/aurora-engine/src/mesh3d.rs", "Feature-gated mesh/material contracts."),
     "aurora_run": ("examples/aurora_run/src/main.rs", "Playable Aurora Run vertical slice."),
     "last_light": ("examples/last_light/src/main.rs", "Playable Last Light RTS campaign mission."),
@@ -212,7 +212,10 @@ def _playtest_payload() -> dict[str, object]:
         "controls": {
             "deploy": "Space or Enter closes the briefing",
             "select": "Left click or left-drag",
+            "add_select": "Shift plus click or drag",
             "command": "Right click moves or attacks contextually",
+            "production": "Q Warden, E Engineer, F Surveyor; H holds position",
+            "groups": "Command or Control plus 1-5 assigns; 1-5 recalls",
             "camera": "WASD or screen edge pans; wheel zooms",
             "pause": "Esc",
         },
@@ -220,6 +223,9 @@ def _playtest_payload() -> dict[str, object]:
             "Briefing, tactical pause, victory, and defeat overlays protect the playfield.",
             "Point selection, drag selection, move, and attack orders visibly respond.",
             "Fog reveals around Lantern units while hidden Choir units remain concealed.",
+            "Production spends salvage once, advances visibly, and deploys at the fabricator.",
+            "Restored relays increase power and salvage income; control groups recall live units.",
+            "Victory persists mission completion and unlocks mission three without duplicate rewards.",
             "HUD remains anchored and the camera remains map-bounded after resize.",
         ],
         "validation_lanes": {name: " ".join(command) for name, command in VALIDATION_LANES.items()},
@@ -277,7 +283,7 @@ async def aurora_list_systems(
 async def aurora_get_playtest_contract(
     response_format: ResponseFormat = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Return how to run Aurora Run, its controls, and focused visual acceptance checks.
+    """Return how to run Last Light, its controls, and focused visual acceptance checks.
 
     Use before a playtest or before choosing an explicit validation lane. This is
     read-only and never launches the game.
@@ -336,7 +342,7 @@ async def aurora_run_validation(
     """Run one fixed, non-destructive Aurora validation lane after user approval.
 
     The only allowed lanes are ``fast`` (workspace check), ``test`` (workspace
-    tests), and ``web`` (Aurora Run WASM check). The tool cannot run arbitrary
+    tests), and ``web`` (Last Light WASM check). The tool cannot run arbitrary
     commands, modify source, stage files, commit, or contact a remote. Cargo may
     create local build artifacts, so this operation is deliberately not marked
     read-only.

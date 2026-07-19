@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use glam::{Mat4, Vec2};
-use std::time::Instant;
 use winit::window::Window;
 
 use crate::camera::Camera2D;
@@ -13,6 +12,7 @@ use crate::sprite::{
     camera_uniform, CameraUniform, QueuedSprite, Sprite, SpriteBatch, SpriteVertex,
 };
 use crate::texture::Texture;
+use crate::time::InstantCompat;
 
 /// Stable handle returned when a texture is registered with the renderer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -537,7 +537,7 @@ impl Renderer {
     }
 
     pub fn render(&mut self, elapsed: f32) -> Result<(), wgpu::SurfaceError> {
-        let frame_started = Instant::now();
+        let frame_started = InstantCompat::now();
         let vp: Mat4 = self.camera.view_projection();
         self.queue.write_buffer(
             &self.camera_buffer,
@@ -720,7 +720,10 @@ impl Renderer {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
-        self.stats.cpu_frame_ms = frame_started.elapsed().as_secs_f32() * 1_000.0;
+        self.stats.cpu_frame_ms = InstantCompat::now()
+            .duration_since(frame_started)
+            .as_secs_f32()
+            * 1_000.0;
         Ok(())
     }
 

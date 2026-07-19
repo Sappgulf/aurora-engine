@@ -50,11 +50,13 @@ pub use post::PostFxSettings;
 pub use renderer::{GpuContext, PointLight, RenderQuality, Renderer};
 pub use renderer::{RenderStats, TextureHandle};
 pub use rts::{
-    FactionId, FogOfWar, FogState, NavGrid, RtsUnit, RtsWorld, Selection, SelectionBox, UnitId,
-    UnitOrder,
+    FactionId, FogOfWar, FogState, NavGrid, PowerGrid, PowerNode, PowerNodeId, ProductId,
+    ProductionItem, ProductionQueue, ProductionRecipe, QueueError, ResourceBank, RtsUnit, RtsWorld,
+    Selection, SelectionBox, UnitId, UnitOrder,
 };
 pub use save::{
-    GameSettings, SaveData, SaveError, SaveStore, DEFAULT_SAVE_SLOT, SAVE_FORMAT_VERSION,
+    CampaignProgress, GameSettings, SaveData, SaveError, SaveStore, DEFAULT_SAVE_SLOT,
+    SAVE_FORMAT_VERSION,
 };
 pub use scene::{EntityId, Scene};
 pub use sprite::{QueuedSprite, Sprite, SpriteBatch};

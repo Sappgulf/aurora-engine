@@ -3,7 +3,7 @@
 use glam::Vec2;
 use std::collections::HashSet;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 
 /// Semantic controls used by games; physical key bindings remain centralized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,6 +36,7 @@ pub struct Input {
     pub mouse_delta: Vec2,
     /// Vertical scroll this frame (lines-ish; positive = up).
     pub scroll: f32,
+    modifiers: ModifiersState,
     prev_mouse: Vec2,
     mouse_initialized: bool,
 }
@@ -89,6 +90,14 @@ impl Input {
             },
             WindowEvent::CursorMoved { position, .. } => {
                 let pos = Vec2::new(position.x as f32, position.y as f32);
+                #[cfg(target_arch = "wasm32")]
+                let pos = {
+                    let scale = web_sys::window()
+                        .map(|window| window.device_pixel_ratio() as f32)
+                        .unwrap_or(1.0)
+                        .max(1.0);
+                    pos / scale
+                };
                 if self.mouse_initialized {
                     self.mouse_delta += pos - self.prev_mouse;
                 }
@@ -101,6 +110,9 @@ impl Input {
                     MouseScrollDelta::LineDelta(_, y) => *y,
                     MouseScrollDelta::PixelDelta(p) => (p.y as f32) * 0.02,
                 };
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
             }
             _ => {}
         }
@@ -116,6 +128,15 @@ impl Input {
 
     pub fn key_released(&self, key: KeyCode) -> bool {
         self.keys_released.contains(&key)
+    }
+
+    pub fn shift_down(&self) -> bool {
+        self.modifiers.shift_key()
+    }
+
+    /// Treat Command as Control on macOS so RTS control groups remain ergonomic.
+    pub fn control_down(&self) -> bool {
+        self.modifiers.control_key() || self.modifiers.super_key()
     }
 
     pub fn action_down(&self, action: Action) -> bool {

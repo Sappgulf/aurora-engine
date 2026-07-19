@@ -11,6 +11,225 @@ use glam::{IVec2, Vec2};
 use crate::Aabb;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProductId(pub u16);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductionRecipe {
+    pub product: ProductId,
+    pub cost: u32,
+    pub build_millis: u32,
+}
+
+impl ProductionRecipe {
+    pub const fn new(product: ProductId, cost: u32, build_millis: u32) -> Self {
+        Self {
+            product,
+            cost,
+            build_millis,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueError {
+    InsufficientResources,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResourceBank {
+    amount: u32,
+}
+
+impl ResourceBank {
+    pub const fn new(amount: u32) -> Self {
+        Self { amount }
+    }
+
+    pub const fn amount(self) -> u32 {
+        self.amount
+    }
+
+    pub fn credit(&mut self, amount: u32) {
+        self.amount = self.amount.saturating_add(amount);
+    }
+
+    pub fn spend(&mut self, amount: u32) -> bool {
+        if self.amount < amount {
+            return false;
+        }
+        self.amount -= amount;
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProductionItem {
+    pub product: ProductId,
+    pub remaining_seconds: f32,
+    pub total_seconds: f32,
+}
+
+impl ProductionItem {
+    pub fn progress(self) -> f32 {
+        if self.total_seconds <= f32::EPSILON {
+            1.0
+        } else {
+            (1.0 - self.remaining_seconds / self.total_seconds).clamp(0.0, 1.0)
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProductionQueue {
+    items: VecDeque<ProductionItem>,
+    capacity: usize,
+}
+
+impl ProductionQueue {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            items: VecDeque::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    pub fn items(&self) -> &VecDeque<ProductionItem> {
+        &self.items
+    }
+
+    pub fn enqueue(
+        &mut self,
+        recipe: ProductionRecipe,
+        resources: &mut ResourceBank,
+    ) -> Result<(), QueueError> {
+        if self.items.len() >= self.capacity {
+            return Err(QueueError::Full);
+        }
+        if !resources.spend(recipe.cost) {
+            return Err(QueueError::InsufficientResources);
+        }
+        let seconds = recipe.build_millis as f32 / 1000.0;
+        self.items.push_back(ProductionItem {
+            product: recipe.product,
+            remaining_seconds: seconds,
+            total_seconds: seconds,
+        });
+        Ok(())
+    }
+
+    /// Advances only the front item and returns all products completed this tick.
+    pub fn update(&mut self, mut dt: f32) -> Vec<ProductId> {
+        let mut completed = Vec::new();
+        dt = dt.max(0.0);
+        while dt > 0.0 {
+            let Some(front) = self.items.front_mut() else {
+                break;
+            };
+            if front.remaining_seconds > dt {
+                front.remaining_seconds -= dt;
+                break;
+            }
+            dt -= front.remaining_seconds.max(0.0);
+            if let Some(item) = self.items.pop_front() {
+                completed.push(item.product);
+            }
+        }
+        completed
+    }
+}
+
+impl Default for ProductionQueue {
+    fn default() -> Self {
+        Self::new(5)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PowerNodeId(pub u16);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PowerNode {
+    pub id: PowerNodeId,
+    pub supply: u32,
+    pub demand: u32,
+    pub online: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PowerGrid {
+    nodes: Vec<PowerNode>,
+    links: Vec<(PowerNodeId, PowerNodeId)>,
+}
+
+impl PowerGrid {
+    pub fn add_node(&mut self, node: PowerNode) {
+        if let Some(existing) = self
+            .nodes
+            .iter_mut()
+            .find(|existing| existing.id == node.id)
+        {
+            *existing = node;
+        } else {
+            self.nodes.push(node);
+        }
+    }
+
+    pub fn set_online(&mut self, id: PowerNodeId, online: bool) {
+        if let Some(node) = self.nodes.iter_mut().find(|node| node.id == id) {
+            node.online = online;
+        }
+    }
+
+    pub fn link(&mut self, a: PowerNodeId, b: PowerNodeId) {
+        if a != b
+            && !self
+                .links
+                .iter()
+                .any(|&(left, right)| (left == a && right == b) || (left == b && right == a))
+        {
+            self.links.push((a, b));
+        }
+    }
+
+    pub fn is_powered(&self, id: PowerNodeId) -> bool {
+        let Some(start) = self.nodes.iter().find(|node| node.id == id && node.online) else {
+            return false;
+        };
+        let mut frontier = VecDeque::from([start.id]);
+        let mut visited = Vec::new();
+        while let Some(current) = frontier.pop_front() {
+            if visited.contains(&current) {
+                continue;
+            }
+            let Some(node) = self
+                .nodes
+                .iter()
+                .find(|node| node.id == current && node.online)
+            else {
+                continue;
+            };
+            visited.push(node.id);
+            for &(a, b) in &self.links {
+                if a == current && !visited.contains(&b) {
+                    frontier.push_back(b);
+                } else if b == current && !visited.contains(&a) {
+                    frontier.push_back(a);
+                }
+            }
+        }
+        let (supply, demand) = visited.iter().fold((0_u32, 0_u32), |totals, id| {
+            let node = self.nodes.iter().find(|node| node.id == *id).unwrap();
+            (
+                totals.0.saturating_add(node.supply),
+                totals.1.saturating_add(node.demand),
+            )
+        });
+        supply > 0 && supply >= demand
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UnitId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -102,11 +321,23 @@ impl SelectionBox {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct RtsWorld {
     units: Vec<RtsUnit>,
     selection: Selection,
+    control_groups: [Vec<UnitId>; 10],
     next_id: u32,
+}
+
+impl Default for RtsWorld {
+    fn default() -> Self {
+        Self {
+            units: Vec::new(),
+            selection: Selection::default(),
+            control_groups: std::array::from_fn(|_| Vec::new()),
+            next_id: 0,
+        }
+    }
 }
 
 impl RtsWorld {
@@ -135,6 +366,30 @@ impl RtsWorld {
 
     pub fn selection(&self) -> &Selection {
         &self.selection
+    }
+
+    pub fn assign_control_group(&mut self, slot: usize) -> bool {
+        let Some(group) = self.control_groups.get_mut(slot) else {
+            return false;
+        };
+        *group = self.selection.ids.clone();
+        true
+    }
+
+    pub fn recall_control_group(&mut self, slot: usize, faction: FactionId) -> bool {
+        let Some(group) = self.control_groups.get(slot) else {
+            return false;
+        };
+        self.selection.ids = group
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.units
+                    .iter()
+                    .any(|unit| unit.id == *id && unit.faction == faction && unit.alive())
+            })
+            .collect();
+        !self.selection.ids.is_empty()
     }
 
     pub fn select_point(&mut self, point: Vec2, faction: FactionId, additive: bool) {
@@ -207,6 +462,16 @@ impl RtsWorld {
         for id in ids {
             if let Some(unit) = self.unit_mut(id) {
                 unit.order = UnitOrder::Attack(target);
+            }
+        }
+    }
+
+    pub fn issue_hold(&mut self) {
+        let ids = self.selection.ids.clone();
+        for id in ids {
+            if let Some(unit) = self.unit_mut(id) {
+                unit.order = UnitOrder::Hold;
+                unit.velocity = Vec2::ZERO;
             }
         }
     }
@@ -468,5 +733,65 @@ mod tests {
         assert_eq!(fog.state_at(Vec2::new(25.0, 25.0)), FogState::Visible);
         fog.begin_frame();
         assert_eq!(fog.state_at(Vec2::new(25.0, 25.0)), FogState::Explored);
+    }
+
+    #[test]
+    fn production_spends_once_and_completes_in_queue_order() {
+        let mut resources = ResourceBank::new(100);
+        let mut queue = ProductionQueue::new(2);
+        let scout = ProductionRecipe::new(ProductId(7), 40, 1_000);
+        let warden = ProductionRecipe::new(ProductId(9), 60, 2_000);
+        assert_eq!(queue.enqueue(scout, &mut resources), Ok(()));
+        assert_eq!(queue.enqueue(warden, &mut resources), Ok(()));
+        assert_eq!(resources.amount(), 0);
+        assert_eq!(queue.update(1.5), [ProductId(7)]);
+        assert!((queue.items()[0].progress() - 0.25).abs() < 0.001);
+        assert_eq!(queue.update(1.5), [ProductId(9)]);
+    }
+
+    #[test]
+    fn disconnected_power_components_resolve_independently() {
+        let mut grid = PowerGrid::default();
+        grid.add_node(PowerNode {
+            id: PowerNodeId(0),
+            supply: 3,
+            demand: 0,
+            online: true,
+        });
+        grid.add_node(PowerNode {
+            id: PowerNodeId(1),
+            supply: 0,
+            demand: 2,
+            online: true,
+        });
+        grid.add_node(PowerNode {
+            id: PowerNodeId(2),
+            supply: 0,
+            demand: 1,
+            online: true,
+        });
+        grid.link(PowerNodeId(0), PowerNodeId(1));
+        assert!(grid.is_powered(PowerNodeId(1)));
+        assert!(!grid.is_powered(PowerNodeId(2)));
+        grid.link(PowerNodeId(1), PowerNodeId(2));
+        assert!(grid.is_powered(PowerNodeId(2)));
+    }
+
+    #[test]
+    fn control_groups_drop_destroyed_or_hostile_units_on_recall() {
+        let mut world = RtsWorld::default();
+        let first = world.spawn(PLAYER, Vec2::ZERO);
+        world.spawn(PLAYER, Vec2::X);
+        world.spawn(FactionId(2), Vec2::Y);
+        world.select_bounds(
+            Aabb::from_center_size(Vec2::ZERO, Vec2::splat(10.0)),
+            PLAYER,
+            false,
+        );
+        assert!(world.assign_control_group(1));
+        world.unit_mut(first).unwrap().health = 0.0;
+        assert!(world.recall_control_group(1, PLAYER));
+        assert_eq!(world.selection().ids().len(), 1);
+        assert!(!world.selection().contains(first));
     }
 }

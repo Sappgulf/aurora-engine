@@ -11,7 +11,7 @@ use std::fmt;
 use std::{fs, path::PathBuf};
 
 /// Increment this when the meaning of persisted data changes.
-pub const SAVE_FORMAT_VERSION: u32 = 1;
+pub const SAVE_FORMAT_VERSION: u32 = 2;
 
 /// The default slot used by games that do not need multiple player profiles.
 pub const DEFAULT_SAVE_SLOT: &str = "default";
@@ -55,6 +55,59 @@ impl GameSettings {
     }
 }
 
+/// Renderer-independent continuity shared by campaign-style games.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CampaignProgress {
+    pub unlocked_mission: u32,
+    pub completed_missions: Vec<String>,
+    pub currency: u64,
+    pub decisions: Vec<String>,
+}
+
+impl Default for CampaignProgress {
+    fn default() -> Self {
+        Self {
+            unlocked_mission: 1,
+            completed_missions: Vec::new(),
+            currency: 0,
+            decisions: Vec::new(),
+        }
+    }
+}
+
+impl CampaignProgress {
+    pub fn complete_mission(&mut self, id: impl Into<String>, unlock: u32, reward: u64) -> bool {
+        let id = id.into();
+        let newly_completed = !self.completed_missions.contains(&id);
+        if newly_completed {
+            self.completed_missions.push(id);
+            self.currency = self.currency.saturating_add(reward);
+        }
+        self.unlocked_mission = self.unlocked_mission.max(unlock.max(1));
+        newly_completed
+    }
+
+    pub fn record_decision(&mut self, decision: impl Into<String>) -> bool {
+        let decision = decision.into();
+        if self.decisions.contains(&decision) {
+            return false;
+        }
+        self.decisions.push(decision);
+        true
+    }
+
+    fn sanitize(&mut self) {
+        self.unlocked_mission = self.unlocked_mission.max(1);
+        self.completed_missions.retain(|id| !id.trim().is_empty());
+        self.completed_missions.sort();
+        self.completed_missions.dedup();
+        self.decisions
+            .retain(|decision| !decision.trim().is_empty());
+        self.decisions.sort();
+        self.decisions.dedup();
+    }
+}
+
 /// Data that persists between runs but is independent from an active scene.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SaveData {
@@ -62,6 +115,8 @@ pub struct SaveData {
     pub settings: GameSettings,
     pub high_score: u64,
     pub runs_completed: u32,
+    #[serde(default)]
+    pub campaign: CampaignProgress,
 }
 
 impl Default for SaveData {
@@ -71,6 +126,7 @@ impl Default for SaveData {
             settings: GameSettings::default(),
             high_score: 0,
             runs_completed: 0,
+            campaign: CampaignProgress::default(),
         }
     }
 }
@@ -91,6 +147,7 @@ impl SaveData {
     pub fn sanitize(&mut self) {
         self.format_version = SAVE_FORMAT_VERSION;
         self.settings.sanitize();
+        self.campaign.sanitize();
     }
 }
 
@@ -382,6 +439,25 @@ mod tests {
             }
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn version_one_save_migrates_with_campaign_defaults() {
+        let legacy = br#"{"format_version":1,"settings":{"master_volume":1.0,"music_volume":0.8,"sfx_volume":0.85,"ambience_volume":0.7,"ui_volume":0.9,"post_fx_enabled":true,"screen_shake_enabled":true,"reduced_motion":false},"high_score":12,"runs_completed":2}"#;
+        let save = decode_save(legacy).expect("legacy save should migrate");
+        assert_eq!(save.format_version, SAVE_FORMAT_VERSION);
+        assert_eq!(save.campaign, CampaignProgress::default());
+    }
+
+    #[test]
+    fn campaign_rewards_are_idempotent_and_unlock_forward_only() {
+        let mut campaign = CampaignProgress::default();
+        assert!(campaign.complete_mission("reclaim-reactor", 3, 80));
+        assert!(!campaign.complete_mission("reclaim-reactor", 2, 80));
+        assert_eq!(campaign.currency, 80);
+        assert_eq!(campaign.unlocked_mission, 3);
+        assert!(campaign.record_decision("wake-lumen"));
+        assert!(!campaign.record_decision("wake-lumen"));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

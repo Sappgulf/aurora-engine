@@ -104,6 +104,31 @@ fn init_logging_wasm() {
     let _ = console_log::init_with_level(log::Level::Info);
 }
 
+#[cfg(target_arch = "wasm32")]
+fn web_surface_size(
+    window: &Window,
+) -> (winit::dpi::PhysicalSize<u32>, winit::dpi::PhysicalSize<u32>) {
+    use winit::platform::web::WindowExtWebSys;
+
+    let Some(canvas) = window.canvas() else {
+        let size = window.inner_size();
+        return (size, size);
+    };
+    let scale = web_sys::window()
+        .map(|browser| browser.device_pixel_ratio())
+        .unwrap_or(1.0);
+    let logical_width = canvas.client_width().max(1) as u32;
+    let logical_height = canvas.client_height().max(1) as u32;
+    let width = (logical_width as f64 * scale).round() as u32;
+    let height = (logical_height as f64 * scale).round() as u32;
+    canvas.set_width(width);
+    canvas.set_height(height);
+    (
+        winit::dpi::PhysicalSize::new(width, height),
+        winit::dpi::PhysicalSize::new(logical_width, logical_height),
+    )
+}
+
 struct EngineApp<G: Game> {
     game: Option<G>,
     window: Option<Arc<Window>>,
@@ -167,6 +192,13 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                     .and_then(|d| d.get_element_by_id("aurora-canvas"))
                     .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
                 {
+                    let scale = web_sys::window()
+                        .map(|window| window.device_pixel_ratio())
+                        .unwrap_or(1.0);
+                    let width = (canvas.client_width().max(1) as f64 * scale).round() as u32;
+                    let height = (canvas.client_height().max(1) as f64 * scale).round() as u32;
+                    canvas.set_width(width);
+                    canvas.set_height(height);
                     attrs.with_canvas(Some(canvas))
                 } else {
                     attrs
@@ -188,14 +220,10 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
         {
             use winit::platform::web::WindowExtWebSys;
             if let Some(canvas) = window.canvas() {
-                canvas.set_width(1280);
-                canvas.set_height(720);
                 let style = canvas.style();
                 let _ = style.set_property("width", "100%");
-                let _ = style.set_property("max-width", "1280px");
-                let _ = style.set_property("aspect-ratio", "16 / 9");
+                let _ = style.set_property("height", "100%");
                 let _ = style.set_property("display", "block");
-                let _ = style.set_property("margin", "0 auto");
                 let _ = style.set_property("background", "#0a0d1a");
             }
         }
@@ -207,6 +235,14 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::RendererReady(mut renderer) => {
+                #[cfg(target_arch = "wasm32")]
+                if let Some(window) = &self.window {
+                    let (surface, viewport) = web_surface_size(window);
+                    renderer.resize(surface);
+                    renderer
+                        .camera
+                        .set_viewport(viewport.width as f32, viewport.height as f32);
+                }
                 if let Some(game) = self.game.as_mut() {
                     game.on_start(&mut renderer);
                 }
@@ -245,8 +281,19 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                 event_loop.exit();
             }
             WindowEvent::Resized(physical_size) => {
+                #[cfg(target_arch = "wasm32")]
+                let _ = physical_size;
                 if let Some(renderer) = self.renderer.as_mut() {
+                    #[cfg(not(target_arch = "wasm32"))]
                     renderer.resize(physical_size);
+                    #[cfg(target_arch = "wasm32")]
+                    if let Some(window) = &self.window {
+                        let (surface, viewport) = web_surface_size(window);
+                        renderer.resize(surface);
+                        renderer
+                            .camera
+                            .set_viewport(viewport.width as f32, viewport.height as f32);
+                    }
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();
@@ -297,7 +344,16 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                 match renderer.render(self.time.elapsed) {
                     Ok(()) => {}
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                        #[cfg(not(target_arch = "wasm32"))]
                         renderer.resize(window.inner_size());
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            let (surface, viewport) = web_surface_size(window);
+                            renderer.resize(surface);
+                            renderer
+                                .camera
+                                .set_viewport(viewport.width as f32, viewport.height as f32);
+                        }
                     }
                     Err(wgpu::SurfaceError::OutOfMemory) => {
                         log::error!("GPU out of memory");

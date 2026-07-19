@@ -80,7 +80,7 @@ impl Time {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct InstantCompat {
+pub(crate) struct InstantCompat {
     #[cfg(not(target_arch = "wasm32"))]
     inner: std::time::Instant,
     #[cfg(target_arch = "wasm32")]
@@ -88,7 +88,7 @@ struct InstantCompat {
 }
 
 impl InstantCompat {
-    fn now() -> Self {
+    pub(crate) fn now() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
             Self {
@@ -103,7 +103,7 @@ impl InstantCompat {
         }
     }
 
-    fn duration_since(self, earlier: Self) -> Duration {
+    pub(crate) fn duration_since(self, earlier: Self) -> Duration {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.inner.duration_since(earlier.inner)

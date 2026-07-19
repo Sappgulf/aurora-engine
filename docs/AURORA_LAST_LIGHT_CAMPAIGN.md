@@ -106,11 +106,14 @@ sectors.
 
 ## First playable vertical slice: Reclaim the Reactor
 
-The current demo becomes a command-map mission. The player begins with three
-Lantern units: one Warden, one Engineer, and one Surveyor. Left-click selects;
-drag selects a squad; right-click moves or interacts. Restore three power nodes,
-hold the reactor circle, and defeat the Choir Sentinel. The mission fails if all
-Lantern units are lost and succeeds when the reactor reaches full stability.
+The playable mission is a command-map operation. The player begins with three
+Lantern units and a field fabricator: one Warden, one Engineer, and one Surveyor.
+Left-click selects; drag selects a squad; right-click moves or attacks. Restored
+relays join the power lattice and generate salvage, letting the player queue
+reinforcements without turning units into disposable spam. Restore three power
+nodes, hold the reactor circle, and defeat the Choir Canticle. Victory persists
+the Lumen contact, campaign currency, and mission-three unlock across native and
+browser sessions.
 
 ## Campaign continuity data
 

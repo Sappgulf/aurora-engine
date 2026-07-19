@@ -89,10 +89,13 @@ systems it uses can be adopted by a second 2D game without copying demo code.
 - [x] Authored campaign, factions, characters, mission arc, and asset guide
 - [x] Production unit and structure atlases
 - [x] Playable **Reclaim the Reactor** mission (`examples/last_light`)
+- [x] Resource economy, production queues, and connected power-network graph
+- [x] Control groups and viewport-anchored command-card UI
+- [x] Versioned campaign persistence and mission unlock state
 - [ ] Per-unit animation strips and clip state machine
-- [ ] Structure placement, resource economy, and power-network graph
-- [ ] Minimap, control groups, and command-card UI
-- [ ] Campaign persistence and mission-to-mission upgrade state
+- [ ] Player-authored structure placement and validation previews
+- [ ] Tactical minimap with fog, pings, and camera navigation
+- [ ] Mission-to-mission upgrade tree and specialist loadouts
 
 **Exit criteria:** select and command a Lantern squad, reveal the sector, restore
 three relays, defeat a Choir command unit, and complete the mission on native
