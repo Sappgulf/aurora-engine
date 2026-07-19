@@ -1,147 +1,38 @@
 //! Aurora: Last Light — Reclaim the Reactor.
 //! Point-and-click RTS vertical slice powered by Aurora Engine.
 
+mod assets;
+mod campaign;
+mod mission_state;
 mod missions;
+mod save;
+mod units;
 
 use std::collections::{HashMap, VecDeque};
 
+use assets::TextureAsset;
 use aurora_engine::{
     mark_obstacles, run, Aabb, AiParams, AnimationClip, AnimationPlayer, BitmapText, Color,
     FactionId, FogOfWar, FogState, FrameCtx, Game, MinimapTransform, NavGrid, PlacementError,
-    PlacementRules, PointLight, PowerGrid, PowerNode, PowerNodeId, ProductId, ProductionQueue,
-    ProductionRecipe, QueueError, Renderer, ResourceBank, RtsWorld, SaveData, SaveStore,
-    SelectionBox, SimpleAggroAi, Sprite, Texture, TextureAtlas, TextureHandle, UnitId, UnitOrder,
+    PlacementRules, PointLight, PowerGrid, PowerNode, PowerNodeId, ProductionQueue, QueueError,
+    Renderer, ResourceBank, RtsWorld, SelectionBox, SimpleAggroAi, Sprite, Texture, TextureAtlas,
+    TextureHandle, UnitId, UnitOrder,
 };
+use campaign::*;
 use glam::Vec2;
+use mission_state::{FieldBeacon, Relay, StructureKind};
 use missions::{MissionDef, VictoryCondition};
+use save::{CampaignStore, SaveData};
+use units::{UnitKind, CHOIR, PLAYER};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 const MAP_SIZE: Vec2 = Vec2::new(2600.0, 1460.0);
 const NAV_CELL_SIZE: f32 = 40.0;
-const PLAYER: FactionId = FactionId(1);
-const CHOIR: FactionId = FactionId(2);
 const UNIT_ATLAS_SIZE: Vec2 = Vec2::new(1536.0, 1024.0);
 const STRUCTURE_ATLAS_SIZE: Vec2 = Vec2::splat(1254.0);
 const REACTION_ATLAS_SIZE: Vec2 = Vec2::new(1024.0, 1536.0);
 const FABRICATOR_NODE: PowerNodeId = PowerNodeId(0);
-const WARDEN_PRODUCT: ProductId = ProductId(0);
-const ENGINEER_PRODUCT: ProductId = ProductId(1);
-const SURVEYOR_PRODUCT: ProductId = ProductId(2);
 const BEACON_COST: u32 = 50;
-const UPGRADE_OPTICS: &str = "field-optics";
-const UPGRADE_PLATING: &str = "reactive-plating";
-const UPGRADE_OVERCLOCK: &str = "fabricator-overclock";
-const IVO: &str = "ivo-rook";
-const SENA: &str = "sena-quill";
-const IVO_RIGGER: &str = "relay-rigger";
-const IVO_SMITH: &str = "salvage-smith";
-const SENA_DEEP_SCAN: &str = "deep-scan";
-const SENA_GHOST_MARK: &str = "ghost-mark";
-const MARA: &str = "mara-vey";
-const MARA_RESCUE: &str = "rescue-screen";
-const MARA_RAPID: &str = "rapid-command";
-const OLAN: &str = "olan-voss";
-const OLAN_LATTICE: &str = "lattice-audit";
-const OLAN_DECODER: &str = "choir-decoder";
-const LUMEN: &str = "lumen-voice";
-const LUMEN_CONTACT: &str = "lumen-contact-established";
-const LUMEN_GUARDIAN: &str = "guardian-protocol";
-const LUMEN_WITNESS: &str = "witness-protocol";
-const LUMEN_AWAKENED: &str = "lumen-awakened";
-const MERIDIAN: &str = "meridian-compact";
-const MERIDIAN_ALLIED: &str = "meridian-allied";
-const MERIDIAN_BASTION: &str = "bastion-accord";
-const MERIDIAN_CHARTER: &str = "salvage-charter";
-const VERDANT: &str = "verdant-wake";
-const VERDANT_CULTIVATED: &str = "verdant-cultivated";
-const VERDANT_BLOOM: &str = "bloom-covenant";
-const VERDANT_BRIAR: &str = "briar-covenant";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UnitKind {
-    Warden,
-    Engineer,
-    Surveyor,
-    Needle,
-    Canticle,
-    BellMine,
-}
-
-impl UnitKind {
-    fn from_product(product: ProductId) -> Option<Self> {
-        match product {
-            WARDEN_PRODUCT => Some(Self::Warden),
-            ENGINEER_PRODUCT => Some(Self::Engineer),
-            SURVEYOR_PRODUCT => Some(Self::Surveyor),
-            _ => None,
-        }
-    }
-
-    fn recipe(self) -> Option<ProductionRecipe> {
-        match self {
-            Self::Warden => Some(ProductionRecipe::new(WARDEN_PRODUCT, 90, 6_000)),
-            Self::Engineer => Some(ProductionRecipe::new(ENGINEER_PRODUCT, 70, 5_000)),
-            Self::Surveyor => Some(ProductionRecipe::new(SURVEYOR_PRODUCT, 60, 4_000)),
-            Self::Needle | Self::Canticle | Self::BellMine => None,
-        }
-    }
-
-    fn atlas_frame(self) -> u32 {
-        match self {
-            Self::Warden => 0,
-            Self::Engineer => 1,
-            Self::Surveyor => 2,
-            Self::Needle => 3,
-            Self::Canticle => 4,
-            Self::BellMine => 5,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Warden => "WARDEN",
-            Self::Engineer => "ENGINEER",
-            Self::Surveyor => "SURVEYOR",
-            Self::Needle => "CHOIR NEEDLE",
-            Self::Canticle => "CHOIR CANTICLE",
-            Self::BellMine => "BELL MINE",
-        }
-    }
-
-    fn scale(self) -> f32 {
-        match self {
-            Self::Warden => 116.0,
-            Self::Engineer => 108.0,
-            Self::Surveyor => 105.0,
-            Self::Needle => 104.0,
-            Self::Canticle => 116.0,
-            Self::BellMine => 96.0,
-        }
-    }
-}
-
-struct Relay {
-    position: Vec2,
-    progress: f32,
-    active: bool,
-}
-
-struct FieldBeacon {
-    position: Vec2,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StructureKind {
-    Relay(usize),
-    Fabricator,
-    Reactor,
-}
-
-impl StructureKind {
-    const RELAY_RADIUS: f32 = 85.0;
-    const FABRICATOR_RADIUS: f32 = 105.0;
-    const REACTOR_RADIUS: f32 = 135.0;
-}
 
 struct LastLight {
     tex_environment: TextureHandle,
@@ -186,7 +77,7 @@ struct LastLight {
     production: ProductionQueue,
     power: PowerGrid,
     status: Option<(String, f32)>,
-    save_store: SaveStore,
+    save_store: CampaignStore,
     save_data: SaveData,
     victory_saved: bool,
     mission_select: bool,
@@ -221,8 +112,8 @@ struct LastLight {
 
 impl LastLight {
     fn new() -> Self {
-        let save_store = SaveStore::new("last-light-campaign");
-        let save_data = save_store.load().ok().flatten().unwrap_or_default();
+        let save_store = CampaignStore::new("last-light", "campaign");
+        let save_data = save::load(&save_store).ok().flatten().unwrap_or_default();
         let starting_salvage = 150_u32.saturating_add(save_data.campaign.currency.min(100) as u32);
         let unlocked_tier = save_data.campaign.unlocked_mission;
         let mission_cursor = missions::all()
@@ -480,10 +371,15 @@ impl LastLight {
             self.status = Some((format!("{label} REQUIRES {cost} LUMEN"), 2.5));
             return;
         }
-        self.status = Some(match self.save_store.save(&self.save_data) {
-            Ok(()) => (format!("{label} INSTALLED"), 3.5),
-            Err(error) => (format!("UPGRADE SAVE FAILED: {error}"), 5.0),
-        });
+        self.status = Some(
+            match self
+                .save_store
+                .save(&save::envelope(self.save_data.clone()))
+            {
+                Ok(()) => (format!("{label} INSTALLED"), 3.5),
+                Err(error) => (format!("UPGRADE SAVE FAILED: {error}"), 5.0),
+            },
+        );
     }
 
     fn specialist_module<'a>(&'a self, specialist: &str, default: &'a str) -> &'a str {
@@ -505,10 +401,15 @@ impl LastLight {
             first
         };
         self.save_data.campaign.equip_specialist(specialist, next);
-        self.status = Some(match self.save_store.save(&self.save_data) {
-            Ok(()) => (format!("{label} LOADOUT: {}", next.to_uppercase()), 3.5),
-            Err(error) => (format!("LOADOUT SAVE FAILED: {error}"), 5.0),
-        });
+        self.status = Some(
+            match self
+                .save_store
+                .save(&save::envelope(self.save_data.clone()))
+            {
+                Ok(()) => (format!("{label} LOADOUT: {}", next.to_uppercase()), 3.5),
+                Err(error) => (format!("LOADOUT SAVE FAILED: {error}"), 5.0),
+            },
+        );
     }
 
     fn beacon_cost(&self) -> u32 {
@@ -1069,13 +970,18 @@ impl LastLight {
             self.save_data.campaign.record_decision(decision);
         }
         let unlock_next = self.mission.unlock_next;
-        self.status = Some(match self.save_store.save(&self.save_data) {
-            Ok(()) => (
-                format!("CAMPAIGN SAVED — MISSION {unlock_next} UNLOCKED"),
-                8.0,
-            ),
-            Err(error) => (format!("SAVE FAILED: {error}"), 8.0),
-        });
+        self.status = Some(
+            match self
+                .save_store
+                .save(&save::envelope(self.save_data.clone()))
+            {
+                Ok(()) => (
+                    format!("CAMPAIGN SAVED — MISSION {unlock_next} UNLOCKED"),
+                    8.0,
+                ),
+                Err(error) => (format!("SAVE FAILED: {error}"), 8.0),
+            },
+        );
         self.victory_saved = true;
     }
 
@@ -1325,7 +1231,9 @@ impl LastLight {
     fn update_camera(&mut self, ctx: &mut FrameCtx<'_>, dt: f32) {
         let viewport = ctx.renderer.camera.viewport();
         let mouse = ctx.input.mouse_position;
-        let mut pan = ctx.input.axis_wasd();
+        let mut pan =
+            ctx.input
+                .axis_from_keys(KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA, KeyCode::KeyD);
         const EDGE: f32 = 20.0;
         if mouse.x < EDGE {
             pan.x -= 1.0;
@@ -1758,6 +1666,7 @@ impl Game for LastLight {
     }
 
     fn on_start(&mut self, renderer: &mut Renderer) {
+        debug_assert_eq!(assets::manifest().len(), TextureAsset::ALL.len());
         let (
             environment,
             units,
@@ -1775,72 +1684,17 @@ impl Game for LastLight {
         ) = {
             let gpu = renderer.gpu();
             (
-                Texture::from_bytes(
-                    &gpu,
-                    include_bytes!("../assets/reactor-sector-v001.png"),
-                    "Last Light reactor sector",
-                )
-                .expect("reactor sector must decode"),
-                Texture::from_bytes(
-                    &gpu,
-                    include_bytes!("../assets/last-light-units-atlas-v001.png"),
-                    "Last Light units",
-                )
-                .expect("unit atlas must decode"),
-                Texture::from_bytes(
-                    &gpu,
-                    include_bytes!("../assets/warden-move-strip-v001.png"),
-                    "Warden move animation",
-                )
-                .expect("Warden animation must decode"),
-                Texture::from_bytes(
-                    &gpu,
-                    include_bytes!("../assets/engineer-move-strip-v001.png"),
-                    "Engineer move animation",
-                )
-                .expect("Engineer animation must decode"),
-                Texture::from_bytes(
-                    &gpu,
-                    include_bytes!("../assets/surveyor-scan-strip-v001.png"),
-                    "Surveyor scan animation",
-                )
-                .expect("Surveyor animation must decode"),
-                Texture::from_bytes(
-                    &gpu,
-                    include_bytes!("../assets/needle-attack-strip-v001.png"),
-                    "Choir Needle attack animation",
-                )
-                .expect("Needle animation must decode"),
-                Texture::from_bytes(
-                    &gpu,
-                    include_bytes!("../assets/canticle-command-strip-v001.png"),
-                    "Choir Canticle command animation",
-                )
-                .expect("Canticle animation must decode"),
-                Texture::from_bytes(
-                    &gpu,
-                    include_bytes!("../assets/bell-mine-arm-strip-v001.png"),
-                    "Choir Bell Mine arming animation",
-                )
-                .expect("Bell Mine animation must decode"),
-                Texture::from_bytes(
-                    &gpu,
-                    include_bytes!("../assets/unit-hit-reactions-atlas-v001.png"),
-                    "unit hit reactions",
-                )
-                .expect("hit reaction atlas must decode"),
-                Texture::from_bytes(
-                    &gpu,
-                    include_bytes!("../assets/unit-down-reactions-atlas-v001.png"),
-                    "unit shutdown reactions",
-                )
-                .expect("shutdown reaction atlas must decode"),
-                Texture::from_bytes(
-                    &gpu,
-                    include_bytes!("../assets/last-light-structures-atlas-v001.png"),
-                    "Last Light structures",
-                )
-                .expect("structure atlas must decode"),
+                assets::load_texture(&gpu, TextureAsset::ReactorSector),
+                assets::load_texture(&gpu, TextureAsset::Units),
+                assets::load_texture(&gpu, TextureAsset::WardenMove),
+                assets::load_texture(&gpu, TextureAsset::EngineerMove),
+                assets::load_texture(&gpu, TextureAsset::SurveyorScan),
+                assets::load_texture(&gpu, TextureAsset::NeedleAttack),
+                assets::load_texture(&gpu, TextureAsset::CanticleCommand),
+                assets::load_texture(&gpu, TextureAsset::BellMineArm),
+                assets::load_texture(&gpu, TextureAsset::HitReactions),
+                assets::load_texture(&gpu, TextureAsset::DownReactions),
+                assets::load_texture(&gpu, TextureAsset::Structures),
                 Texture::soft_circle(&gpu, 64, Color::WHITE),
                 Texture::solid(&gpu, Color::WHITE),
             )
@@ -2040,7 +1894,9 @@ impl Game for LastLight {
                 && self.selected_engineer_near(console)
             {
                 self.save_data.campaign.record_decision(LUMEN_AWAKENED);
-                let _ = self.save_store.save(&self.save_data);
+                let _ = self
+                    .save_store
+                    .save(&save::envelope(self.save_data.clone()));
                 self.status = Some(("LUMEN CONSOLE AWAKENED".to_owned(), 4.0));
             }
         }

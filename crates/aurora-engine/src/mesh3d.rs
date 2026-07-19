@@ -33,7 +33,7 @@ impl Mesh3D {
         if vertices.is_empty() {
             return Err(MeshError::EmptyVertices);
         }
-        if indices.len() % 3 != 0 {
+        if !indices.len().is_multiple_of(3) {
             return Err(MeshError::NonTriangleIndices);
         }
         if indices

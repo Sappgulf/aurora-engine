@@ -1,24 +1,52 @@
 //! Keyboard and mouse input state.
 
 use glam::Vec2;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 
-/// Semantic controls used by games; physical key bindings remain centralized.
+/// A game-defined semantic action. Aurora does not reserve gameplay names.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ActionId(String);
+impl ActionId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A configurable keyboard binding. More device variants can be added without
+/// changing game simulation code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Action {
-    MoveUp,
-    MoveDown,
-    MoveLeft,
-    MoveRight,
-    Pause,
-    Restart,
-    TogglePostFx,
-    MenuUp,
-    MenuDown,
-    MenuConfirm,
-    MenuBack,
+pub struct KeyBinding {
+    pub key: KeyCode,
+    pub modifiers: ModifiersState,
+}
+impl KeyBinding {
+    pub fn key(key: KeyCode) -> Self {
+        Self {
+            key,
+            modifiers: ModifiersState::empty(),
+        }
+    }
+    pub fn chord(key: KeyCode, modifiers: ModifiersState) -> Self {
+        Self { key, modifiers }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct InputMap {
+    bindings: HashMap<ActionId, Vec<KeyBinding>>,
+}
+impl InputMap {
+    pub fn bind_key(&mut self, action: ActionId, binding: KeyBinding) {
+        self.bindings.entry(action).or_default().push(binding);
+    }
+    pub fn bindings(&self, action: &ActionId) -> &[KeyBinding] {
+        self.bindings.get(action).map(Vec::as_slice).unwrap_or(&[])
+    }
 }
 
 /// Per-frame input snapshot maintained by the engine.
@@ -190,32 +218,23 @@ impl Input {
         self.modifiers.control_key() || self.modifiers.super_key()
     }
 
-    pub fn action_down(&self, action: Action) -> bool {
-        self.action_keys(action)
+    pub fn action_down(&self, map: &InputMap, action: &ActionId) -> bool {
+        map.bindings(action)
             .iter()
-            .any(|key| self.key_down(*key))
+            .any(|binding| self.binding_down(*binding))
     }
 
-    pub fn action_pressed(&self, action: Action) -> bool {
-        self.action_keys(action)
+    pub fn action_pressed(&self, map: &InputMap, action: &ActionId) -> bool {
+        map.bindings(action)
             .iter()
-            .any(|key| self.key_pressed(*key))
+            .any(|binding| self.binding_pressed(*binding))
     }
 
-    fn action_keys(&self, action: Action) -> &'static [KeyCode] {
-        match action {
-            Action::MoveUp => &[KeyCode::KeyW, KeyCode::ArrowUp],
-            Action::MoveDown => &[KeyCode::KeyS, KeyCode::ArrowDown],
-            Action::MoveLeft => &[KeyCode::KeyA, KeyCode::ArrowLeft],
-            Action::MoveRight => &[KeyCode::KeyD, KeyCode::ArrowRight],
-            Action::Pause => &[KeyCode::Escape],
-            Action::Restart => &[KeyCode::KeyR],
-            Action::TogglePostFx => &[KeyCode::KeyP],
-            Action::MenuUp => &[KeyCode::ArrowUp, KeyCode::KeyW],
-            Action::MenuDown => &[KeyCode::ArrowDown, KeyCode::KeyS],
-            Action::MenuConfirm => &[KeyCode::Enter, KeyCode::Space],
-            Action::MenuBack => &[KeyCode::Escape],
-        }
+    fn binding_down(&self, binding: KeyBinding) -> bool {
+        self.key_down(binding.key) && self.modifiers.contains(binding.modifiers)
+    }
+    fn binding_pressed(&self, binding: KeyBinding) -> bool {
+        self.key_pressed(binding.key) && self.modifiers.contains(binding.modifiers)
     }
 
     pub fn mouse_down(&self, button: MouseButton) -> bool {
@@ -230,19 +249,25 @@ impl Input {
         self.mouse_buttons_released.contains(&button)
     }
 
-    /// WASD / arrow movement vector (normalized if non-zero).
-    pub fn axis_wasd(&self) -> Vec2 {
+    /// Resolves a normalized axis from game-chosen physical keys.
+    pub fn axis_from_keys(
+        &self,
+        up: KeyCode,
+        down: KeyCode,
+        left: KeyCode,
+        right: KeyCode,
+    ) -> Vec2 {
         let mut v = Vec2::ZERO;
-        if self.action_down(Action::MoveUp) {
+        if self.key_down(up) {
             v.y += 1.0;
         }
-        if self.action_down(Action::MoveDown) {
+        if self.key_down(down) {
             v.y -= 1.0;
         }
-        if self.action_down(Action::MoveLeft) {
+        if self.key_down(left) {
             v.x -= 1.0;
         }
-        if self.action_down(Action::MoveRight) {
+        if self.key_down(right) {
             v.x += 1.0;
         }
         if v.length_squared() > 0.0 {
@@ -258,11 +283,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn actions_keep_physical_bindings_out_of_game_logic() {
+    fn maps_keep_physical_bindings_out_of_game_logic() {
         let mut input = Input::new();
         input.keys_down.insert(KeyCode::ArrowUp);
-        assert!(input.action_down(Action::MoveUp));
-        assert_eq!(input.axis_wasd(), Vec2::Y);
+        let action = ActionId::new("example.move_up");
+        let mut map = InputMap::default();
+        map.bind_key(action.clone(), KeyBinding::key(KeyCode::ArrowUp));
+        assert!(input.action_down(&map, &action));
+        assert_eq!(
+            input.axis_from_keys(
+                KeyCode::ArrowUp,
+                KeyCode::ArrowDown,
+                KeyCode::ArrowLeft,
+                KeyCode::ArrowRight
+            ),
+            Vec2::Y
+        );
     }
 
     #[test]

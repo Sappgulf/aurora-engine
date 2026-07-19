@@ -2,14 +2,15 @@
 resolver = "2"
 members = [
     "crates/aurora-engine",
-    "examples/triangle_demo",
-    "examples/playground",
-    "examples/aurora_run",
-    "examples/last_light",
-    "examples/mesh_demo",
-    "examples/skirmish",
+    "games/aurora-run",
+    "games/last-light",
+    "demos/triangle",
+    "demos/playground",
+    "demos/mesh",
+    "demos/skirmish",
+    "demos/contract-lab",
 ]
-default-members = ["examples/last_light"]
+default-members = ["games/last-light"]
 
 [workspace.package]
 version = "0.3.0"

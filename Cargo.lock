@@ -219,6 +219,7 @@ dependencies = [
  "env_logger",
  "glam",
  "log",
+ "serde",
  "wasm-bindgen",
  "winit",
 ]
@@ -471,6 +472,15 @@ checksum = "86919cef3e37b9356ccf54d4421208c17ecfda01beae61393e7ffd72916c0ef1"
 dependencies = [
  "log",
  "web-sys",
+]
+
+[[package]]
+name = "contract_lab"
+version = "0.3.0"
+dependencies = [
+ "aurora-engine",
+ "serde",
+ "winit",
 ]
 
 [[package]]
@@ -1141,6 +1151,7 @@ dependencies = [
  "aurora-engine",
  "glam",
  "log",
+ "serde",
  "winit",
 ]
 

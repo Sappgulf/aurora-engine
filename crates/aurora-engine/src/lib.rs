@@ -45,7 +45,7 @@ pub use camera3d::Camera3D;
 pub use collision::Aabb;
 pub use color::Color;
 pub use diagnostics::{DiagnosticSnapshot, Diagnostics};
-pub use input::{Action, Input};
+pub use input::{ActionId, Input, InputMap, KeyBinding};
 pub use loader::{AssetLoadEntry, AssetLoadQueue, AssetLoadState};
 #[cfg(feature = "3d")]
 pub use mesh3d::{GpuMesh, Material3D, Mesh3D, MeshError, MeshVertex};
@@ -61,10 +61,7 @@ pub use rts::{
     ProductionRecipe, QueueError, ResourceBank, RtsUnit, RtsWorld, Selection, SelectionBox, UnitId,
     UnitOrder,
 };
-pub use save::{
-    CampaignProgress, GameSettings, SaveData, SaveError, SaveStore, SpecialistLoadout,
-    DEFAULT_SAVE_SLOT, SAVE_FORMAT_VERSION,
-};
+pub use save::{SaveEnvelope, SaveError, SaveStore, DEFAULT_SAVE_SLOT};
 pub use scene::{EntityId, Scene};
 pub use sprite::{QueuedSprite, Sprite, SpriteBatch};
 pub use texture::Texture;

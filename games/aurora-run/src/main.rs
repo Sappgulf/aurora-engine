@@ -1,11 +1,14 @@
 //! Aurora Run — collect orbs, dodge hazards. Showcases M2 systems.
 
+mod save;
+
 use aurora_engine::{
-    run, Aabb, Action, Animation, BitmapText, Color, FrameCtx, Game, GameFlow, MenuCommand,
-    MenuInput, MenuScreen, MenuState, ParticleSystem, PointLight, Renderer, RngLite, SaveData,
-    SaveStore, Sprite, Texture, TextureAtlas, TextureHandle, XorShift32,
+    run, Aabb, ActionId, Animation, BitmapText, Color, FrameCtx, Game, GameFlow, InputMap,
+    KeyBinding, MenuCommand, MenuInput, MenuScreen, MenuState, ParticleSystem, PointLight,
+    Renderer, RngLite, Sprite, Texture, TextureAtlas, TextureHandle, XorShift32,
 };
 use glam::Vec2;
+use save::{RunSave, RunStore};
 use winit::keyboard::KeyCode;
 
 /// One shared world extent for simulation, camera limits, and the environment
@@ -74,8 +77,8 @@ struct AuroraRun {
     dash_charges: u32,
     facing: Vec2,
     menu: MenuState,
-    save: SaveData,
-    save_store: SaveStore,
+    save: RunSave,
+    save_store: RunStore,
     run_recorded: bool,
 }
 
@@ -114,8 +117,8 @@ impl AuroraRun {
             dash_charges: 2,
             facing: Vec2::Y,
             menu: MenuState::new(),
-            save: SaveData::default(),
-            save_store: SaveStore::new("aurora-run"),
+            save: RunSave::default(),
+            save_store: RunStore::new("aurora-run", "profile"),
             run_recorded: false,
         }
     }
@@ -192,13 +195,28 @@ impl AuroraRun {
     }
 
     fn menu_input(ctx: &FrameCtx<'_>) -> Option<MenuInput> {
-        if ctx.input.action_pressed(Action::MenuUp) {
+        let mut map = InputMap::default();
+        let up = ActionId::new("aurora_run.menu.up");
+        let down = ActionId::new("aurora_run.menu.down");
+        let confirm = ActionId::new("aurora_run.menu.confirm");
+        let back = ActionId::new("aurora_run.menu.back");
+        for key in [KeyCode::ArrowUp, KeyCode::KeyW] {
+            map.bind_key(up.clone(), KeyBinding::key(key));
+        }
+        for key in [KeyCode::ArrowDown, KeyCode::KeyS] {
+            map.bind_key(down.clone(), KeyBinding::key(key));
+        }
+        for key in [KeyCode::Enter, KeyCode::Space] {
+            map.bind_key(confirm.clone(), KeyBinding::key(key));
+        }
+        map.bind_key(back.clone(), KeyBinding::key(KeyCode::Escape));
+        if ctx.input.action_pressed(&map, &up) {
             Some(MenuInput::Up)
-        } else if ctx.input.action_pressed(Action::MenuDown) {
+        } else if ctx.input.action_pressed(&map, &down) {
             Some(MenuInput::Down)
-        } else if ctx.input.action_pressed(Action::MenuConfirm) {
+        } else if ctx.input.action_pressed(&map, &confirm) {
             Some(MenuInput::Confirm)
-        } else if ctx.input.action_pressed(Action::MenuBack) {
+        } else if ctx.input.action_pressed(&map, &back) {
             Some(MenuInput::Back)
         } else {
             None
@@ -231,7 +249,7 @@ impl AuroraRun {
     }
 
     fn persist_save(&self) {
-        if let Err(error) = self.save_store.save(&self.save) {
+        if let Err(error) = self.save_store.save(&save::envelope(self.save.clone())) {
             log::warn!("could not save Aurora Run progress: {error}");
         }
     }
@@ -414,7 +432,7 @@ impl Game for AuroraRun {
         self.player_atlas = TextureAtlas::new(self.tex_units, 2, 2, UNIT_ATLAS_SIZE);
         self.drone_atlas = TextureAtlas::new(self.tex_units, 2, 2, UNIT_ATLAS_SIZE);
 
-        match self.save_store.load() {
+        match save::load(&self.save_store) {
             Ok(Some(save)) => self.save = save,
             Ok(None) => {}
             Err(error) => log::warn!("could not load Aurora Run progress: {error}"),
@@ -465,7 +483,9 @@ impl Game for AuroraRun {
 
         // Accelerated steering preserves the fixed-step collision model while
         // adding a short, controllable sense of mass to each direction change.
-        let dir = ctx.input.axis_wasd();
+        let dir =
+            ctx.input
+                .axis_from_keys(KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA, KeyCode::KeyD);
         if dir.length_squared() > 0.0 {
             self.facing = dir.normalize();
         }

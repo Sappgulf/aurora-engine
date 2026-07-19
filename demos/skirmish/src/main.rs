@@ -383,7 +383,9 @@ impl Skirmish {
     fn update_camera(&mut self, ctx: &mut FrameCtx<'_>, dt: f32) {
         let viewport = ctx.renderer.camera.viewport();
         let mouse = ctx.input.mouse_position;
-        let mut pan = ctx.input.axis_wasd();
+        let mut pan =
+            ctx.input
+                .axis_from_keys(KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA, KeyCode::KeyD);
         const EDGE: f32 = 20.0;
         if mouse.x < EDGE {
             pan.x -= 1.0;

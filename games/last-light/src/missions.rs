@@ -7,7 +7,7 @@
 use aurora_engine::Aabb;
 use glam::Vec2;
 
-use crate::UnitKind;
+use crate::units::UnitKind;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PlayerSpawn {

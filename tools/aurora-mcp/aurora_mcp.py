@@ -8,7 +8,7 @@ which is limited to fixed Cargo commands and is clearly annotated as such.
 
 Install the dependencies in ``requirements.txt`` and start it with:
 
-    python3 mcp/aurora_mcp.py
+    python3 tools/aurora-mcp/aurora_mcp.py
 
 Use ``AURORA_ENGINE_ROOT`` only when the server lives outside of the checkout.
 """
@@ -38,7 +38,7 @@ LOGGER = logging.getLogger(SERVER_NAME)
 def _repo_root() -> Path:
     """Resolve and validate the one repository this server may inspect."""
     configured = os.environ.get("AURORA_ENGINE_ROOT")
-    root = Path(configured).expanduser().resolve() if configured else Path(__file__).resolve().parents[1]
+    root = Path(configured).expanduser().resolve() if configured else Path(__file__).resolve().parents[2]
     if not (root / "Cargo.toml").is_file() or not (root / "crates" / "aurora-engine").is_dir():
         raise RuntimeError(
             "Aurora Engine repository not found. Start from the checkout or set "
@@ -57,16 +57,16 @@ SOURCE_MAP: dict[str, tuple[str, str]] = {
     "engine_app": ("crates/aurora-engine/src/app.rs", "Application loop and Game callbacks."),
     "engine_renderer": ("crates/aurora-engine/src/renderer.rs", "wgpu sprite renderer and render targets."),
     "engine_camera": ("crates/aurora-engine/src/camera.rs", "2D camera projection and viewport helpers."),
-    "engine_input": ("crates/aurora-engine/src/input.rs", "Frame input, modifiers, and semantic actions."),
+    "engine_input": ("crates/aurora-engine/src/input.rs", "Frame input and game-owned semantic bindings."),
     "engine_scene": ("crates/aurora-engine/src/scene.rs", "Generation-safe scene/entity storage."),
     "engine_tilemap": ("crates/aurora-engine/src/tilemap.rs", "Tile layers, solid tiles, and triggers."),
     "engine_audio": ("crates/aurora-engine/src/audio.rs", "Audio mixer and sound cues."),
-    "engine_save": ("crates/aurora-engine/src/save.rs", "Portable settings and versioned campaign progress."),
+    "engine_save": ("crates/aurora-engine/src/save.rs", "Typed portable storage and versioned save envelopes."),
     "engine_diagnostics": ("crates/aurora-engine/src/diagnostics.rs", "Frame timing and render diagnostics."),
     "engine_rts": ("crates/aurora-engine/src/rts.rs", "RTS orders, economy, production, power, navigation, and fog."),
     "engine_3d": ("crates/aurora-engine/src/mesh3d.rs", "Feature-gated mesh/material contracts."),
-    "aurora_run": ("examples/aurora_run/src/main.rs", "Playable Aurora Run vertical slice."),
-    "last_light": ("examples/last_light/src/main.rs", "Playable Last Light RTS campaign mission."),
+    "aurora_run": ("games/aurora-run/src/main.rs", "Playable Aurora Run vertical slice."),
+    "last_light": ("games/last-light/src/main.rs", "Playable Last Light RTS campaign mission."),
     "last_light_campaign": ("docs/AURORA_LAST_LIGHT_CAMPAIGN.md", "Campaign, factions, characters, and mission arc."),
     "last_light_assets": ("docs/AURORA_LAST_LIGHT_ASSET_GUIDE.md", "Production asset and animation contract."),
 }

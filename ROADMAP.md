@@ -55,7 +55,7 @@
 - [x] Audio beeps (rodio native, Web Audio wasm)
 - [x] AABB collision
 - [x] CPU particles (from M1)
-- [x] Mini-game **Aurora Run** (`examples/aurora_run`)
+- [x] Mini-game **Aurora Run** (`games/aurora-run`)
 - [ ] HDR / film grain / 2D lights (later)
 - [ ] Text rendering / egui HUD (later)
 
@@ -88,7 +88,7 @@ systems it uses can be adopted by a second 2D game without copying demo code.
 - [x] Strategic pan/zoom camera bounded to the authored world
 - [x] Authored campaign, factions, characters, mission arc, and asset guide
 - [x] Production unit and structure atlases
-- [x] Playable **Reclaim the Reactor** mission (`examples/last_light`)
+- [x] Playable **Reclaim the Reactor** mission (`games/last-light`)
 - [x] Resource economy, production queues, and connected power-network graph
 - [x] Control groups and viewport-anchored command-card UI
 - [x] Versioned campaign persistence and mission unlock state
@@ -108,7 +108,7 @@ systems it uses can be adopted by a second 2D game without copying demo code.
       obstacles, Lumen-wake choice)
 - [x] Generic `SimpleAggroAi` (target scoring, retreat, focus-fire spread,
       `NavGrid`-routed approach) shared by the campaign and skirmish mode
-- [x] Skirmish free-play mode (`examples/skirmish`) reusing RTS core systems
+- [x] Skirmish free-play mode (`demos/skirmish`) reusing RTS core systems
       without campaign save or authored art
 
 **Exit criteria:** select and command a Lantern squad, reveal the sector, restore
@@ -172,7 +172,8 @@ Ship a small complete game *in* Aurora (not a tech demo):
 aurora-engine/
 ├── crates/aurora-engine/     # library: Game trait, Renderer, Time, Color
 │   └── shaders/             # WGSL
-├── examples/triangle_demo/  # smoke test (native + Trunk web)
+├── games/                   # game-owned rules, saves, assets, and presentation
+├── demos/                   # small public-API proofs and smoke tests
 ├── scripts/                 # build-web.sh, run-native.sh
 └── ROADMAP.md               # this file
 ```

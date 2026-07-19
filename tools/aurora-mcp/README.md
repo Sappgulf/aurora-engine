@@ -8,16 +8,16 @@ Run these commands from the Aurora Engine root:
 
 ```bash
 python3 -m venv .venv-mcp
-.venv-mcp/bin/python -m pip install -r mcp/requirements.txt
+.venv-mcp/bin/python -m pip install -r tools/aurora-mcp/requirements.txt
 ```
 
-Copy `mcp/config.example.json` into your MCP client's configuration and replace its placeholder `cwd` with this checkout's absolute path. When using the virtual environment, set `command` to the absolute path of `.venv-mcp/bin/python`; keep `args` as `['mcp/aurora_mcp.py']`.
+Copy `tools/aurora-mcp/config.example.json` into your MCP client's configuration and replace its placeholder `cwd` with this checkout's absolute path. When using the virtual environment, set `command` to the absolute path of `.venv-mcp/bin/python`; keep `args` as `['tools/aurora-mcp/aurora_mcp.py']`.
 
 For a standalone smoke check, use the provided protocol test after installing dependencies:
 
 ```bash
-.venv-mcp/bin/python -m py_compile mcp/aurora_mcp.py
-.venv-mcp/bin/python mcp/test_protocol.py
+.venv-mcp/bin/python -m py_compile tools/aurora-mcp/aurora_mcp.py
+.venv-mcp/bin/python tools/aurora-mcp/test_protocol.py
 ```
 
 The server uses stdio. It must not print log messages to stdout, since stdout is reserved for MCP frames.

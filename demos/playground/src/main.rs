@@ -99,7 +99,9 @@ impl Game for Playground {
         let dt = ctx.time.fixed_dt;
         let _ = ctx.audio; // available for SFX
         let speed = 320.0;
-        let move_dir = ctx.input.axis_wasd();
+        let move_dir =
+            ctx.input
+                .axis_from_keys(KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA, KeyCode::KeyD);
         self.player += move_dir * speed * dt;
 
         // Camera gently follows player
@@ -156,7 +158,12 @@ impl Game for Playground {
         }
 
         // Trail while moving
-        if ctx.input.axis_wasd().length_squared() > 0.0 {
+        if ctx
+            .input
+            .axis_from_keys(KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA, KeyCode::KeyD)
+            .length_squared()
+            > 0.0
+        {
             let c = Color::rgba(0.2, 0.95, 0.8, 0.85);
             self.particles.emit_trail(self.player, c, &mut self.rng);
         }

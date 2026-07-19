@@ -187,7 +187,7 @@ disc beneath it.
 ## Naming and repository layout
 
 ```text
-examples/last_light/assets/
+games/last-light/assets/
   environments/<sector>/<asset>-v###.png
   factions/<faction>/<unit>/<clip>-strip-v###.png
   structures/<faction>/<structure>-v###.png
@@ -208,7 +208,7 @@ requests transparency. Never rename that file and ship it directly. Run:
 ```bash
 python3 tools/normalize_generated_strip.py \
   --input <generated-candidate.png> \
-  --output examples/last_light/assets/<unit>-<clip>-strip-v###.png \
+  --output games/last-light/assets/<unit>-<clip>-strip-v###.png \
   --frames 6 --frame-size 256
 ```
 

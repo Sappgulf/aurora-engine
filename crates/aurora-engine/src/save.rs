@@ -1,234 +1,32 @@
-//! Portable game settings and progress data.
+//! Cross-platform, game-owned persistence.
 //!
-//! The same [`SaveStore`] API uses a user-data file on native targets and
-//! browser `localStorage` on wasm. The payload remains plain JSON, making it
-//! simple to inspect, back up, and migrate.
+//! Aurora owns storage, slot sanitization, atomic writes, and the versioned
+//! envelope.  A game owns the payload and any migration from older versions.
 
-use serde::{Deserialize, Serialize};
-use std::fmt;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::{fmt, marker::PhantomData};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::{fs, path::PathBuf};
 
-/// Increment this when the meaning of persisted data changes.
-pub const SAVE_FORMAT_VERSION: u32 = 4;
-
-/// The default slot used by games that do not need multiple player profiles.
 pub const DEFAULT_SAVE_SLOT: &str = "default";
 
-/// User-facing render and accessibility preferences.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct GameSettings {
-    pub master_volume: f32,
-    pub music_volume: f32,
-    pub sfx_volume: f32,
-    pub ambience_volume: f32,
-    pub ui_volume: f32,
-    pub post_fx_enabled: bool,
-    pub screen_shake_enabled: bool,
-    pub reduced_motion: bool,
-}
-
-impl Default for GameSettings {
-    fn default() -> Self {
-        Self {
-            master_volume: 1.0,
-            music_volume: 0.8,
-            sfx_volume: 0.85,
-            ambience_volume: 0.7,
-            ui_volume: 0.9,
-            post_fx_enabled: true,
-            screen_shake_enabled: true,
-            reduced_motion: false,
-        }
-    }
-}
-
-impl GameSettings {
-    /// Clamp untrusted or hand-edited values to values the runtime accepts.
-    pub fn sanitize(&mut self) {
-        self.master_volume = self.master_volume.clamp(0.0, 1.0);
-        self.music_volume = self.music_volume.clamp(0.0, 1.0);
-        self.sfx_volume = self.sfx_volume.clamp(0.0, 1.0);
-        self.ambience_volume = self.ambience_volume.clamp(0.0, 1.0);
-        self.ui_volume = self.ui_volume.clamp(0.0, 1.0);
-    }
-}
-
-/// Renderer-independent continuity shared by campaign-style games.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpecialistLoadout {
-    pub specialist: String,
-    pub module: String,
-}
-
-/// Renderer-independent continuity shared by campaign-style games.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CampaignProgress {
-    pub unlocked_mission: u32,
-    pub completed_missions: Vec<String>,
-    pub currency: u64,
-    pub decisions: Vec<String>,
-    #[serde(default)]
-    pub upgrades: Vec<String>,
-    #[serde(default)]
-    pub specialist_loadouts: Vec<SpecialistLoadout>,
-}
-
-impl Default for CampaignProgress {
-    fn default() -> Self {
-        Self {
-            unlocked_mission: 1,
-            completed_missions: Vec::new(),
-            currency: 0,
-            decisions: Vec::new(),
-            upgrades: Vec::new(),
-            specialist_loadouts: Vec::new(),
-        }
-    }
-}
-
-impl CampaignProgress {
-    pub fn complete_mission(&mut self, id: impl Into<String>, unlock: u32, reward: u64) -> bool {
-        let id = id.into();
-        let newly_completed = !self.completed_missions.contains(&id);
-        if newly_completed {
-            self.completed_missions.push(id);
-            self.currency = self.currency.saturating_add(reward);
-        }
-        self.unlocked_mission = self.unlocked_mission.max(unlock.max(1));
-        newly_completed
-    }
-
-    pub fn record_decision(&mut self, decision: impl Into<String>) -> bool {
-        let decision = decision.into();
-        if self.decisions.contains(&decision) {
-            return false;
-        }
-        self.decisions.push(decision);
-        true
-    }
-
-    pub fn has_decision(&self, decision: &str) -> bool {
-        self.decisions.iter().any(|recorded| recorded == decision)
-    }
-
-    /// Atomically purchases a permanent campaign upgrade.
-    pub fn purchase_upgrade(&mut self, upgrade: impl Into<String>, cost: u64) -> bool {
-        let upgrade = upgrade.into();
-        if upgrade.trim().is_empty() || self.upgrades.contains(&upgrade) || self.currency < cost {
-            return false;
-        }
-        self.currency -= cost;
-        self.upgrades.push(upgrade);
-        true
-    }
-
-    pub fn has_upgrade(&self, upgrade: &str) -> bool {
-        self.upgrades.iter().any(|owned| owned == upgrade)
-    }
-
-    pub fn equip_specialist(
-        &mut self,
-        specialist: impl Into<String>,
-        module: impl Into<String>,
-    ) -> bool {
-        let specialist = specialist.into();
-        let module = module.into();
-        if specialist.trim().is_empty() || module.trim().is_empty() {
-            return false;
-        }
-        if let Some(loadout) = self
-            .specialist_loadouts
-            .iter_mut()
-            .find(|loadout| loadout.specialist == specialist)
-        {
-            if loadout.module == module {
-                return false;
-            }
-            loadout.module = module;
-            return true;
-        }
-        self.specialist_loadouts
-            .push(SpecialistLoadout { specialist, module });
-        true
-    }
-
-    pub fn specialist_module<'a>(&'a self, specialist: &str, default: &'a str) -> &'a str {
-        self.specialist_loadouts
-            .iter()
-            .find(|loadout| loadout.specialist == specialist)
-            .map(|loadout| loadout.module.as_str())
-            .unwrap_or(default)
-    }
-
-    fn sanitize(&mut self) {
-        self.unlocked_mission = self.unlocked_mission.max(1);
-        self.completed_missions.retain(|id| !id.trim().is_empty());
-        self.completed_missions.sort();
-        self.completed_missions.dedup();
-        self.decisions
-            .retain(|decision| !decision.trim().is_empty());
-        self.decisions.sort();
-        self.decisions.dedup();
-        self.upgrades.retain(|upgrade| !upgrade.trim().is_empty());
-        self.upgrades.sort();
-        self.upgrades.dedup();
-        self.specialist_loadouts.retain(|loadout| {
-            !loadout.specialist.trim().is_empty() && !loadout.module.trim().is_empty()
-        });
-        self.specialist_loadouts
-            .sort_by(|a, b| a.specialist.cmp(&b.specialist));
-        self.specialist_loadouts
-            .dedup_by(|a, b| a.specialist == b.specialist);
-    }
-}
-
-/// Data that persists between runs but is independent from an active scene.
+/// A versioned payload whose schema belongs to the game that defines `T`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SaveData {
+pub struct SaveEnvelope<T> {
     pub format_version: u32,
-    pub settings: GameSettings,
-    pub high_score: u64,
-    pub runs_completed: u32,
-    #[serde(default)]
-    pub campaign: CampaignProgress,
+    pub payload: T,
 }
 
-impl Default for SaveData {
-    fn default() -> Self {
+impl<T> SaveEnvelope<T> {
+    pub fn new(format_version: u32, payload: T) -> Self {
         Self {
-            format_version: SAVE_FORMAT_VERSION,
-            settings: GameSettings::default(),
-            high_score: 0,
-            runs_completed: 0,
-            campaign: CampaignProgress::default(),
+            format_version,
+            payload,
         }
     }
 }
 
-impl SaveData {
-    /// Applies a completed run and returns whether it set a new high score.
-    pub fn record_run(&mut self, score: u64) -> bool {
-        self.runs_completed = self.runs_completed.saturating_add(1);
-        if score > self.high_score {
-            self.high_score = score;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Normalizes data from a storage adapter before the game uses it.
-    pub fn sanitize(&mut self) {
-        self.format_version = SAVE_FORMAT_VERSION;
-        self.settings.sanitize();
-        self.campaign.sanitize();
-    }
-}
-
-/// Errors returned by a storage backend. Callers can offer a "reset save"
-/// action for any error without crashing the running game.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SaveError {
     Io(String),
@@ -245,57 +43,65 @@ impl fmt::Display for SaveError {
             Self::StorageUnavailable(message) => write!(f, "save storage unavailable: {message}"),
             Self::NewerFormat { found, supported } => write!(
                 f,
-                "save format {found} is newer than this engine supports ({supported})"
+                "save format {found} is newer than supported format {supported}"
             ),
         }
     }
 }
-
 impl std::error::Error for SaveError {}
 
-/// A named, cross-platform save slot.
-///
-/// Native builds store `slot.json` in the platform's application-data folder.
-/// Browser builds store the same JSON under `aurora-engine:<slot>`.
+/// A typed save slot. `application` prevents two games from sharing browser
+/// keys or native directories even when they use the same slot name.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SaveStore {
+pub struct SaveStore<T> {
+    application: String,
     slot: String,
     #[cfg(not(target_arch = "wasm32"))]
     path: PathBuf,
+    marker: PhantomData<fn() -> T>,
 }
 
-impl Default for SaveStore {
-    fn default() -> Self {
-        Self::new(DEFAULT_SAVE_SLOT)
-    }
-}
-
-impl SaveStore {
-    /// Creates a store for a stable, application-defined slot name.
-    pub fn new(slot: impl Into<String>) -> Self {
-        let slot = sanitize_slot(slot.into());
+impl<T> SaveStore<T> {
+    pub fn new(application: impl Into<String>, slot: impl Into<String>) -> Self {
+        let application = sanitize_component(application.into(), "aurora-game");
+        let slot = sanitize_component(slot.into(), DEFAULT_SAVE_SLOT);
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let path = native_save_directory().join(format!("{slot}.json"));
-            Self { slot, path }
+            let path = native_save_directory()
+                .join(&application)
+                .join(format!("{slot}.json"));
+            Self {
+                application,
+                slot,
+                path,
+                marker: PhantomData,
+            }
         }
         #[cfg(target_arch = "wasm32")]
         {
-            Self { slot }
+            Self {
+                application,
+                slot,
+                marker: PhantomData,
+            }
         }
     }
 
-    /// Returns the normalized slot name. This is safe to show in diagnostics.
+    pub fn application(&self) -> &str {
+        &self.application
+    }
     pub fn slot(&self) -> &str {
         &self.slot
     }
 
-    /// Loads a save. `Ok(None)` means the player has not saved in this slot.
-    pub fn load(&self) -> Result<Option<SaveData>, SaveError> {
+    pub fn load(&self) -> Result<Option<SaveEnvelope<T>>, SaveError>
+    where
+        T: DeserializeOwned,
+    {
         #[cfg(not(target_arch = "wasm32"))]
         {
             match fs::read(&self.path) {
-                Ok(bytes) => decode_save(&bytes).map(Some),
+                Ok(bytes) => decode(&bytes).map(Some),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(SaveError::Io(error.to_string())),
             }
@@ -304,28 +110,50 @@ impl SaveStore {
         {
             let storage = browser_storage()?;
             match storage
-                .get_item(&browser_key(&self.slot))
+                .get_item(&browser_key(&self.application, &self.slot))
                 .map_err(|error| SaveError::StorageUnavailable(js_error(&error)))?
             {
-                Some(json) => decode_save(json.as_bytes()).map(Some),
+                Some(json) => decode(json.as_bytes()).map(Some),
                 None => Ok(None),
             }
         }
     }
 
-    /// Atomically persists a sanitized save on native targets.
-    pub fn save(&self, save: &SaveData) -> Result<(), SaveError> {
-        let mut save = save.clone();
-        save.sanitize();
-        let bytes = serde_json::to_vec_pretty(&save)
-            .map_err(|error| SaveError::Serialization(error.to_string()))?;
+    /// Loads and lets the game migrate an older envelope. Future versions are
+    /// rejected before the game sees them.
+    pub fn load_with<F>(
+        &self,
+        supported_version: u32,
+        migrate: F,
+    ) -> Result<Option<SaveEnvelope<T>>, SaveError>
+    where
+        T: DeserializeOwned,
+        F: FnOnce(SaveEnvelope<T>) -> Result<SaveEnvelope<T>, SaveError>,
+    {
+        let Some(save) = self.load()? else {
+            return Ok(None);
+        };
+        if save.format_version > supported_version {
+            return Err(SaveError::NewerFormat {
+                found: save.format_version,
+                supported: supported_version,
+            });
+        }
+        migrate(save).map(Some)
+    }
 
+    pub fn save(&self, save: &SaveEnvelope<T>) -> Result<(), SaveError>
+    where
+        T: Serialize,
+    {
+        let bytes = serde_json::to_vec_pretty(save)
+            .map_err(|error| SaveError::Serialization(error.to_string()))?;
         #[cfg(not(target_arch = "wasm32"))]
         {
             let parent = self
                 .path
                 .parent()
-                .ok_or_else(|| SaveError::Io("save path has no parent directory".to_owned()))?;
+                .ok_or_else(|| SaveError::Io("save path has no parent directory".into()))?;
             fs::create_dir_all(parent).map_err(|error| SaveError::Io(error.to_string()))?;
             let temporary = self.path.with_extension("json.tmp");
             fs::write(&temporary, bytes).map_err(|error| SaveError::Io(error.to_string()))?;
@@ -336,12 +164,11 @@ impl SaveStore {
             let json = String::from_utf8(bytes)
                 .map_err(|error| SaveError::Serialization(error.to_string()))?;
             browser_storage()?
-                .set_item(&browser_key(&self.slot), &json)
+                .set_item(&browser_key(&self.application, &self.slot), &json)
                 .map_err(|error| SaveError::StorageUnavailable(js_error(&error)))
         }
     }
 
-    /// Removes this slot. It is safe to call if the slot does not yet exist.
     pub fn clear(&self) -> Result<(), SaveError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -354,42 +181,32 @@ impl SaveStore {
         #[cfg(target_arch = "wasm32")]
         {
             browser_storage()?
-                .remove_item(&browser_key(&self.slot))
+                .remove_item(&browser_key(&self.application, &self.slot))
                 .map_err(|error| SaveError::StorageUnavailable(js_error(&error)))
         }
     }
 
-    /// Overrides the native path, useful for editor tools and isolated tests.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_path(slot: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+    pub fn with_path(
+        application: impl Into<String>,
+        slot: impl Into<String>,
+        path: impl Into<PathBuf>,
+    ) -> Self {
         Self {
-            slot: sanitize_slot(slot.into()),
+            application: sanitize_component(application.into(), "aurora-game"),
+            slot: sanitize_component(slot.into(), DEFAULT_SAVE_SLOT),
             path: path.into(),
+            marker: PhantomData,
         }
     }
-
-    /// The native file location used by this slot.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn path(&self) -> &std::path::Path {
-        &self.path
-    }
 }
 
-fn decode_save(bytes: &[u8]) -> Result<SaveData, SaveError> {
-    let mut save: SaveData = serde_json::from_slice(bytes)
-        .map_err(|error| SaveError::Serialization(error.to_string()))?;
-    if save.format_version > SAVE_FORMAT_VERSION {
-        return Err(SaveError::NewerFormat {
-            found: save.format_version,
-            supported: SAVE_FORMAT_VERSION,
-        });
-    }
-    save.sanitize();
-    Ok(save)
+fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<SaveEnvelope<T>, SaveError> {
+    serde_json::from_slice(bytes).map_err(|error| SaveError::Serialization(error.to_string()))
 }
 
-fn sanitize_slot(slot: String) -> String {
-    let mut normalized: String = slot
+fn sanitize_component(value: String, fallback: &str) -> String {
+    let mut normalized: String = value
         .chars()
         .map(|character| match character {
             'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => character,
@@ -398,7 +215,7 @@ fn sanitize_slot(slot: String) -> String {
         .collect();
     normalized.truncate(64);
     if normalized.trim_matches('-').is_empty() {
-        DEFAULT_SAVE_SLOT.to_owned()
+        fallback.to_owned()
     } else {
         normalized
     }
@@ -416,10 +233,6 @@ fn native_save_directory() -> PathBuf {
             .join("Application Support")
             .join("Aurora Engine");
     }
-    #[cfg(target_os = "windows")]
-    if let Some(app_data) = std::env::var_os("APPDATA") {
-        return PathBuf::from(app_data).join("Aurora Engine");
-    }
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
@@ -428,160 +241,48 @@ fn native_save_directory() -> PathBuf {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn browser_key(slot: &str) -> String {
-    format!("aurora-engine:{slot}")
+fn browser_key(application: &str, slot: &str) -> String {
+    format!("aurora:{application}:{slot}")
 }
-
 #[cfg(target_arch = "wasm32")]
 fn browser_storage() -> Result<web_sys::Storage, SaveError> {
     web_sys::window()
-        .ok_or_else(|| SaveError::StorageUnavailable("browser window is unavailable".to_owned()))?
+        .ok_or_else(|| SaveError::StorageUnavailable("no browser window".into()))?
         .local_storage()
         .map_err(|error| SaveError::StorageUnavailable(js_error(&error)))?
-        .ok_or_else(|| SaveError::StorageUnavailable("localStorage is unavailable".to_owned()))
+        .ok_or_else(|| SaveError::StorageUnavailable("local storage unavailable".into()))
 }
-
 #[cfg(target_arch = "wasm32")]
 fn js_error(error: &wasm_bindgen::JsValue) -> String {
-    error.as_string().unwrap_or_else(|| format!("{error:?}"))
+    error
+        .as_string()
+        .unwrap_or_else(|| "browser storage error".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn settings_clamp_and_runs_preserve_the_best_score() {
-        let mut save = SaveData::default();
-        save.settings.master_volume = 3.0;
-        save.settings.sfx_volume = -1.0;
-        save.sanitize();
-        assert_eq!(save.settings.master_volume, 1.0);
-        assert_eq!(save.settings.sfx_volume, 0.0);
-        assert!(save.record_run(42));
-        assert!(!save.record_run(10));
-        assert_eq!((save.high_score, save.runs_completed), (42, 2));
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Payload {
+        score: u64,
     }
-
     #[test]
-    fn store_round_trip_sanitizes_and_clears_a_named_slot() {
-        let path = temporary_save_path("round-trip");
-        let store = SaveStore::with_path("pilot one", &path);
-        let save = SaveData {
-            high_score: 128,
-            settings: GameSettings {
-                music_volume: 2.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        store.save(&save).expect("save should persist");
+    fn future_versions_are_rejected_before_migration() {
+        let dir = std::env::temp_dir().join("aurora-generic-save-test.json");
+        let store = SaveStore::<Payload>::with_path("test-game", "pilot one", &dir);
+        store
+            .save(&SaveEnvelope::new(3, Payload { score: 7 }))
+            .unwrap();
+        assert!(matches!(
+            store.load_with(2, Ok),
+            Err(SaveError::NewerFormat { .. })
+        ));
+        store.clear().unwrap();
+    }
+    #[test]
+    fn slots_are_namespaced_and_sanitized() {
+        let store = SaveStore::<Payload>::new("A Test/Game", "pilot one");
+        assert_eq!(store.application(), "A-Test-Game");
         assert_eq!(store.slot(), "pilot-one");
-        assert_eq!(
-            store.load().expect("save should load").unwrap().high_score,
-            128
-        );
-        assert_eq!(
-            store
-                .load()
-                .expect("save should load")
-                .unwrap()
-                .settings
-                .music_volume,
-            1.0
-        );
-        store.clear().expect("save should clear");
-        assert!(store.load().expect("empty slot should load").is_none());
-    }
-
-    #[test]
-    fn newer_save_format_is_not_overwritten_by_migration() {
-        let path = temporary_save_path("newer-version");
-        std::fs::write(
-            &path,
-            r#"{"format_version":99,"settings":{"master_volume":1.0,"music_volume":1.0,"sfx_volume":1.0,"ambience_volume":1.0,"ui_volume":1.0,"post_fx_enabled":true,"screen_shake_enabled":true,"reduced_motion":false},"high_score":100,"runs_completed":1}"#,
-        )
-        .expect("fixture should write");
-
-        let error = SaveStore::with_path("future", &path)
-            .load()
-            .expect_err("newer save must be rejected");
-        assert_eq!(
-            error,
-            SaveError::NewerFormat {
-                found: 99,
-                supported: SAVE_FORMAT_VERSION,
-            }
-        );
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn version_one_save_migrates_with_campaign_defaults() {
-        let legacy = br#"{"format_version":1,"settings":{"master_volume":1.0,"music_volume":0.8,"sfx_volume":0.85,"ambience_volume":0.7,"ui_volume":0.9,"post_fx_enabled":true,"screen_shake_enabled":true,"reduced_motion":false},"high_score":12,"runs_completed":2}"#;
-        let save = decode_save(legacy).expect("legacy save should migrate");
-        assert_eq!(save.format_version, SAVE_FORMAT_VERSION);
-        assert_eq!(save.campaign, CampaignProgress::default());
-    }
-
-    #[test]
-    fn campaign_rewards_are_idempotent_and_unlock_forward_only() {
-        let mut campaign = CampaignProgress::default();
-        assert!(campaign.complete_mission("reclaim-reactor", 3, 80));
-        assert!(!campaign.complete_mission("reclaim-reactor", 2, 80));
-        assert_eq!(campaign.currency, 80);
-        assert_eq!(campaign.unlocked_mission, 3);
-        assert!(campaign.record_decision("wake-lumen"));
-        assert!(!campaign.record_decision("wake-lumen"));
-        assert!(campaign.has_decision("wake-lumen"));
-        assert!(!campaign.has_decision("silence-lumen"));
-    }
-
-    #[test]
-    fn campaign_upgrade_purchase_is_atomic_and_idempotent() {
-        let mut campaign = CampaignProgress {
-            currency: 100,
-            ..CampaignProgress::default()
-        };
-        assert!(campaign.purchase_upgrade("field-optics", 60));
-        assert_eq!(campaign.currency, 40);
-        assert!(campaign.has_upgrade("field-optics"));
-        assert!(!campaign.purchase_upgrade("field-optics", 60));
-        assert!(!campaign.purchase_upgrade("reactive-plating", 80));
-        assert_eq!(campaign.currency, 40);
-    }
-
-    #[test]
-    fn specialist_loadouts_replace_one_module_per_character() {
-        let mut campaign = CampaignProgress::default();
-        assert_eq!(
-            campaign.specialist_module("ivo", "relay-rigger"),
-            "relay-rigger"
-        );
-        assert!(campaign.equip_specialist("ivo", "salvage-smith"));
-        assert_eq!(
-            campaign.specialist_module("ivo", "relay-rigger"),
-            "salvage-smith"
-        );
-        assert!(!campaign.equip_specialist("ivo", "salvage-smith"));
-        assert!(campaign.equip_specialist("ivo", "relay-rigger"));
-        assert_eq!(campaign.specialist_loadouts.len(), 1);
-        assert_eq!(
-            campaign.specialist_module("ivo", "fallback"),
-            "relay-rigger"
-        );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn temporary_save_path(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "aurora-engine-save-{label}-{}-{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("current time is after the unix epoch")
-                .as_nanos()
-        ))
     }
 }

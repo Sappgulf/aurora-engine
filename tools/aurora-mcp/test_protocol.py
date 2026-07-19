@@ -11,11 +11,11 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 async def main() -> None:
-    params = StdioServerParameters(command=sys.executable, args=["mcp/aurora_mcp.py"], cwd=str(ROOT))
+    params = StdioServerParameters(command=sys.executable, args=["tools/aurora-mcp/aurora_mcp.py"], cwd=str(ROOT))
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()

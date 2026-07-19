@@ -121,7 +121,7 @@ impl Game for MyGame {
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install trunk
-cd examples/last_light && trunk serve
+cd games/last-light && trunk serve
 ```
 
 ## MCP support for coding agents
@@ -129,7 +129,7 @@ cd examples/last_light && trunk serve
 Aurora includes a local, repository-scoped MCP server for model-assisted engine
 work. It provides a systems map, bounded source slices, the Last Light playtest
 contract, and explicitly selected Cargo validation lanes—never arbitrary shell
-commands or arbitrary filesystem reads. See [mcp/README.md](mcp/README.md) for
+commands or arbitrary filesystem reads. See [tools/aurora-mcp/README.md](tools/aurora-mcp/README.md) for
 installation, client configuration, security boundaries, and the stdio protocol
 smoke test.
 
