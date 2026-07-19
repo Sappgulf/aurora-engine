@@ -13,9 +13,9 @@ use std::collections::HashMap;
 
 use assets::TextureAsset;
 use aurora_engine::{
-    run, Aabb, AiParams, AnimationClip, AnimationPlayer, BitmapText, Color, FactionId, FogOfWar,
-    FogState, FrameCtx, Game, MinimapTransform, PlacementError, PlacementRules, PointLight,
-    PowerNodeId, QueueError, Renderer, SelectionBox, SimpleAggroAi, Sprite, Texture, TextureAtlas,
+    run, Aabb, AiParams, AnimationClip, AnimationPlayer, BitmapText, Color, FogOfWar, FogState,
+    FrameCtx, Game, MinimapTransform, PlacementError, PlacementRules, PointLight, PowerNodeId,
+    QueueError, Renderer, SelectionBox, SimpleAggroAi, Sprite, Texture, TextureAtlas,
     TextureHandle, UnitId, UnitOrder,
 };
 use campaign::*;
@@ -24,8 +24,8 @@ use mission_state::{FieldBeacon, SalvageNode, StructureKind};
 use missions::{DialogueTrigger, MissionDef, VictoryCondition};
 use save::{CampaignStore, SaveData};
 use simulation::{
-    MissionSimulation, ProductionCommandError, SimulationEventKind, SimulationModifiers,
-    FABRICATOR_NODE, MAP_SIZE,
+    MissionOutcome, MissionSimulation, ProductionCommandError, SimulationEventKind,
+    SimulationModifiers, FABRICATOR_NODE, MAP_SIZE,
 };
 use units::{UnitKind, CHOIR, PLAYER};
 use winit::{event::MouseButton, keyboard::KeyCode};
@@ -98,7 +98,6 @@ struct LastLight {
     mission: MissionDef,
     enemy_ai: SimpleAggroAi,
     selected_structure: Option<StructureKind>,
-    canticle_reinforced: bool,
     dialogue_cursor: usize,
     radio_message: Option<(&'static str, &'static str, f32)>,
 }
@@ -142,6 +141,8 @@ impl LastLight {
             } else {
                 1.0
             },
+            player_damage_scale: 1.0,
+            player_damage_taken_scale: 1.0,
         };
         let simulation = MissionSimulation::from_mission(&initial_mission, initial_modifiers);
 
@@ -243,7 +244,6 @@ impl LastLight {
             mission: initial_mission,
             enemy_ai: SimpleAggroAi::new(),
             selected_structure: None,
-            canticle_reinforced: false,
             dialogue_cursor: 0,
             radio_message: None,
         }
@@ -285,7 +285,6 @@ impl LastLight {
         self.placing_beacon = false;
         self.enemy_ai = SimpleAggroAi::new();
         self.selected_structure = None;
-        self.canticle_reinforced = false;
         self.dialogue_cursor = 0;
         self.radio_message = None;
 
@@ -328,24 +327,22 @@ impl LastLight {
             } else {
                 1.0
             },
+            player_damage_scale: if self.specialist_module(SENA, SENA_DEEP_SCAN) == SENA_GHOST_MARK
+            {
+                1.15
+            } else {
+                1.0
+            } * if self.specialist_module(OLAN, OLAN_LATTICE) == OLAN_DECODER {
+                1.1
+            } else {
+                1.0
+            },
+            player_damage_taken_scale: if self.meridian_accord() == Some(MERIDIAN_BASTION) {
+                0.82
+            } else {
+                1.0
+            },
         }
-    }
-
-    fn spawn(
-        &mut self,
-        kind: UnitKind,
-        faction: FactionId,
-        position: Vec2,
-        health: f32,
-        speed: f32,
-    ) -> UnitId {
-        let modifiers = self.simulation_modifiers();
-        let id = self
-            .simulation
-            .spawn(kind, faction, position, health, speed, modifiers);
-        self.animation_players
-            .insert(id, AnimationPlayer::default());
-        id
     }
 
     fn purchase_upgrade(&mut self, id: &'static str, label: &str, cost: u64) {
@@ -949,6 +946,28 @@ impl LastLight {
                         .insert(UnitId(unit_id), AnimationPlayer::default());
                     self.status = Some((format!("{} DEPLOYED", kind.label()), 3.0));
                 }
+                SimulationEventKind::UnitSpawned { unit_id, .. } => {
+                    self.animation_players
+                        .insert(UnitId(unit_id), AnimationPlayer::default());
+                }
+                SimulationEventKind::AttackLanded { attacker, target } => {
+                    self.attack_flash.insert(UnitId(attacker), 0.08);
+                    self.damage_flash.insert(UnitId(target), 0.34);
+                }
+                SimulationEventKind::DamageApplied { target } => {
+                    self.damage_flash.insert(UnitId(target), 0.34);
+                }
+                SimulationEventKind::UnitDestroyed { unit_id, .. } => {
+                    let unit_id = UnitId(unit_id);
+                    self.down_units.insert(unit_id, 0.0);
+                    self.damage_flash.remove(&unit_id);
+                }
+                SimulationEventKind::BossReinforced => {
+                    self.status = Some(("CANTICLE CALLS REINFORCEMENTS".to_owned(), 4.0));
+                    ctx.audio.hurt();
+                }
+                SimulationEventKind::MissionVictory => self.victory = true,
+                SimulationEventKind::MissionDefeat => self.defeat = true,
                 SimulationEventKind::CommandAccepted { .. }
                 | SimulationEventKind::ResourcesCredited { .. }
                 | SimulationEventKind::UnitQueued { .. } => {}
@@ -985,40 +1004,11 @@ impl LastLight {
         self.victory_saved = true;
     }
 
-    /// Recomputes `self.victory`/`self.defeat` from live world state and the
-    /// active mission's [`VictoryCondition`]. Pure aside from those two
-    /// fields (no `FrameCtx` needed), so it can run in tests without a GPU.
+    /// Mirrors the simulation-owned outcome into presentation flags used by
+    /// the end-of-mission overlays and campaign persistence.
     fn evaluate_mission_state(&mut self) {
-        let friendlies_alive = self
-            .simulation
-            .world
-            .units()
-            .iter()
-            .any(|unit| unit.faction == PLAYER && unit.alive());
-        let escort_failed = matches!(
-            self.mission.victory,
-            VictoryCondition::EscortToExtraction { .. }
-        ) && !self
-            .simulation
-            .escort_unit
-            .and_then(|id| self.simulation.world.unit(id))
-            .is_some_and(|unit| unit.alive());
-        self.defeat = !friendlies_alive || escort_failed;
-        self.victory = match self.mission.victory {
-            VictoryCondition::RestoreRelaysAndDefeatBoss { boss_kind } => {
-                let boss_alive = self.simulation.world.units().iter().any(|unit| {
-                    unit.faction == CHOIR
-                        && unit.alive()
-                        && self.simulation.kinds.get(&unit.id) == Some(&boss_kind)
-                });
-                self.simulation.relays.iter().all(|relay| relay.active) && !boss_alive
-            }
-            VictoryCondition::EscortToExtraction { point, radius } => self
-                .simulation
-                .escort_unit
-                .and_then(|id| self.simulation.world.unit(id))
-                .is_some_and(|unit| unit.alive() && unit.position.distance(point) <= radius),
-        };
+        self.victory = self.simulation.outcome == MissionOutcome::Victory;
+        self.defeat = self.simulation.outcome == MissionOutcome::Defeat;
     }
 
     fn selected_engineer_near(&self, position: Vec2) -> bool {
@@ -1485,107 +1475,26 @@ impl LastLight {
         }
     }
 
-    /// Gives the Canticle boss a one-time "call reinforcements" beat: the
-    /// first time it drops to half health, it spawns two extra Needles at
-    /// its position. Purely additive to the shared combat/AI systems (no
-    /// unique per-boss code paths elsewhere), so it stays cheap to check
-    /// every tick and self-disarms via `canticle_reinforced`.
-    /// Returns `true` the one time it triggers, so the caller can play a cue
-    /// without this needing a `FrameCtx` (keeps it directly unit-testable).
-    fn update_boss_phase(&mut self) -> bool {
-        if self.canticle_reinforced {
-            return false;
-        }
-        let low_health_canticle = self.simulation.world.units().iter().find_map(|unit| {
-            let is_canticle = unit.faction == CHOIR
-                && unit.alive()
-                && self.simulation.kinds.get(&unit.id) == Some(&UnitKind::Canticle);
-            let low_health = unit.health / unit.max_health.max(1.0) <= 0.5;
-            (is_canticle && low_health).then_some(unit.position)
-        });
-        let Some(position) = low_health_canticle else {
-            return false;
-        };
-        self.canticle_reinforced = true;
-        for offset in [Vec2::new(-90.0, 40.0), Vec2::new(90.0, -40.0)] {
-            self.spawn(UnitKind::Needle, CHOIR, position + offset, 90.0, 125.0);
-        }
-        self.status = Some(("CANTICLE CALLS REINFORCEMENTS".to_owned(), 4.0));
-        true
-    }
-
-    fn update_combat(&mut self, dt: f32) {
-        let snapshot: HashMap<UnitId, (Vec2, bool)> = self
-            .simulation
-            .world
-            .units()
-            .iter()
-            .map(|unit| (unit.id, (unit.position, unit.alive())))
-            .collect();
-        let mut damage = Vec::new();
-        for unit in self.simulation.world.units() {
-            let UnitOrder::Attack(target) = unit.order else {
-                continue;
-            };
-            let Some((target_position, true)) = snapshot.get(&target).copied() else {
-                continue;
-            };
-            let Some(profile) = self
-                .simulation
-                .kinds
-                .get(&unit.id)
-                .map(|kind| kind.combat())
-            else {
-                continue;
-            };
-            if unit.position.distance(target_position) < profile.range {
-                let mut dps = profile.damage_per_second;
-                if unit.faction == PLAYER
-                    && self.specialist_module(SENA, SENA_DEEP_SCAN) == SENA_GHOST_MARK
-                {
-                    dps *= 1.15;
-                }
-                if unit.faction == PLAYER
-                    && self.specialist_module(OLAN, OLAN_LATTICE) == OLAN_DECODER
-                {
-                    dps *= 1.1;
-                }
-                damage.push((target, dps * dt));
-                self.attack_flash.insert(unit.id, 0.08);
-            }
-        }
+    fn update_combat_presentation(&mut self, dt: f32) {
         if self.verdant_covenant() == Some(VERDANT_BRIAR) {
-            for unit in self
+            let targets: Vec<UnitId> = self
                 .simulation
                 .world
                 .units()
                 .iter()
-                .filter(|unit| unit.faction == CHOIR && unit.alive())
-            {
-                if self
-                    .field_beacons
-                    .iter()
-                    .any(|beacon| beacon.position.distance(unit.position) <= 220.0)
-                {
-                    damage.push((unit.id, 8.0 * dt.max(0.0)));
-                }
-            }
-        }
-        let bastion_accord = self.meridian_accord() == Some(MERIDIAN_BASTION);
-        for (target, amount) in damage {
-            if let Some(unit) = self.simulation.world.unit_mut(target) {
-                let was_alive = unit.alive();
-                let amount = if unit.faction == PLAYER && bastion_accord {
-                    amount * 0.82
-                } else {
-                    amount
-                };
-                unit.health = (unit.health - amount).max(0.0);
-                self.damage_flash.insert(target, 0.34);
-                if was_alive && !unit.alive() {
-                    self.down_units.insert(target, 0.0);
-                    self.damage_flash.remove(&target);
-                }
+                .filter(|unit| {
+                    unit.faction == CHOIR
+                        && unit.alive()
+                        && self
+                            .field_beacons
+                            .iter()
+                            .any(|beacon| beacon.position.distance(unit.position) <= 220.0)
+                })
+                .map(|unit| unit.id)
+                .collect();
+            for target in targets {
+                self.simulation
+                    .apply_environmental_damage(target, 8.0 * dt.max(0.0));
             }
         }
         self.attack_flash.retain(|_, flash| {
@@ -1960,6 +1869,11 @@ impl Game for LastLight {
         }
         self.update_enemy_ai(dt);
         self.update_auto_targeting();
+        let modifiers = self.simulation_modifiers();
+        self.simulation.set_combat_scales(
+            modifiers.player_damage_scale,
+            modifiers.player_damage_taken_scale,
+        );
         self.simulation.fixed_step_with_dt(dt);
         self.process_simulation_events(ctx);
         for unit in self.simulation.world.units() {
@@ -2014,10 +1928,7 @@ impl Game for LastLight {
                 player.clear();
             }
         }
-        self.update_combat(dt);
-        if self.update_boss_phase() {
-            ctx.audio.hurt();
-        }
+        self.update_combat_presentation(dt);
         self.update_specialist_doctrines(dt);
         self.update_fog();
         self.update_status_timer(dt);
@@ -3206,6 +3117,7 @@ mod tests {
         for relay in &mut game.simulation.relays {
             relay.active = true;
         }
+        game.simulation.fixed_step_with_dt(0.0);
         game.evaluate_mission_state();
         assert!(!game.victory, "boss is still alive");
 
@@ -3221,6 +3133,7 @@ mod tests {
                 unit.health = 0.0;
             }
         }
+        game.simulation.fixed_step_with_dt(0.0);
         game.evaluate_mission_state();
         assert!(game.victory);
     }
@@ -3241,12 +3154,22 @@ mod tests {
             panic!("expected an escort victory condition");
         };
         game.simulation.world.unit_mut(escort).unwrap().position = point;
+        game.simulation.fixed_step_with_dt(0.0);
         game.evaluate_mission_state();
         assert!(game.victory);
 
-        game.simulation.world.unit_mut(escort).unwrap().health = 0.0;
-        game.evaluate_mission_state();
-        assert!(game.defeat);
+        let mut failed = LastLight::new();
+        failed.start_mission(missions::voice_in_conduit_twelve());
+        let failed_escort = failed.simulation.escort_unit.unwrap();
+        failed
+            .simulation
+            .world
+            .unit_mut(failed_escort)
+            .unwrap()
+            .health = 0.0;
+        failed.simulation.fixed_step_with_dt(0.0);
+        failed.evaluate_mission_state();
+        assert!(failed.defeat);
     }
 
     #[test]
@@ -3278,7 +3201,7 @@ mod tests {
             .count();
 
         // Still above half health: no trigger yet.
-        assert!(!game.update_boss_phase());
+        game.simulation.fixed_step_with_dt(0.0);
         assert_eq!(
             game.simulation
                 .world
@@ -3291,7 +3214,7 @@ mod tests {
 
         let canticle = game.simulation.world.unit_mut(canticle_id).unwrap();
         canticle.health = canticle.max_health * 0.5;
-        assert!(game.update_boss_phase());
+        game.simulation.fixed_step_with_dt(0.0);
         assert_eq!(
             game.simulation
                 .world
@@ -3303,7 +3226,16 @@ mod tests {
         );
 
         // Fires only once even if health stays low on later ticks.
-        assert!(!game.update_boss_phase());
+        game.simulation.fixed_step_with_dt(0.0);
+        assert_eq!(
+            game.simulation
+                .world
+                .units()
+                .iter()
+                .filter(|unit| unit.faction == CHOIR)
+                .count(),
+            choir_before + 2
+        );
     }
 
     #[test]

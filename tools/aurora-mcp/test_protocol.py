@@ -26,6 +26,7 @@ async def main() -> None:
                 "aurora_list_systems",
                 "aurora_read_source",
                 "aurora_get_playtest_contract",
+                "aurora_get_scenario_report",
                 "aurora_run_validation",
             }
             missing = expected - names
@@ -43,6 +44,14 @@ async def main() -> None:
                 "aurora_read_source", {"source": "../../etc/passwd", "response_format": "markdown"}
             )
             assert rejected.isError or "Error:" in rejected.content[0].text
+
+            scenario = await session.call_tool(
+                "aurora_get_scenario_report",
+                {"scenario_id": "last_light.reclaim.relay_production", "response_format": "json"},
+            )
+            assert not scenario.isError, "Approved scenario report returned an error"
+            assert '"end_tick": 3600' in scenario.content[0].text
+            assert '"command_count": 8' in scenario.content[0].text
 
     print("MCP stdio smoke test passed")
 

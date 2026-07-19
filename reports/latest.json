@@ -1,43 +1,48 @@
 {
   "schema_version": 1,
-  "iteration": "FOUNDRY-003",
-  "title": "Simulation-owned Reclaim relay and production loop",
+  "iteration": "FOUNDRY-004",
+  "title": "Deterministic Reclaim combat and victory loop",
   "status": "passed",
   "date": "2026-07-19",
   "acceptance": {
-    "relay_restoration_without_renderer": true,
-    "resource_and_production_without_renderer": true,
+    "combat_without_renderer": true,
+    "unit_destruction_without_renderer": true,
+    "boss_phase_without_renderer": true,
+    "defeat_and_victory_without_renderer": true,
     "bounded_ordered_event_log": true,
-    "persisted_canonical_trace": true,
     "two_clean_runs_match": true,
-    "browser_production_works": true
+    "allow_listed_mcp_scenario_report": true,
+    "browser_combat_works": true
   },
   "evidence": {
     "cargo_fmt_check": "passed",
     "cargo_clippy_all_targets_all_features": "passed",
     "cargo_test_workspace": {
       "status": "passed",
-      "tests": 68
+      "tests": 69
     },
-    "last_light_tests": 19,
+    "last_light_tests": 20,
     "wasm_workspace_check": "passed",
     "trunk_release_build_last_light": "passed",
     "mcp_stdio_smoke_test": "passed",
     "deterministic_scenario": "last_light.reclaim.relay_production",
-    "deterministic_ticks_per_run": 900,
+    "deterministic_ticks_per_run": 3600,
+    "deterministic_commands": 8,
     "deterministic_replay_runs": 2,
     "determinism_mismatches": 0,
+    "deterministic_outcome": "victory",
+    "mcp_scenario_id": "last_light.reclaim.relay_production",
     "browser_smoke": {
       "status": "passed",
       "browser": "Safari",
-      "actions": ["load latest build", "deploy", "select", "right-click move", "queue Warden"],
-      "observed": ["salvage spent from 150 to 60", "queue showed Building Warden", "queue returned to ready", "HUD intact", "minimap updated"]
+      "actions": ["load latest build", "deploy", "right-click squad toward contact", "observe combat"],
+      "observed": ["squad moved into contact", "attack and hit effects synchronized", "health bars changed", "HUD intact", "minimap updated"]
     }
   },
   "known_gaps": [
-    "Combat, defeat, and victory resolution remain outside MissionSimulation",
-    "MCP does not yet expose the canonical Last Light scenario report",
-    "Automated 1280x720 DPR 1 and 2 screenshot coverage remains pending"
+    "Enemy AI and fog-aware auto-target acquisition remain presentation-orchestrated inputs into MissionSimulation",
+    "Automated 1280x720 DPR 1 and 2 screenshot coverage remains pending",
+    "CI does not yet run the canonical scenario and actual Trunk build together"
   ],
-  "next_task": "FOUNDRY-004"
+  "next_task": "FOUNDRY-005"
 }

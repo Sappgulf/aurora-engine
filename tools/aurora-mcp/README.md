@@ -27,7 +27,8 @@ The server uses stdio. It must not print log messages to stdout, since stdout is
 1. Call `aurora_get_overview` to see the branch, working tree, core systems, and default game command.
 2. Call `aurora_list_systems` and then `aurora_read_source` with an approved source id and a small line slice.
 3. Call `aurora_get_playtest_contract` before a visual/gameplay pass.
-4. Only after user authorization, call `aurora_run_validation` with a fixed lane.
+4. Call `aurora_get_scenario_report` with an approved scenario id for bounded deterministic evidence.
+5. Only after user authorization, call `aurora_run_validation` with a fixed lane.
 
 ## Tools and resources
 
@@ -37,11 +38,12 @@ The server uses stdio. It must not print log messages to stdout, since stdout is
 | `aurora_list_systems` | Paginated list of engine systems | Read-only |
 | `aurora_read_source` | Bounded slice of a selected allow-listed source file | Read-only |
 | `aurora_get_playtest_contract` | Run command, controls, and visual acceptance checks | Read-only |
+| `aurora_get_scenario_report` | Bounded trace metadata and validation evidence for an allow-listed scenario id | Read-only |
 | `aurora_run_validation` | One fixed Cargo lane: `fast`, `test`, or `web` | Creates Cargo build artifacts only |
 | `aurora://overview` | Overview resource | Read-only |
 | `aurora://playtest-contract` | Playtest resource | Read-only |
 
-`aurora_read_source` accepts ids only, never arbitrary paths. A slice is capped at 400 lines and all rendered results are capped at 16,000 characters. `aurora_run_validation` accepts an enum, never a command string; it cannot stage, commit, push, alter source, or make network requests.
+`aurora_read_source` accepts ids only, never arbitrary paths. A slice is capped at 400 lines and all rendered results are capped at 16,000 characters. `aurora_get_scenario_report` accepts a closed scenario-id enum, caps traces at 64 commands, and never runs code. `aurora_run_validation` accepts an enum, never a command string; it cannot stage, commit, push, alter source, or make network requests.
 
 ## Security and operating boundary
 

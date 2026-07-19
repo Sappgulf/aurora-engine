@@ -85,6 +85,13 @@ VALIDATION_LANES: dict[str, tuple[str, ...]] = {
     "web": ("cargo", "check", "--target", "wasm32-unknown-unknown", "-p", "last_light"),
 }
 
+SCENARIO_REPORTS: dict[str, tuple[str, str]] = {
+    "last_light.reclaim.relay_production": (
+        "playtests/last_light/reclaim_reactor_truth.aurora-trace",
+        "reports/latest.json",
+    ),
+}
+
 
 class ResponseFormat(str, Enum):
     """Supported output encodings for read-only tools."""
@@ -314,6 +321,52 @@ async def aurora_get_playtest_contract(
     read-only and never launches the game.
     """
     return _format(_playtest_payload(), response_format)
+
+
+@mcp.tool(
+    name="aurora_get_scenario_report",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+async def aurora_get_scenario_report(
+    scenario_id: Literal["last_light.reclaim.relay_production"],
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN,
+) -> str:
+    """Return the bounded checked-in trace and latest validation report for an approved scenario.
+
+    ``scenario_id`` is a closed allow-list. The tool accepts no path, command,
+    tick count, or executable input and never runs the scenario itself.
+    """
+    trace_relative, report_relative = SCENARIO_REPORTS[scenario_id]
+    try:
+        trace = json.loads((REPO_ROOT / trace_relative).read_text(encoding="utf-8"))
+        report = json.loads((REPO_ROOT / report_relative).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        LOGGER.warning("Scenario evidence unavailable: %s", type(exc).__name__)
+        return f"Error: checked-in evidence for '{scenario_id}' is unavailable or invalid."
+
+    commands = trace.get("commands", [])
+    if not isinstance(commands, list) or len(commands) > 64:
+        return f"Error: checked-in trace for '{scenario_id}' exceeds the 64-command report bound."
+    payload = {
+        "title": "Aurora deterministic scenario report",
+        "scenario_id": scenario_id,
+        "available_scenarios": sorted(SCENARIO_REPORTS),
+        "trace": {
+            "path": trace_relative,
+            "seed": trace.get("seed"),
+            "fixed_tick_hz": trace.get("fixed_tick_hz"),
+            "end_tick": trace.get("end_tick"),
+            "command_count": len(commands),
+            "actions": [command.get("action") for command in commands],
+        },
+        "validation": {
+            "iteration": report.get("iteration"),
+            "status": report.get("status"),
+            "deterministic_replay_runs": report.get("evidence", {}).get("deterministic_replay_runs"),
+            "determinism_mismatches": report.get("evidence", {}).get("determinism_mismatches"),
+        },
+    }
+    return _format(payload, response_format)
 
 
 @mcp.tool(

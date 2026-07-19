@@ -11,7 +11,7 @@ use glam::Vec2;
 use serde::Serialize;
 
 use crate::mission_state::Relay;
-use crate::missions::MissionDef;
+use crate::missions::{MissionDef, VictoryCondition};
 use crate::units::{UnitKind, CHOIR, PLAYER};
 
 pub const MAP_SIZE: Vec2 = Vec2::new(2600.0, 1460.0);
@@ -24,6 +24,7 @@ pub const SELECT_ALL_ACTION: &str = "last_light.select_all";
 pub const SELECT_KIND_ACTION: &str = "last_light.select_kind";
 pub const MOVE_SELECTED_ACTION: &str = "last_light.move_selected";
 pub const QUEUE_UNIT_ACTION: &str = "last_light.queue_unit";
+pub const ATTACK_KIND_ACTION: &str = "last_light.attack_kind";
 
 #[derive(Debug, Clone, Copy)]
 pub struct SimulationModifiers {
@@ -33,6 +34,8 @@ pub struct SimulationModifiers {
     pub relay_income_per_second: u32,
     pub relay_restore_rate: f32,
     pub production_time_scale: f32,
+    pub player_damage_scale: f32,
+    pub player_damage_taken_scale: f32,
 }
 
 impl Default for SimulationModifiers {
@@ -44,8 +47,18 @@ impl Default for SimulationModifiers {
             relay_income_per_second: 3,
             relay_restore_rate: 1.0,
             production_time_scale: 1.0,
+            player_damage_scale: 1.0,
+            player_damage_taken_scale: 1.0,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissionOutcome {
+    InProgress,
+    Victory,
+    Defeat,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -56,6 +69,13 @@ pub enum SimulationEventKind {
     ResourcesCredited { amount: u32 },
     UnitQueued { kind: UnitKind },
     UnitDeployed { unit_id: u32, kind: UnitKind },
+    UnitSpawned { unit_id: u32, kind: UnitKind },
+    AttackLanded { attacker: u32, target: u32 },
+    DamageApplied { target: u32 },
+    UnitDestroyed { unit_id: u32, kind: UnitKind },
+    BossReinforced,
+    MissionVictory,
+    MissionDefeat,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -87,10 +107,13 @@ pub struct MissionSimulation {
     pub production: ProductionQueue,
     pub power: PowerGrid,
     pub fabricator_position: Vec2,
+    pub outcome: MissionOutcome,
     tick: u64,
     fixed_dt: f32,
     resource_tick: f32,
     modifiers: SimulationModifiers,
+    victory_condition: VictoryCondition,
+    boss_reinforced: bool,
     events: VecDeque<SimulationEvent>,
     pending_events: VecDeque<SimulationEvent>,
 }
@@ -140,10 +163,13 @@ impl MissionSimulation {
             production: ProductionQueue::new(5),
             power,
             fabricator_position: mission.fabricator_position,
+            outcome: MissionOutcome::InProgress,
             tick: 0,
             fixed_dt: 1.0 / DEFAULT_FIXED_TICK_HZ as f32,
             resource_tick: 0.0,
             modifiers,
+            victory_condition: mission.victory,
+            boss_reinforced: false,
             events: VecDeque::with_capacity(EVENT_LOG_CAPACITY),
             pending_events: VecDeque::new(),
         };
@@ -223,6 +249,39 @@ impl MissionSimulation {
         let selected_ids = self.world.selection().ids().to_vec();
         self.world.issue_move(destination, 74.0);
         self.route_around_obstacles(&selected_ids);
+    }
+
+    pub fn issue_attack_kind(&mut self, kind: UnitKind) -> bool {
+        let Some(target) = self.world.units().iter().find_map(|unit| {
+            (unit.faction == CHOIR && unit.alive() && self.kinds.get(&unit.id) == Some(&kind))
+                .then_some(unit.id)
+        }) else {
+            return false;
+        };
+        self.world.issue_attack(target);
+        true
+    }
+
+    pub fn set_combat_scales(&mut self, damage: f32, damage_taken: f32) {
+        self.modifiers.player_damage_scale = damage.max(0.0);
+        self.modifiers.player_damage_taken_scale = damage_taken.max(0.0);
+    }
+
+    pub fn apply_environmental_damage(&mut self, target: UnitId, amount: f32) {
+        let destroyed = if let Some(unit) = self.world.unit_mut(target) {
+            let was_alive = unit.alive();
+            unit.health = (unit.health - amount.max(0.0)).max(0.0);
+            was_alive && !unit.alive()
+        } else {
+            return;
+        };
+        self.record(SimulationEventKind::DamageApplied { target: target.0 });
+        if destroyed {
+            self.record(SimulationEventKind::UnitDestroyed {
+                unit_id: target.0,
+                kind: self.kinds[&target],
+            });
+        }
     }
 
     pub fn route_around_obstacles(&mut self, selected_ids: &[UnitId]) {
@@ -401,11 +460,150 @@ impl MissionSimulation {
         }
     }
 
+    fn update_combat(&mut self, dt: f32) {
+        let snapshot: HashMap<UnitId, (Vec2, bool)> = self
+            .world
+            .units()
+            .iter()
+            .map(|unit| (unit.id, (unit.position, unit.alive())))
+            .collect();
+        let attacks: Vec<(UnitId, UnitId, f32)> = self
+            .world
+            .units()
+            .iter()
+            .filter_map(|unit| {
+                let UnitOrder::Attack(target) = unit.order else {
+                    return None;
+                };
+                let (target_position, true) = snapshot.get(&target).copied()? else {
+                    return None;
+                };
+                let profile = self.kinds.get(&unit.id)?.combat();
+                (unit.position.distance(target_position) < profile.range).then_some((
+                    unit.id,
+                    target,
+                    profile.damage_per_second
+                        * dt.max(0.0)
+                        * if unit.faction == PLAYER {
+                            self.modifiers.player_damage_scale
+                        } else {
+                            1.0
+                        },
+                ))
+            })
+            .collect();
+
+        for (attacker, target, amount) in attacks {
+            let Some(target_faction) = self.world.unit(target).map(|unit| unit.faction) else {
+                continue;
+            };
+            let amount = if target_faction == PLAYER {
+                amount * self.modifiers.player_damage_taken_scale
+            } else {
+                amount
+            };
+            let destroyed = if let Some(unit) = self.world.unit_mut(target) {
+                let was_alive = unit.alive();
+                unit.health = (unit.health - amount).max(0.0);
+                was_alive && !unit.alive()
+            } else {
+                false
+            };
+            self.record(SimulationEventKind::AttackLanded {
+                attacker: attacker.0,
+                target: target.0,
+            });
+            if destroyed {
+                let kind = self.kinds[&target];
+                self.record(SimulationEventKind::UnitDestroyed {
+                    unit_id: target.0,
+                    kind,
+                });
+            }
+        }
+    }
+
+    fn update_boss_phase(&mut self) {
+        if self.boss_reinforced {
+            return;
+        }
+        let position = self.world.units().iter().find_map(|unit| {
+            (unit.faction == CHOIR
+                && unit.alive()
+                && self.kinds.get(&unit.id) == Some(&UnitKind::Canticle)
+                && unit.health / unit.max_health.max(1.0) <= 0.5)
+                .then_some(unit.position)
+        });
+        let Some(position) = position else {
+            return;
+        };
+        self.boss_reinforced = true;
+        for offset in [Vec2::new(-90.0, 40.0), Vec2::new(90.0, -40.0)] {
+            let id = self.spawn(
+                UnitKind::Needle,
+                CHOIR,
+                position + offset,
+                90.0,
+                125.0,
+                self.modifiers,
+            );
+            self.record(SimulationEventKind::UnitSpawned {
+                unit_id: id.0,
+                kind: UnitKind::Needle,
+            });
+        }
+        self.record(SimulationEventKind::BossReinforced);
+    }
+
+    fn evaluate_outcome(&mut self) {
+        if self.outcome != MissionOutcome::InProgress {
+            return;
+        }
+        let friendlies_alive = self
+            .world
+            .units()
+            .iter()
+            .any(|unit| unit.faction == PLAYER && unit.alive());
+        let escort_alive = self
+            .escort_unit
+            .and_then(|id| self.world.unit(id))
+            .is_some_and(|unit| unit.alive());
+        let defeat = !friendlies_alive
+            || (matches!(
+                self.victory_condition,
+                VictoryCondition::EscortToExtraction { .. }
+            ) && !escort_alive);
+        let victory = match self.victory_condition {
+            VictoryCondition::RestoreRelaysAndDefeatBoss { boss_kind } => {
+                let boss_alive = self.world.units().iter().any(|unit| {
+                    unit.faction == CHOIR
+                        && unit.alive()
+                        && self.kinds.get(&unit.id) == Some(&boss_kind)
+                });
+                self.relays.iter().all(|relay| relay.active) && !boss_alive
+            }
+            VictoryCondition::EscortToExtraction { point, radius } => self
+                .escort_unit
+                .and_then(|id| self.world.unit(id))
+                .is_some_and(|unit| unit.alive() && unit.position.distance(point) <= radius),
+        };
+        if defeat {
+            self.outcome = MissionOutcome::Defeat;
+            self.record(SimulationEventKind::MissionDefeat);
+        } else if victory {
+            self.outcome = MissionOutcome::Victory;
+            self.record(SimulationEventKind::MissionVictory);
+        }
+    }
+
     pub fn fixed_step_with_dt(&mut self, dt: f32) {
         self.world.update(dt);
         self.advance_player_paths();
         self.update_relays(dt);
         self.update_economy(dt);
+        self.update_combat(dt);
+        self.update_boss_phase();
+        self.evaluate_outcome();
         self.tick = self.tick.saturating_add(1);
     }
 
@@ -437,7 +635,10 @@ impl MissionSimulation {
             "warden" => Ok(UnitKind::Warden),
             "engineer" => Ok(UnitKind::Engineer),
             "surveyor" => Ok(UnitKind::Surveyor),
-            _ => Err(format!("unknown Lantern unit kind {label}")),
+            "needle" => Ok(UnitKind::Needle),
+            "canticle" => Ok(UnitKind::Canticle),
+            "bell_mine" => Ok(UnitKind::BellMine),
+            _ => Err(format!("unknown unit kind {label}")),
         }
     }
 }
@@ -463,6 +664,15 @@ impl DeterministicSimulation for MissionSimulation {
             QUEUE_UNIT_ACTION => self
                 .queue_unit(Self::command_kind(command)?)
                 .map_err(|error| format!("could not queue unit: {error:?}"))?,
+            ATTACK_KIND_ACTION if !self.world.selection().ids().is_empty() => {
+                let kind = Self::command_kind(command)?;
+                if !self.issue_attack_kind(kind) {
+                    return Err(format!("no living {} target available", kind.label()));
+                }
+            }
+            ATTACK_KIND_ACTION => {
+                return Err("attack requires a selected Lantern unit".to_owned());
+            }
             action => return Err(format!("unknown Last Light action {action}")),
         }
         self.record(SimulationEventKind::CommandAccepted {
@@ -478,6 +688,12 @@ impl DeterministicSimulation for MissionSimulation {
     fn state_hash(&self) -> StateHash {
         let mut hasher = StableStateHasher::new();
         hasher.write_u64(self.tick);
+        hasher.write_u64(match self.outcome {
+            MissionOutcome::InProgress => 0,
+            MissionOutcome::Victory => 1,
+            MissionOutcome::Defeat => 2,
+        });
+        hasher.write_bool(self.boss_reinforced);
         hasher.write_u64(self.world.units().len() as u64);
         for unit in self.world.units() {
             hasher.write_u64(u64::from(unit.id.0));
@@ -552,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn reclaim_relay_and_production_replay_to_the_same_hash() {
+    fn reclaim_truth_trace_replays_through_victory_with_the_same_hash() {
         let mission = crate::missions::reclaim_the_reactor();
         let trace = reclaim_truth_trace();
         let mut first = MissionSimulation::from_mission(&mission, SimulationModifiers::default());
@@ -565,11 +781,9 @@ mod tests {
             first_report.final_state_hash,
             second_report.final_state_hash
         );
-        assert_eq!(first_report.commands_applied, 4);
-        assert!(
-            first.relays[0].active,
-            "the Engineer must restore relay one"
-        );
+        assert_eq!(first_report.commands_applied, 8);
+        assert!(first.relays.iter().all(|relay| relay.active));
+        assert_eq!(first.outcome, MissionOutcome::Victory);
         assert_eq!(
             first
                 .world
@@ -589,24 +803,50 @@ mod tests {
             .collect::<Vec<_>>()
             .windows(2)
             .all(|events| { events[0].tick <= events[1].tick }));
+        assert!(first.events().iter().any(|event| matches!(
+            event.kind,
+            SimulationEventKind::UnitDestroyed {
+                kind: UnitKind::Canticle,
+                ..
+            }
+        )));
         assert!(first
             .events()
             .iter()
+            .any(|event| matches!(event.kind, SimulationEventKind::MissionVictory)));
+    }
+
+    #[test]
+    fn reclaim_trace_emits_relay_resource_queue_and_deploy_events() {
+        let mission = crate::missions::reclaim_the_reactor();
+        let mut trace = reclaim_truth_trace();
+        trace.end_tick = 900;
+        trace
+            .commands
+            .retain(|command| command.tick < trace.end_tick);
+        let mut simulation =
+            MissionSimulation::from_mission(&mission, SimulationModifiers::default());
+
+        run_trace(&mut simulation, &trace).unwrap();
+
+        assert!(simulation
+            .events()
+            .iter()
             .any(|event| matches!(event.kind, SimulationEventKind::RelayActivated { index: 0 })));
-        assert!(first.events().iter().any(|event| matches!(
+        assert!(simulation.events().iter().any(|event| matches!(
             event.kind,
             SimulationEventKind::UnitQueued {
                 kind: UnitKind::Warden
             }
         )));
-        assert!(first.events().iter().any(|event| matches!(
+        assert!(simulation.events().iter().any(|event| matches!(
             event.kind,
             SimulationEventKind::UnitDeployed {
                 kind: UnitKind::Warden,
                 ..
             }
         )));
-        assert!(first
+        assert!(simulation
             .events()
             .iter()
             .any(|event| matches!(event.kind, SimulationEventKind::ResourcesCredited { .. })));

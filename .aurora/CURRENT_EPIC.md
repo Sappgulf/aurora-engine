@@ -26,8 +26,13 @@ movement simulation with matching Reclaim trace hashes.
 production with a bounded ordered event log and persisted 900-tick Reclaim
 truth trace.
 
+`FOUNDRY-004`: Simulation-owned combat, unit destruction, Canticle
+reinforcement, defeat, and victory; the 3600-tick Reclaim trace now completes
+the mission and its bounded report is available through an allow-listed MCP
+scenario id.
+
 ## Next iteration
 
-`FOUNDRY-004`: Move combat, defeat, and victory resolution into
-`MissionSimulation`, extend the canonical trace through mission completion,
-and expose its bounded report through the allow-listed MCP scenario lane.
+`FOUNDRY-005`: Add automated 1280×720 browser capture at DPR 1 and 2,
+assert HUD safe zones from deterministic checkpoints, and run the headless
+scenario plus actual Trunk application build in CI.

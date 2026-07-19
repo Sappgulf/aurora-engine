@@ -30,3 +30,12 @@
 - The checked-in 900-tick Reclaim trace restores relay one and produces exactly one additional Warden with matching hashes across two clean runs.
 - Safari confirmed the same production command spends salvage, updates the queue HUD, completes, and returns the queue to ready without HUD overlap.
 - The retained event history and presentation event queue are both capped at 256 entries; headless traces cannot grow either queue without bound.
+
+## 2026-07-19 — FOUNDRY-004
+
+- Attack resolution, health changes, unit destruction, the Canticle reinforcement phase, and mission outcomes now belong to `MissionSimulation`; presentation consumes semantic events for flashes, wrecks, audio, and overlays.
+- Game-owned campaign doctrines cross the boundary as damage and damage-taken scales, keeping save and faction concepts out of the renderer-free simulation.
+- The canonical Reclaim trace now restores all three relays, produces one Warden, attacks the Canticle, triggers its reinforcement phase, and reaches victory at tick 3600 with matching hashes across two runs.
+- Combat retains the pre-existing per-tick snapshot/work-vector allocation pattern moved from `main.rs`; FOUNDRY-004 introduces no new steady-state allocation class, and optimization can now use deterministic evidence.
+- MCP exposes only `last_light.reclaim.relay_production`, returning checked-in trace/report metadata with a 64-command cap and no path or executable input.
+- Safari showed live movement into combat, synchronized attack/hit effects and health changes, a readable HUD, and an updated minimap on the latest WASM build.

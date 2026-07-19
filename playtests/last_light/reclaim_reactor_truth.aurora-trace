@@ -3,11 +3,15 @@
   "scenario_id": "last_light.reclaim.relay_production",
   "seed": 44117,
   "fixed_tick_hz": 60,
-  "end_tick": 900,
+  "end_tick": 3600,
   "commands": [
     { "tick": 0, "action": "last_light.select_all" },
     { "tick": 1, "action": "last_light.select_kind", "payload": "engineer" },
     { "tick": 5, "action": "last_light.move_selected", "payload": [-790.0, 320.0] },
-    { "tick": 500, "action": "last_light.queue_unit", "payload": "warden" }
+    { "tick": 500, "action": "last_light.queue_unit", "payload": "warden" },
+    { "tick": 900, "action": "last_light.move_selected", "payload": [30.0, -430.0] },
+    { "tick": 1550, "action": "last_light.move_selected", "payload": [830.0, 250.0] },
+    { "tick": 2200, "action": "last_light.select_kind", "payload": "warden" },
+    { "tick": 2201, "action": "last_light.attack_kind", "payload": "canticle" }
   ]
 }
