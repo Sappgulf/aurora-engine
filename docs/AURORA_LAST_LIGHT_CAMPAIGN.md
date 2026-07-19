@@ -108,15 +108,20 @@ sectors.
 
 The playable mission is a command-map operation. The player begins with three
 Lantern units and a field fabricator: one Warden, one Engineer, and one Surveyor.
-Left-click selects; drag selects a squad; right-click moves or attacks. Restored
-relays join the power lattice and generate salvage, letting the player queue
-reinforcements without turning units into disposable spam. Restore three power
-nodes, hold the reactor circle, and defeat the Choir Canticle. Victory persists
+Left-click selects; drag selects a squad; right-click moves or attacks. Shift
+right-click queues a waypoint; `A` attack-moves, `P` patrols, and `U` follows a
+friendly unit. Restored relays join the power lattice and generate Salvage,
+while violet Flux blooms pay for advanced Surveyors. The Fabricator's `D`
+module expands supply by four for 100 Salvage. Restore three power nodes, hold
+the reactor circle, and defeat the Choir Canticle. Victory persists
 the Lumen contact, campaign currency, and mission-three unlock across native and
 browser sessions. The field-beacon tool costs 50 salvage, must remain inside the
 authored build area and within 470 units of the connected lattice, and extends
 sensor coverage. Beacons may chain outward, making map control a deliberate
-infrastructure route rather than free omniscience.
+infrastructure route rather than free omniscience. Mission dialogue is driven
+by the same data model as the simulation: relay activation, delivered Salvage,
+enemy-funded raids, and unit defeats can all advance a radio line without
+renderer-specific scripting.
 
 ## Lumen upgrade lattice
 

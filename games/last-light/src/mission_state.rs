@@ -15,6 +15,13 @@ pub struct SalvageNode {
     pub position: Vec2,
     pub remaining: u32,
     pub harvest_buffer: f32,
+    pub kind: ResourceKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceKind {
+    Salvage,
+    Flux,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,11 +38,26 @@ pub struct HarvestJob {
     pub phase: HarvestPhase,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StructureKind {
     Relay(usize),
     Fabricator,
     Reactor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StructureState {
+    pub kind: StructureKind,
+    pub health: f32,
+    pub max_health: f32,
+    pub build_progress: f32,
+    pub powered: bool,
+}
+
+impl StructureState {
+    pub fn operational(self) -> bool {
+        self.health > 0.0 && self.build_progress >= 1.0 && self.powered
+    }
 }
 
 impl StructureKind {

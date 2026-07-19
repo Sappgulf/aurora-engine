@@ -20,7 +20,9 @@ use aurora_engine::{
 };
 use campaign::*;
 use glam::Vec2;
-use mission_state::{FieldBeacon, HarvestJob, HarvestPhase, SalvageNode, StructureKind};
+use mission_state::{
+    FieldBeacon, HarvestJob, HarvestPhase, ResourceKind, SalvageNode, StructureKind,
+};
 use missions::{DialogueTrigger, MissionDef, VictoryCondition};
 use save::{CampaignStore, SaveData};
 use simulation::{
@@ -94,6 +96,9 @@ struct LastLight {
     fabricator_position: Vec2,
     field_beacons: Vec<FieldBeacon>,
     placing_beacon: bool,
+    attack_move_mode: bool,
+    patrol_mode: bool,
+    follow_mode: bool,
     status: Option<(String, f32)>,
     save_store: CampaignStore,
     save_data: SaveData,
@@ -267,6 +272,9 @@ impl LastLight {
             fabricator_position: Vec2::ZERO,
             field_beacons: Vec::new(),
             placing_beacon: false,
+            attack_move_mode: false,
+            patrol_mode: false,
+            follow_mode: false,
             status: None,
             save_store,
             save_data,
@@ -312,10 +320,16 @@ impl LastLight {
             .mission
             .salvage_nodes
             .iter()
-            .map(|&position| SalvageNode {
+            .enumerate()
+            .map(|(index, &position)| SalvageNode {
                 position,
                 remaining: 240,
                 harvest_buffer: 0.0,
+                kind: if index >= 3 {
+                    ResourceKind::Flux
+                } else {
+                    ResourceKind::Salvage
+                },
             })
             .collect();
         self.harvest_jobs.clear();
@@ -324,6 +338,9 @@ impl LastLight {
         self.fabricator_position = self.mission.fabricator_position;
         self.field_beacons.clear();
         self.placing_beacon = false;
+        self.attack_move_mode = false;
+        self.patrol_mode = false;
+        self.follow_mode = false;
         self.enemy_ai = SimpleAggroAi::new();
         self.selected_structure = None;
         self.dialogue_cursor = 0;
@@ -783,15 +800,6 @@ impl LastLight {
         renderer.camera.zoom.max(f32::EPSILON).recip()
     }
 
-    fn friendly_count(&self) -> usize {
-        self.simulation
-            .world
-            .units()
-            .iter()
-            .filter(|unit| unit.faction == PLAYER && unit.alive())
-            .count()
-    }
-
     fn queue_unit(&mut self, kind: UnitKind) {
         match self.simulation.queue_unit(kind) {
             Ok(()) => {
@@ -800,10 +808,16 @@ impl LastLight {
             Err(ProductionCommandError::UnitCap) => {
                 self.status = Some(("UNIT CAP 12".to_owned(), 2.5));
             }
+            Err(ProductionCommandError::SupplyBlocked) => {
+                self.status = Some(("SUPPLY BLOCKED — BUILD CAPACITY".to_owned(), 2.5));
+            }
             Err(ProductionCommandError::FabricatorOffline) => {
                 self.status = Some(("FABRICATOR OFFLINE".to_owned(), 2.5));
             }
             Err(ProductionCommandError::UnsupportedUnit) => {}
+            Err(ProductionCommandError::InsufficientFlux) => {
+                self.status = Some(("INSUFFICIENT FLUX — HARVEST BLUE NODES".to_owned(), 2.5));
+            }
             Err(ProductionCommandError::Queue(QueueError::InsufficientResources)) => {
                 self.status = Some(("INSUFFICIENT SALVAGE".to_owned(), 2.5));
             }
@@ -811,6 +825,23 @@ impl LastLight {
                 self.status = Some(("PRODUCTION QUEUE FULL".to_owned(), 2.5));
             }
         }
+    }
+
+    fn upgrade_supply_module(&mut self) {
+        const COST: u32 = 100;
+        const STEP: u32 = 4;
+        const MAX: u32 = 24;
+        if self.simulation.supply.capacity() >= MAX {
+            self.status = Some(("SUPPLY MODULE MAXED 24/24".to_owned(), 2.5));
+            return;
+        }
+        if !self.simulation.resources.spend(COST) {
+            self.status = Some(("SUPPLY MODULE REQUIRES 100 SALVAGE".to_owned(), 2.5));
+            return;
+        }
+        let capacity = (self.simulation.supply.capacity() + STEP).min(MAX);
+        self.simulation.supply.set_capacity(capacity);
+        self.status = Some((format!("SUPPLY MODULE ONLINE // CAPACITY {capacity}"), 3.0));
     }
 
     /// Static command-card text prevents per-frame row/vector allocation.
@@ -833,7 +864,7 @@ impl LastLight {
             _ => match index {
                 0..=4 => COMMAND_CARD_LABELS[index],
                 5 if self.placing_beacon => "B  CANCEL BEACON",
-                5 => "B  PLACE BEACON",
+                5 => "B BEACON  •  D SUPPLY",
                 _ => "",
             },
         }
@@ -888,7 +919,7 @@ impl LastLight {
                     self.status = Some(("LUMEN CORE CAPACITY 3/3".to_owned(), 2.5));
                     return;
                 }
-                if !self.simulation.resources.spend(90) {
+                if !self.simulation.activate_lumen_core() {
                     self.status = Some(("LUMEN CORE REQUIRES 90 SALVAGE".to_owned(), 2.5));
                     return;
                 }
@@ -997,12 +1028,37 @@ impl LastLight {
         if ctx.input.key_pressed(KeyCode::KeyR) {
             self.focus_next_objective(ctx);
         }
+        if ctx.input.key_pressed(KeyCode::KeyA) {
+            self.attack_move_mode = true;
+            self.patrol_mode = false;
+            self.follow_mode = false;
+            self.status = Some((
+                "ATTACK-MOVE READY — RIGHT CLICK DESTINATION".to_owned(),
+                3.0,
+            ));
+        }
+        if ctx.input.key_pressed(KeyCode::KeyP) {
+            self.patrol_mode = true;
+            self.attack_move_mode = false;
+            self.follow_mode = false;
+            self.status = Some(("PATROL READY — RIGHT CLICK WAYPOINT".to_owned(), 3.0));
+        }
+        if ctx.input.key_pressed(KeyCode::KeyU) {
+            self.follow_mode = true;
+            self.attack_move_mode = false;
+            self.patrol_mode = false;
+            self.status = Some(("FOLLOW READY — RIGHT CLICK A LANTERN UNIT".to_owned(), 3.0));
+        }
         if let Some(structure @ (StructureKind::Relay(_) | StructureKind::Reactor)) =
             self.selected_structure
         {
             if ctx.input.key_pressed(KeyCode::KeyC) {
                 self.activate_structure_command(structure);
             }
+        } else if matches!(self.selected_structure, Some(StructureKind::Fabricator))
+            && ctx.input.key_pressed(KeyCode::KeyD)
+        {
+            self.upgrade_supply_module();
         } else {
             for key in COMMAND_CARD_KEYS {
                 if ctx.input.key_pressed(key) {
@@ -1088,6 +1144,7 @@ impl LastLight {
                     self.repair_flash
                         .insert(UnitId(engineer), (UnitId(target), 0.12));
                 }
+                SimulationEventKind::StructureRepaired { .. } => {}
                 SimulationEventKind::UnitDestroyed { unit_id, .. } => {
                     let unit_id = UnitId(unit_id);
                     self.down_units.insert(unit_id, 0.0);
@@ -1097,10 +1154,15 @@ impl LastLight {
                     self.status = Some(("CANTICLE CALLS REINFORCEMENTS".to_owned(), 4.0));
                     ctx.audio.hurt();
                 }
+                SimulationEventKind::EnemyRaidSpawned { kind, .. } => {
+                    self.status = Some((format!("CHOIR RAID // {} INBOUND", kind.label()), 4.0));
+                    ctx.audio.hurt();
+                }
                 SimulationEventKind::MissionVictory => self.victory = true,
                 SimulationEventKind::MissionDefeat => self.defeat = true,
                 SimulationEventKind::CommandAccepted { .. }
                 | SimulationEventKind::ResourcesCredited { .. }
+                | SimulationEventKind::ResourcesDelivered { .. }
                 | SimulationEventKind::UnitQueued { .. } => {}
             }
         }
@@ -1248,6 +1310,20 @@ impl LastLight {
         })
     }
 
+    fn friendly_unit_id_at(&self, point: Vec2) -> Option<UnitId> {
+        self.simulation
+            .world
+            .units()
+            .iter()
+            .filter(|unit| unit.faction == PLAYER && unit.alive())
+            .filter_map(|unit| {
+                let distance = unit.position.distance(point);
+                (distance <= unit.radius * 1.6).then_some((unit.id, distance))
+            })
+            .min_by(|left, right| left.1.total_cmp(&right.1))
+            .map(|(id, _)| id)
+    }
+
     fn issue_move_order(&mut self, destination: Vec2) {
         self.simulation.issue_move_order(destination);
         self.order_marker = Some((destination, 0.65));
@@ -1266,17 +1342,29 @@ impl LastLight {
     }
 
     fn structure_status_line(&self, structure: StructureKind) -> String {
+        let condition = self
+            .simulation
+            .structure(structure)
+            .map(|state| {
+                format!(
+                    "  HP {:.0}/{:.0}  BUILD {:02}%",
+                    state.health,
+                    state.max_health,
+                    state.build_progress * 100.0
+                )
+            })
+            .unwrap_or_default();
         match structure {
             StructureKind::Relay(index) => match self.simulation.relays.get(index) {
-                Some(relay) if relay.active => "RELAY — ONLINE".to_owned(),
+                Some(relay) if relay.active => format!("RELAY — ONLINE{condition}"),
                 Some(relay) => format!(
-                    "RELAY — CHARGING {:.0}%  (ENGINEER NEARBY TO RESTORE)",
+                    "RELAY — CHARGING {:.0}%  (ENGINEER NEARBY TO RESTORE){condition}",
                     (relay.progress / 3.0 * 100.0).clamp(0.0, 100.0)
                 ),
                 None => "RELAY".to_owned(),
             },
             StructureKind::Fabricator => format!(
-                "LANTERN FABRICATOR — {}  QUEUE {}/5  {}",
+                "LANTERN FABRICATOR — {}  QUEUE {}/5  {}{}",
                 if self.simulation.power.is_powered(FABRICATOR_NODE) {
                     "POWERED"
                 } else {
@@ -1287,9 +1375,22 @@ impl LastLight {
                     "RALLY SET"
                 } else {
                     "RIGHT CLICK TO SET RALLY"
-                }
+                },
+                condition
             ),
-            StructureKind::Reactor => "AUXILIARY REACTOR — AWAITING FULL POWER LATTICE".to_owned(),
+            StructureKind::Reactor => format!(
+                "AUXILIARY REACTOR — {}{}",
+                if self
+                    .simulation
+                    .tech
+                    .is_unlocked(crate::simulation::TECH_RELAY_NETWORK)
+                {
+                    "LATTICE ONLINE"
+                } else {
+                    "AWAITING FULL POWER LATTICE"
+                },
+                condition
+            ),
         }
     }
 
@@ -1423,6 +1524,9 @@ impl LastLight {
         }
         if ctx.input.mouse_pressed(MouseButton::Right)
             && matches!(self.selected_structure, Some(StructureKind::Fabricator))
+            && !self.attack_move_mode
+            && !self.patrol_mode
+            && !self.follow_mode
         {
             self.simulation.set_rally_point(mouse_world);
             self.status = Some(("FABRICATOR RALLY POINT SET".to_owned(), 2.5));
@@ -1433,7 +1537,27 @@ impl LastLight {
             && !self.simulation.world.selection().ids().is_empty()
         {
             let selected_ids = self.simulation.world.selection().ids().to_vec();
-            if let Some(node) = self.salvage_node_at(mouse_world) {
+            if self.attack_move_mode {
+                self.simulation
+                    .issue_attack_move_order(mouse_world, ctx.input.shift_down());
+                self.attack_move_mode = false;
+                self.status = Some(("ATTACK-MOVE ORDERED".to_owned(), 2.0));
+            } else if self.patrol_mode {
+                self.simulation
+                    .issue_patrol_order(mouse_world, ctx.input.shift_down());
+                self.patrol_mode = false;
+                self.status = Some(("PATROL ROUTE SET".to_owned(), 2.0));
+            } else if self.follow_mode {
+                if let Some(target) = self.friendly_unit_id_at(mouse_world) {
+                    self.simulation
+                        .world
+                        .issue_follow(target, ctx.input.shift_down());
+                    self.follow_mode = false;
+                    self.status = Some(("FOLLOW ORDERED".to_owned(), 2.0));
+                } else {
+                    self.status = Some(("FOLLOW TARGET NOT FOUND".to_owned(), 2.0));
+                }
+            } else if let Some(node) = self.salvage_node_at(mouse_world) {
                 let assigned = self.assign_harvest_order(node);
                 if assigned > 0 {
                     self.status = Some((format!("{assigned} SURVEYOR // SALVAGE ROUTE SET"), 2.5));
@@ -1445,6 +1569,10 @@ impl LastLight {
                 for id in &selected_ids {
                     self.simulation.player_paths.remove(id);
                 }
+            } else if ctx.input.shift_down() {
+                self.simulation.queue_move_order(mouse_world);
+                self.order_marker = Some((mouse_world, 0.65));
+                self.status = Some(("WAYPOINT QUEUED".to_owned(), 2.0));
             } else {
                 self.issue_move_order(mouse_world);
             }
@@ -1558,6 +1686,7 @@ impl LastLight {
         const INTERACT_RANGE: f32 = 105.0;
         let ids: Vec<UnitId> = self.harvest_jobs.keys().copied().collect();
         let mut deposited = 0;
+        let mut deposited_flux = 0;
         let mut remove = Vec::new();
         for id in ids {
             let Some(position) = self
@@ -1617,7 +1746,16 @@ impl LastLight {
                 }
                 HarvestPhase::ToDepot => {
                     if position.distance(self.fabricator_position) <= 135.0 {
-                        deposited += snapshot.cargo;
+                        let node_kind = self
+                            .salvage_nodes
+                            .get(snapshot.node)
+                            .map(|node| node.kind)
+                            .unwrap_or(ResourceKind::Salvage);
+                        if node_kind == ResourceKind::Flux {
+                            deposited_flux += snapshot.cargo;
+                        } else {
+                            deposited += snapshot.cargo;
+                        }
                         let node_position = self
                             .salvage_nodes
                             .get(snapshot.node)
@@ -1640,7 +1778,10 @@ impl LastLight {
             self.harvest_jobs.remove(&id);
         }
         if deposited > 0 {
-            self.simulation.resources.credit(deposited);
+            self.simulation.credit_salvage(deposited);
+        }
+        if deposited_flux > 0 {
+            self.simulation.credit_flux(deposited_flux);
         }
         deposited
     }
@@ -1665,6 +1806,11 @@ impl LastLight {
         let ready = match line.trigger {
             DialogueTrigger::Time(time) => self.mission_time >= time,
             DialogueTrigger::RelaysOnline(count) => active_relays >= count,
+            DialogueTrigger::SalvageDelivered(amount) => {
+                self.simulation.salvage_delivered >= amount
+            }
+            DialogueTrigger::EnemyRaid(count) => self.simulation.enemy_raid_count >= count,
+            DialogueTrigger::UnitDestroyed(kind) => self.simulation.destroyed_count(kind) > 0,
         };
         if ready {
             self.radio_message = Some((line.speaker, line.text, 6.0));
@@ -1676,7 +1822,7 @@ impl LastLight {
         let Some(unit) = self.simulation.world.unit(id) else {
             return false;
         };
-        let UnitOrder::Attack(target) = unit.order else {
+        let Some(target) = self.attack_target_for_unit(id) else {
             return false;
         };
         let Some(range) = self
@@ -1690,6 +1836,31 @@ impl LastLight {
         self.simulation.world.unit(target).is_some_and(|target| {
             target.alive() && unit.position.distance(target.position) <= range
         })
+    }
+
+    fn attack_target_for_unit(&self, id: UnitId) -> Option<UnitId> {
+        let unit = self.simulation.world.unit(id)?;
+        match unit.order {
+            UnitOrder::Attack(target) => Some(target),
+            UnitOrder::AttackMove(_) => self
+                .simulation
+                .world
+                .units()
+                .iter()
+                .filter(|candidate| {
+                    candidate.faction == CHOIR
+                        && candidate.alive()
+                        && unit.position.distance(candidate.position)
+                            <= self.simulation.kinds[&id].combat().range
+                })
+                .min_by(|left, right| {
+                    unit.position
+                        .distance(left.position)
+                        .total_cmp(&unit.position.distance(right.position))
+                })
+                .map(|candidate| candidate.id),
+            _ => None,
+        }
     }
 
     fn update_specialist_doctrines(&mut self, dt: f32) {
@@ -1851,7 +2022,10 @@ impl LastLight {
         match order {
             UnitOrder::Idle => "READY",
             UnitOrder::Move(_) => "MOVING",
+            UnitOrder::AttackMove(_) => "ATTACK-MOVE",
             UnitOrder::Attack(_) => "ENGAGING",
+            UnitOrder::Patrol(_, _) => "PATROLLING",
+            UnitOrder::Follow(_) => "FOLLOWING",
             UnitOrder::Interact(_) => "OPERATING",
             UnitOrder::Hold => "HOLDING",
         }
@@ -2351,10 +2525,14 @@ impl Game for LastLight {
                 continue;
             }
             let pulse = 0.82 + (t * 3.2 + node.position.x * 0.01).sin() * 0.12;
+            let node_color = match node.kind {
+                ResourceKind::Salvage => Color::rgba(0.08, 1.4, 1.35, 0.18 * pulse),
+                ResourceKind::Flux => Color::rgba(0.72, 0.2, 1.55, 0.22 * pulse),
+            };
             ctx.renderer.draw_sprite(
                 self.tex_glow,
                 Sprite::new(node.position, Vec2::splat(150.0 * charge.max(0.45)))
-                    .with_color(Color::rgba(0.08, 1.4, 1.35, 0.18 * pulse))
+                    .with_color(node_color)
                     .with_z(-0.25),
             );
             for rotation in [0.0_f32, 2.094, 4.188] {
@@ -2366,7 +2544,10 @@ impl Game for LastLight {
                         Vec2::new(34.0, 62.0 * charge.max(0.32)),
                     )
                     .with_rotation(rotation - std::f32::consts::FRAC_PI_2)
-                    .with_color(Color::rgba(0.15, 1.35, 1.4, 0.92))
+                    .with_color(match node.kind {
+                        ResourceKind::Salvage => Color::rgba(0.15, 1.35, 1.4, 0.92),
+                        ResourceKind::Flux => Color::rgba(0.76, 0.28, 1.6, 0.95),
+                    })
                     .with_z(-0.05),
                 );
             }
@@ -2549,7 +2730,7 @@ impl Game for LastLight {
             ctx.renderer.draw_sprite(texture, sprite);
 
             if self.attack_flash.contains_key(&unit.id) {
-                if let UnitOrder::Attack(target_id) = unit.order {
+                if let Some(target_id) = self.attack_target_for_unit(unit.id) {
                     if let Some(target) = self.simulation.world.unit(target_id) {
                         let delta = target.position - unit.position;
                         let beam_color = if unit.faction == PLAYER {
@@ -2747,7 +2928,10 @@ impl Game for LastLight {
                         minimap.world_to_panel(node.position),
                         Vec2::splat(6.0 * hud_scale),
                     )
-                    .with_color(Color::rgb(0.18, 1.35, 1.45))
+                    .with_color(match node.kind {
+                        ResourceKind::Salvage => Color::rgb(0.18, 1.35, 1.45),
+                        ResourceKind::Flux => Color::rgb(0.75, 0.28, 1.5),
+                    })
                     .with_z(8.0),
                 );
             }
@@ -2925,7 +3109,7 @@ impl Game for LastLight {
             8.0,
         );
         let control_hint = if self.simulation.world.selection().ids().is_empty() {
-            "DRAG SELECT  •  CLICK A SQUAD, THEN TERRAIN TO MOVE  •  R OBJECTIVE"
+            "DRAG SELECT  •  TERRAIN MOVE  •  A ATTACK-MOVE  •  P PATROL  •  U FOLLOW"
         } else if self
             .simulation
             .world
@@ -2934,9 +3118,9 @@ impl Game for LastLight {
             .iter()
             .any(|id| self.simulation.kinds.get(id) == Some(&UnitKind::Surveyor))
         {
-            "RIGHT CLICK SALVAGE TO HARVEST  •  RIGHT CLICK ENEMY TO ATTACK"
+            "RIGHT CLICK SALVAGE TO HARVEST  •  A ATTACK-MOVE  •  P PATROL  •  U FOLLOW"
         } else {
-            "CLICK TERRAIN MOVE  •  RIGHT CLICK ATTACK  •  H HOLD  •  R OBJECTIVE"
+            "CLICK TERRAIN MOVE  •  SHIFT+RIGHT QUEUE  •  A ATTACK-MOVE  •  P PATROL  •  U FOLLOW"
         };
         self.draw_text(
             ctx.renderer,
@@ -2951,8 +3135,9 @@ impl Game for LastLight {
         self.draw_text(
             ctx.renderer,
             &format!(
-                "SALVAGE {}  CARGO {cargo}  LUMEN CORES {}",
+                "SALVAGE {}  FLUX {}  CARGO {cargo}  LUMEN CORES {}",
                 self.simulation.resources.amount(),
+                self.simulation.flux,
                 self.lumen_cores,
             ),
             top_left + Vec2::new(0.0, -50.0) * hud_scale,
@@ -2963,10 +3148,11 @@ impl Game for LastLight {
         self.draw_text(
             ctx.renderer,
             &format!(
-                "INCOME +{income}/S  POWER {}/{}  UNITS {}/12",
+                "INCOME +{income}/S  POWER {}/{}  SUPPLY {}/{}",
                 active_relays + 1,
                 self.simulation.relays.len() + 1,
-                self.friendly_count()
+                self.simulation.supply.used(),
+                self.simulation.supply.capacity()
             ),
             top_left + Vec2::new(0.0, -75.0) * hud_scale,
             2.35 * hud_scale,
@@ -3437,7 +3623,15 @@ mod tests {
         assert_eq!(game.simulation.relays.len(), 3);
         assert_eq!(game.salvage_nodes.len(), 5);
         assert!(game.reactor_position.is_some());
-        assert_eq!(game.friendly_count(), 3);
+        assert_eq!(
+            game.simulation
+                .world
+                .units()
+                .iter()
+                .filter(|unit| unit.faction == PLAYER && unit.alive())
+                .count(),
+            3
+        );
         assert_eq!(game.simulation.world.selection().ids().len(), 3);
         assert_eq!(
             game.simulation

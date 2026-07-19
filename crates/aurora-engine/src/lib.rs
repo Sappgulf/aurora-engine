@@ -57,10 +57,11 @@ pub use renderer::Mesh3DHandle;
 pub use renderer::{GpuContext, PointLight, RenderQuality, Renderer};
 pub use renderer::{RenderStats, TextureHandle};
 pub use rts::{
-    FactionId, FogOfWar, FogState, MinimapTransform, NavGrid, PlacementError, PlacementRules,
-    PowerGrid, PowerNode, PowerNodeId, ProductId, ProductionItem, ProductionQueue,
-    ProductionRecipe, QueueError, ResourceBank, RtsUnit, RtsWorld, Selection, SelectionBox, UnitId,
-    UnitOrder,
+    ArmorClass, DamageType, FactionId, FogOfWar, FogState, MinimapTransform, NavGrid,
+    PlacementError, PlacementRules, PowerGrid, PowerNode, PowerNodeId, ProductId, ProductionItem,
+    ProductionQueue, ProductionRecipe, QueueError, ResourceBank, ResourceCost, ResourceSet,
+    RtsUnit, RtsWorld, Selection, SelectionBox, SupplyLedger, TechGraph, TechId, TerrainZone,
+    UnitId, UnitOrder,
 };
 pub use save::{SaveEnvelope, SaveError, SaveStore, DEFAULT_SAVE_SLOT};
 pub use scene::{EntityId, Scene};

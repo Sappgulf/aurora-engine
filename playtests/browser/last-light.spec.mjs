@@ -95,6 +95,17 @@ test("Reclaim checkpoints preserve the playfield at fixed DPR", async ({ page },
   await page.reload();
   await page.waitForTimeout(1_000);
   await deployReclaim(page);
+  // Exercise the RTS command vocabulary before production: attack-move,
+  // patrol, and a queued waypoint must all be accepted without a browser-side
+  // exception even when the click lands on open terrain.
+  await page.keyboard.press("KeyA");
+  await page.mouse.click(820, 360, { button: "right" });
+  await page.keyboard.press("KeyP");
+  await page.mouse.click(640, 300, { button: "right" });
+  await page.keyboard.down("Shift");
+  await page.mouse.click(720, 420, { button: "right" });
+  await page.keyboard.up("Shift");
+  await page.waitForTimeout(500);
   await page.keyboard.press("KeyQ");
   await page.waitForTimeout(2_000);
   await page.keyboard.press("KeyQ");

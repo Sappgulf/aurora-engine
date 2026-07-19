@@ -4,7 +4,7 @@
 //! than hardcoded in `main.rs`) is what lets a second mission reuse the same
 //! simulation/rendering code instead of forking it.
 
-use aurora_engine::Aabb;
+use aurora_engine::{Aabb, TerrainZone};
 use glam::Vec2;
 
 use crate::units::UnitKind;
@@ -68,6 +68,9 @@ pub enum VictoryCondition {
 pub enum DialogueTrigger {
     Time(f32),
     RelaysOnline(usize),
+    SalvageDelivered(u32),
+    EnemyRaid(u32),
+    UnitDestroyed(UnitKind),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -96,6 +99,8 @@ pub struct MissionDef {
     /// Static blockers used to build the mission's `NavGrid` (corridor
     /// walls, etc.) and to obstruct placement.
     pub obstacles: Vec<Aabb>,
+    /// Authored elevation and cover zones consumed by combat.
+    pub terrain_zones: Vec<TerrainZone>,
     /// Position of the "wake Lumen" interaction, if this mission has one.
     pub lumen_console: Option<Vec2>,
     pub victory: VictoryCondition,
@@ -130,6 +135,9 @@ impl MissionDef {
         }
         for obstacle in &mut self.obstacles {
             *obstacle = Aabb::new(obstacle.min * scale, obstacle.max * scale);
+        }
+        for zone in &mut self.terrain_zones {
+            zone.bounds = Aabb::new(zone.bounds.min * scale, zone.bounds.max * scale);
         }
         self.lumen_console = self.lumen_console.map(|position| position * scale);
         if let VictoryCondition::EscortToExtraction { point, .. } = &mut self.victory {
@@ -195,6 +203,16 @@ pub fn reclaim_the_reactor() -> MissionDef {
                 text: "THE LATTICE IS OUR GROUND NOW. HOLD THE LIGHT AND BREAK ITS CONDUCTOR.",
                 trigger: DialogueTrigger::Time(38.0),
             },
+            RadioLine {
+                speaker: "IVO RENN",
+                text: "SALVAGE RETURNED. THE FABRICATOR CAN BREATHE AGAIN.",
+                trigger: DialogueTrigger::SalvageDelivered(24),
+            },
+            RadioLine {
+                speaker: "SENA QUILL",
+                text: "THE CHOIR HAS FUNDED A RAID. EXPECT CONTACT FROM THE DARK EDGE.",
+                trigger: DialogueTrigger::EnemyRaid(1),
+            },
         ],
         reactor_position: Some(Vec2::new(520.0, -40.0)),
         fabricator_position: Vec2::new(-1_020.0, -120.0),
@@ -212,6 +230,11 @@ pub fn reclaim_the_reactor() -> MissionDef {
             EnemySpawn::new(UnitKind::Canticle, Vec2::new(520.0, 40.0), 340.0, 125.0),
         ],
         obstacles: Vec::new(),
+        terrain_zones: vec![TerrainZone::new(
+            Aabb::from_center_size(Vec2::new(20.0, -250.0), Vec2::new(1_050.0, 420.0)),
+            1,
+            0.18,
+        )],
         lumen_console: None,
         victory: VictoryCondition::RestoreRelaysAndDefeatBoss {
             boss_kind: UnitKind::Canticle,
@@ -279,6 +302,11 @@ pub fn voice_in_conduit_twelve() -> MissionDef {
             Aabb::from_center_size(Vec2::new(250.0, 210.0), Vec2::new(90.0, 500.0)),
             Aabb::from_center_size(Vec2::new(650.0, -260.0), Vec2::new(90.0, 400.0)),
         ],
+        terrain_zones: vec![TerrainZone::new(
+            Aabb::from_center_size(Vec2::new(-460.0, 230.0), Vec2::new(900.0, 380.0)),
+            1,
+            0.22,
+        )],
         lumen_console: Some(extraction),
         victory: VictoryCondition::EscortToExtraction {
             point: extraction,
@@ -325,6 +353,11 @@ pub fn terms_of_salvage() -> MissionDef {
             },
             RadioLine {
                 speaker: "IVO ROOK",
+                text: "ONE HOSTILE DOWN. KEEP THE SURVEYOR MOVING WHILE THE VAULT IS OPEN.",
+                trigger: DialogueTrigger::UnitDestroyed(UnitKind::Needle),
+            },
+            RadioLine {
+                speaker: "IVO ROOK",
                 text: "SECOND RELAY IS LIVE. FABRICATOR HAS A CLEAN LINE TO THE VAULT.",
                 trigger: DialogueTrigger::RelaysOnline(2),
             },
@@ -345,6 +378,11 @@ pub fn terms_of_salvage() -> MissionDef {
         obstacles: vec![Aabb::from_center_size(
             Vec2::new(20.0, 480.0),
             Vec2::new(1_650.0, 80.0),
+        )],
+        terrain_zones: vec![TerrainZone::new(
+            Aabb::from_center_size(Vec2::new(260.0, -170.0), Vec2::new(860.0, 360.0)),
+            1,
+            0.2,
         )],
         lumen_console: None,
         victory: VictoryCondition::RestoreRelaysAndDefeatBoss {

@@ -4,13 +4,13 @@ use std::collections::{HashMap, VecDeque};
 
 use aurora_engine::{
     mark_obstacles, Aabb, DeterministicSimulation, FactionId, NavGrid, PowerGrid, PowerNode,
-    PowerNodeId, ProductionQueue, QueueError, ResourceBank, RtsWorld, SemanticCommand,
-    StableStateHasher, StateHash, UnitId, UnitOrder,
+    PowerNodeId, ProductionQueue, QueueError, ResourceBank, ResourceSet, RtsWorld, SemanticCommand,
+    StableStateHasher, StateHash, SupplyLedger, TechGraph, TechId, TerrainZone, UnitId, UnitOrder,
 };
 use glam::Vec2;
 use serde::Serialize;
 
-use crate::mission_state::Relay;
+use crate::mission_state::{Relay, StructureKind, StructureState};
 use crate::missions::{MissionDef, VictoryCondition};
 use crate::units::{UnitKind, CHOIR, PLAYER};
 
@@ -21,10 +21,14 @@ const EVENT_LOG_CAPACITY: usize = 256;
 const COMBAT_BUFFER_CAPACITY: usize = 32;
 const PATH_ADVANCE_BUFFER_CAPACITY: usize = 32;
 pub const FABRICATOR_NODE: PowerNodeId = PowerNodeId(0);
+pub const TECH_RELAY_NETWORK: TechId = TechId(1);
+pub const TECH_LUMEN_CORE: TechId = TechId(2);
 
 pub const SELECT_ALL_ACTION: &str = "last_light.select_all";
 pub const SELECT_KIND_ACTION: &str = "last_light.select_kind";
 pub const MOVE_SELECTED_ACTION: &str = "last_light.move_selected";
+pub const ATTACK_MOVE_SELECTED_ACTION: &str = "last_light.attack_move_selected";
+pub const PATROL_SELECTED_ACTION: &str = "last_light.patrol_selected";
 pub const QUEUE_UNIT_ACTION: &str = "last_light.queue_unit";
 pub const ATTACK_KIND_ACTION: &str = "last_light.attack_kind";
 
@@ -69,14 +73,17 @@ pub enum SimulationEventKind {
     CommandAccepted { action: String },
     RelayActivated { index: usize },
     ResourcesCredited { amount: u32 },
+    ResourcesDelivered { salvage: u32, flux: u32 },
     UnitQueued { kind: UnitKind },
     UnitDeployed { unit_id: u32, kind: UnitKind },
     UnitSpawned { unit_id: u32, kind: UnitKind },
     AttackLanded { attacker: u32, target: u32 },
     DamageApplied { target: u32 },
     UnitRepaired { engineer: u32, target: u32 },
+    StructureRepaired { structure: String },
     UnitDestroyed { unit_id: u32, kind: UnitKind },
     BossReinforced,
+    EnemyRaidSpawned { unit_id: u32, kind: UnitKind },
     MissionVictory,
     MissionDefeat,
 }
@@ -91,8 +98,10 @@ pub struct SimulationEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProductionCommandError {
     UnitCap,
+    SupplyBlocked,
     FabricatorOffline,
     UnsupportedUnit,
+    InsufficientFlux,
     Queue(QueueError),
 }
 
@@ -107,6 +116,15 @@ pub struct MissionSimulation {
     pub escort_unit: Option<UnitId>,
     pub relays: Vec<Relay>,
     pub resources: ResourceBank,
+    pub flux: u32,
+    pub supply: SupplyLedger,
+    pub tech: TechGraph,
+    pub structures: HashMap<StructureKind, StructureState>,
+    pub terrain_zones: Vec<TerrainZone>,
+    pub reactor_position: Option<Vec2>,
+    pub enemy_resources: ResourceSet,
+    pub enemy_raid_count: u32,
+    pub salvage_delivered: u32,
     pub production: ProductionQueue,
     pub power: PowerGrid,
     pub fabricator_position: Vec2,
@@ -124,6 +142,10 @@ pub struct MissionSimulation {
     combat_snapshot: Vec<(UnitId, Vec2, bool)>,
     combat_attacks: Vec<(UnitId, UnitId, f32)>,
     support_repairs: Vec<(UnitId, UnitId, f32)>,
+    structure_repairs: Vec<(UnitId, StructureKind, f32)>,
+    enemy_income_tick: f32,
+    enemy_raid_timer: f32,
+    destroyed_by_kind: HashMap<UnitKind, u32>,
 }
 
 impl MissionSimulation {
@@ -152,6 +174,44 @@ impl MissionSimulation {
             });
             power.link(FABRICATOR_NODE, relay);
         }
+        let mut tech = TechGraph::default();
+        tech.define(TECH_RELAY_NETWORK, Vec::new());
+        tech.define(TECH_LUMEN_CORE, vec![TECH_RELAY_NETWORK]);
+        let mut structures = HashMap::new();
+        for (index, _) in mission.relays.iter().enumerate() {
+            structures.insert(
+                StructureKind::Relay(index),
+                StructureState {
+                    kind: StructureKind::Relay(index),
+                    health: 500.0,
+                    max_health: 500.0,
+                    build_progress: 0.0,
+                    powered: false,
+                },
+            );
+        }
+        structures.insert(
+            StructureKind::Fabricator,
+            StructureState {
+                kind: StructureKind::Fabricator,
+                health: 800.0,
+                max_health: 800.0,
+                build_progress: 1.0,
+                powered: true,
+            },
+        );
+        if mission.reactor_position.is_some() {
+            structures.insert(
+                StructureKind::Reactor,
+                StructureState {
+                    kind: StructureKind::Reactor,
+                    health: 1000.0,
+                    max_health: 1000.0,
+                    build_progress: 0.0,
+                    powered: false,
+                },
+            );
+        }
         let mut simulation = Self {
             world: RtsWorld::default(),
             kinds: HashMap::new(),
@@ -168,6 +228,15 @@ impl MissionSimulation {
                 })
                 .collect(),
             resources: ResourceBank::new(modifiers.starting_salvage),
+            flux: 3,
+            supply: SupplyLedger::new(12),
+            tech,
+            structures,
+            terrain_zones: mission.terrain_zones.clone(),
+            reactor_position: mission.reactor_position,
+            enemy_resources: ResourceSet::new(0, 0),
+            enemy_raid_count: 0,
+            salvage_delivered: 0,
             production: ProductionQueue::new(5),
             power,
             fabricator_position: mission.fabricator_position,
@@ -185,6 +254,10 @@ impl MissionSimulation {
             combat_snapshot: Vec::with_capacity(COMBAT_BUFFER_CAPACITY),
             combat_attacks: Vec::with_capacity(COMBAT_BUFFER_CAPACITY),
             support_repairs: Vec::with_capacity(COMBAT_BUFFER_CAPACITY),
+            structure_repairs: Vec::with_capacity(COMBAT_BUFFER_CAPACITY),
+            enemy_income_tick: 0.0,
+            enemy_raid_timer: 42.0,
+            destroyed_by_kind: HashMap::new(),
         };
         for spawn in &mission.player_spawns {
             let id = simulation.spawn(
@@ -238,6 +311,11 @@ impl MissionSimulation {
             unit.speed = speed;
             unit.radius = kind.scale() * 0.27;
         }
+        if faction == PLAYER {
+            // Starting units and deployed production reserve the same ledger;
+            // a failed queue is rejected before a unit can exceed supply.
+            let _ = self.supply.try_add(kind.supply_cost());
+        }
         self.kinds.insert(id, kind);
         id
     }
@@ -262,6 +340,22 @@ impl MissionSimulation {
         let selected_ids = self.world.selection().ids().to_vec();
         self.world.issue_move(destination, 74.0);
         self.route_around_obstacles(&selected_ids);
+    }
+
+    pub fn queue_move_order(&mut self, destination: Vec2) {
+        self.world.queue_move(destination, 74.0);
+    }
+
+    pub fn issue_attack_move_order(&mut self, destination: Vec2, append: bool) {
+        self.world.issue_attack_move(destination, append);
+        if !append {
+            let ids = self.world.selection().ids().to_vec();
+            self.route_around_obstacles(&ids);
+        }
+    }
+
+    pub fn issue_patrol_order(&mut self, destination: Vec2, append: bool) {
+        self.world.issue_patrol(destination, append);
     }
 
     /// Issues a path-aware move to one unit without disturbing squad selection.
@@ -307,10 +401,24 @@ impl MissionSimulation {
         };
         self.record(SimulationEventKind::DamageApplied { target: target.0 });
         if destroyed {
+            self.release_supply_and_record(target);
+            let kind = self.kinds[&target];
+            *self.destroyed_by_kind.entry(kind).or_insert(0) += 1;
             self.record(SimulationEventKind::UnitDestroyed {
                 unit_id: target.0,
-                kind: self.kinds[&target],
+                kind,
             });
+        }
+    }
+
+    fn release_supply_and_record(&mut self, target: UnitId) {
+        let Some(unit) = self.world.unit(target) else {
+            return;
+        };
+        if unit.faction == PLAYER {
+            if let Some(kind) = self.kinds.get(&target) {
+                self.supply.release(kind.supply_cost());
+            }
         }
     }
 
@@ -368,6 +476,9 @@ impl MissionSimulation {
             };
             if done {
                 self.player_paths.remove(&id);
+                if self.world.start_next_queued_order(id) {
+                    self.route_around_obstacles(&[id]);
+                }
             }
         }
         self.path_advance_ids = ids;
@@ -393,6 +504,67 @@ impl MissionSimulation {
         })
     }
 
+    pub fn destroyed_count(&self, kind: UnitKind) -> u32 {
+        self.destroyed_by_kind.get(&kind).copied().unwrap_or(0)
+    }
+
+    pub fn structure(&self, kind: StructureKind) -> Option<StructureState> {
+        self.structures.get(&kind).copied()
+    }
+
+    pub fn damage_structure(&mut self, kind: StructureKind, amount: f32) -> bool {
+        let Some(structure) = self.structures.get_mut(&kind) else {
+            return false;
+        };
+        let was_operational = structure.operational();
+        structure.health = (structure.health - amount.max(0.0)).max(0.0);
+        was_operational && !structure.operational()
+    }
+
+    fn structure_position(&self, kind: StructureKind) -> Option<Vec2> {
+        match kind {
+            StructureKind::Relay(index) => self.relays.get(index).map(|relay| relay.position),
+            StructureKind::Fabricator => Some(self.fabricator_position),
+            StructureKind::Reactor => self.reactor_position,
+        }
+    }
+
+    pub fn credit_salvage(&mut self, amount: u32) {
+        if amount == 0 {
+            return;
+        }
+        self.resources.credit(amount);
+        self.salvage_delivered = self.salvage_delivered.saturating_add(amount);
+        self.record(SimulationEventKind::ResourcesDelivered {
+            salvage: amount,
+            flux: 0,
+        });
+    }
+
+    pub fn credit_flux(&mut self, amount: u32) {
+        if amount == 0 {
+            return;
+        }
+        self.flux = self.flux.saturating_add(amount);
+        self.record(SimulationEventKind::ResourcesDelivered {
+            salvage: 0,
+            flux: amount,
+        });
+    }
+
+    pub fn activate_lumen_core(&mut self) -> bool {
+        if self.relays.iter().all(|relay| relay.active) {
+            let _ = self.tech.unlock(TECH_RELAY_NETWORK);
+        }
+        if !self.tech.is_unlocked(TECH_RELAY_NETWORK) || !self.resources.spend(90) {
+            return false;
+        }
+        if !self.tech.is_unlocked(TECH_LUMEN_CORE) {
+            let _ = self.tech.unlock(TECH_LUMEN_CORE);
+        }
+        true
+    }
+
     pub fn queue_unit(&mut self, kind: UnitKind) -> Result<(), ProductionCommandError> {
         let friendly_count = self
             .world
@@ -403,17 +575,27 @@ impl MissionSimulation {
         if friendly_count + self.production.items().len() >= 12 {
             return Err(ProductionCommandError::UnitCap);
         }
+        let supply_cost = kind.supply_cost();
+        if self.supply.available() < supply_cost {
+            return Err(ProductionCommandError::SupplyBlocked);
+        }
         if !self.power.is_powered(FABRICATOR_NODE) {
             return Err(ProductionCommandError::FabricatorOffline);
         }
         let Some(mut recipe) = kind.recipe() else {
             return Err(ProductionCommandError::UnsupportedUnit);
         };
+        let secondary_cost = kind.resource_cost().secondary;
+        if self.flux < secondary_cost {
+            return Err(ProductionCommandError::InsufficientFlux);
+        }
         recipe.build_millis =
             (recipe.build_millis as f32 * self.modifiers.production_time_scale) as u32;
         self.production
             .enqueue(recipe, &mut self.resources)
             .map_err(ProductionCommandError::Queue)?;
+        self.flux -= secondary_cost;
+        let _ = self.supply.try_add(supply_cost);
         self.record(SimulationEventKind::UnitQueued { kind });
         Ok(())
     }
@@ -457,6 +639,24 @@ impl MissionSimulation {
                     self.record(SimulationEventKind::RelayActivated { index });
                 }
             }
+            if let Some(structure) = self.structures.get_mut(&StructureKind::Relay(index)) {
+                structure.build_progress = (self.relays[index].progress / 3.0).clamp(0.0, 1.0);
+                structure.powered = self.relays[index].active;
+            }
+        }
+        if self.relays.iter().all(|relay| relay.active) {
+            let _ = self.tech.unlock(TECH_RELAY_NETWORK);
+        }
+        if let Some(structure) = self.structures.get_mut(&StructureKind::Reactor) {
+            structure.build_progress = if self.tech.is_unlocked(TECH_RELAY_NETWORK) {
+                1.0
+            } else {
+                0.0
+            };
+            structure.powered = self.tech.is_unlocked(TECH_RELAY_NETWORK);
+        }
+        if let Some(structure) = self.structures.get_mut(&StructureKind::Fabricator) {
+            structure.powered = self.power.is_powered(FABRICATOR_NODE);
         }
     }
 
@@ -471,39 +671,102 @@ impl MissionSimulation {
             self.record(SimulationEventKind::ResourcesCredited { amount: income });
         }
 
-        if !self.power.is_powered(FABRICATOR_NODE) {
+        if self.power.is_powered(FABRICATOR_NODE) {
+            for product in self.production.update(dt) {
+                let Some(kind) = UnitKind::from_product(product) else {
+                    continue;
+                };
+                let friendly_count = self
+                    .world
+                    .units()
+                    .iter()
+                    .filter(|unit| unit.faction == PLAYER && unit.alive())
+                    .count();
+                let offset = Vec2::new(80.0, (friendly_count % 3) as f32 * 70.0 - 70.0);
+                let (health, speed) = match kind {
+                    UnitKind::Warden => (155.0, 175.0),
+                    UnitKind::Engineer => (115.0, 150.0),
+                    UnitKind::Surveyor => (90.0, 215.0),
+                    UnitKind::Needle | UnitKind::Canticle | UnitKind::BellMine => continue,
+                };
+                // Queue reservation becomes a live unit reservation at deployment.
+                self.supply.release(kind.supply_cost());
+                let id = self.spawn(
+                    kind,
+                    PLAYER,
+                    self.rally_point.unwrap_or(self.fabricator_position) + offset,
+                    health,
+                    speed,
+                    self.modifiers,
+                );
+                self.record(SimulationEventKind::UnitDeployed {
+                    unit_id: id.0,
+                    kind,
+                });
+            }
+        }
+        self.update_enemy_economy(dt);
+    }
+
+    fn update_enemy_economy(&mut self, dt: f32) {
+        let relay_income = self.relays.iter().filter(|relay| relay.active).count() as f32;
+        self.enemy_income_tick += dt.max(0.0) * (1.25 + relay_income * 0.55);
+        let income = self.enemy_income_tick.floor() as u32;
+        if income > 0 {
+            self.enemy_resources.primary = self.enemy_resources.primary.saturating_add(income);
+            self.enemy_income_tick -= income as f32;
+        }
+        self.enemy_raid_timer -= dt.max(0.0);
+        if self.enemy_raid_timer > 0.0 || self.enemy_resources.primary < 90 {
             return;
         }
-        for product in self.production.update(dt) {
-            let Some(kind) = UnitKind::from_product(product) else {
-                continue;
-            };
-            let friendly_count = self
-                .world
-                .units()
-                .iter()
-                .filter(|unit| unit.faction == PLAYER && unit.alive())
-                .count();
-            let offset = Vec2::new(80.0, (friendly_count % 3) as f32 * 70.0 - 70.0);
-            let (health, speed) = match kind {
-                UnitKind::Warden => (155.0, 175.0),
-                UnitKind::Engineer => (115.0, 150.0),
-                UnitKind::Surveyor => (90.0, 215.0),
-                UnitKind::Needle | UnitKind::Canticle | UnitKind::BellMine => continue,
-            };
-            let id = self.spawn(
-                kind,
-                PLAYER,
-                self.rally_point.unwrap_or(self.fabricator_position) + offset,
-                health,
-                speed,
-                self.modifiers,
-            );
-            self.record(SimulationEventKind::UnitDeployed {
-                unit_id: id.0,
-                kind,
-            });
+        let living_enemy_count = self
+            .world
+            .units()
+            .iter()
+            .filter(|unit| unit.faction == CHOIR && unit.alive())
+            .count();
+        if living_enemy_count >= 18 {
+            self.enemy_raid_timer = 12.0;
+            return;
         }
+        let anchor = self
+            .relays
+            .iter()
+            .find(|relay| relay.active)
+            .map(|relay| relay.position)
+            .unwrap_or(self.fabricator_position);
+        let kind = if self.enemy_raid_count % 3 == 2 {
+            UnitKind::BellMine
+        } else {
+            UnitKind::Needle
+        };
+        let offset = if self.enemy_raid_count.is_multiple_of(2) {
+            Vec2::new(280.0, -190.0)
+        } else {
+            Vec2::new(-250.0, 170.0)
+        };
+        let (health, speed) = match kind {
+            UnitKind::Needle => (95.0, 130.0),
+            UnitKind::BellMine => (110.0, 80.0),
+            _ => unreachable!("raid roster is enemy-only"),
+        };
+        let id = self.spawn(kind, CHOIR, anchor + offset, health, speed, self.modifiers);
+        if let Some((index, _)) = self
+            .relays
+            .iter()
+            .enumerate()
+            .find(|(_, relay)| relay.active)
+        {
+            let _ = self.damage_structure(StructureKind::Relay(index), 18.0);
+        }
+        self.enemy_resources.primary -= 90;
+        self.enemy_raid_count += 1;
+        self.enemy_raid_timer = 31.0;
+        self.record(SimulationEventKind::EnemyRaidSpawned {
+            unit_id: id.0,
+            kind,
+        });
     }
 
     fn update_combat(&mut self, dt: f32) {
@@ -516,9 +779,28 @@ impl MissionSimulation {
         );
         self.combat_attacks.clear();
         for unit in self.world.units() {
-            let UnitOrder::Attack(target) = unit.order else {
-                continue;
+            let target = match unit.order {
+                UnitOrder::Attack(target) => Some(target),
+                UnitOrder::AttackMove(_) => self
+                    .world
+                    .units()
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.faction == CHOIR
+                            && candidate.alive()
+                            && unit.position.distance(candidate.position)
+                                <= self.kinds[&unit.id].combat().range * 1.35
+                    })
+                    .min_by(|left, right| {
+                        unit.position
+                            .distance(left.position)
+                            .total_cmp(&unit.position.distance(right.position))
+                            .then_with(|| left.id.0.cmp(&right.id.0))
+                    })
+                    .map(|candidate| candidate.id),
+                _ => None,
             };
+            let Some(target) = target else { continue };
             let Some((_, target_position, true)) = self
                 .combat_snapshot
                 .iter()
@@ -530,11 +812,29 @@ impl MissionSimulation {
             let Some(profile) = self.kinds.get(&unit.id).map(|kind| kind.combat()) else {
                 continue;
             };
+            let attacker_elevation = self
+                .terrain_zones
+                .iter()
+                .find(|zone| zone.contains(unit.position))
+                .map(|zone| zone.elevation)
+                .unwrap_or(profile.elevation);
+            let target_kind = self.kinds.get(&target).copied().unwrap_or(UnitKind::Warden);
+            let target_profile = target_kind.combat();
+            let target_terrain_scale = self
+                .terrain_zones
+                .iter()
+                .find(|zone| zone.contains(target_position))
+                .map(|zone| zone.damage_multiplier(attacker_elevation))
+                .unwrap_or(1.0);
             if unit.position.distance(target_position) < profile.range {
                 self.combat_attacks.push((
                     unit.id,
                     target,
-                    profile.damage_per_second
+                    (profile.damage_per_second
+                        * profile.damage_type.multiplier(target_profile.armor_class)
+                        * target_terrain_scale
+                        - target_profile.armor * 0.45)
+                        .max(0.0)
                         * dt.max(0.0)
                         * if unit.faction == PLAYER {
                             self.modifiers.player_damage_scale
@@ -568,6 +868,8 @@ impl MissionSimulation {
             });
             if destroyed {
                 let kind = self.kinds[&target];
+                self.release_supply_and_record(target);
+                *self.destroyed_by_kind.entry(kind).or_insert(0) += 1;
                 self.record(SimulationEventKind::UnitDestroyed {
                     unit_id: target.0,
                     kind,
@@ -580,6 +882,7 @@ impl MissionSimulation {
         const REPAIR_RANGE: f32 = 145.0;
         const REPAIR_PER_SECOND: f32 = 12.0;
         self.support_repairs.clear();
+        self.structure_repairs.clear();
         for engineer in self.world.units().iter().filter(|unit| {
             unit.faction == PLAYER
                 && unit.alive()
@@ -591,6 +894,20 @@ impl MissionSimulation {
             {
                 self.support_repairs
                     .push((engineer.id, target, REPAIR_PER_SECOND * dt.max(0.0)));
+            }
+            if let Some((kind, _)) = self
+                .structures
+                .iter()
+                .filter(|(_, structure)| structure.health < structure.max_health)
+                .filter_map(|(kind, _structure)| {
+                    self.structure_position(*kind)
+                        .map(|position| (*kind, position.distance(engineer.position)))
+                })
+                .filter(|(_, distance)| *distance <= REPAIR_RANGE * 1.35)
+                .min_by(|left, right| left.1.total_cmp(&right.1))
+            {
+                self.structure_repairs
+                    .push((engineer.id, kind, REPAIR_PER_SECOND * dt.max(0.0)));
             }
         }
         for index in 0..self.support_repairs.len() {
@@ -605,6 +922,15 @@ impl MissionSimulation {
                 self.record(SimulationEventKind::UnitRepaired {
                     engineer: engineer.0,
                     target: target.0,
+                });
+            }
+        }
+        for index in 0..self.structure_repairs.len() {
+            let (_, kind, amount) = self.structure_repairs[index];
+            if let Some(structure) = self.structures.get_mut(&kind) {
+                structure.health = (structure.health + amount).min(structure.max_health);
+                self.record(SimulationEventKind::StructureRepaired {
+                    structure: format!("{kind:?}"),
                 });
             }
         }
@@ -749,6 +1075,18 @@ impl DeterministicSimulation for MissionSimulation {
             MOVE_SELECTED_ACTION => {
                 return Err("move requires a selected Lantern unit".to_owned());
             }
+            ATTACK_MOVE_SELECTED_ACTION if !self.world.selection().ids().is_empty() => {
+                self.issue_attack_move_order(Self::command_destination(command)?, false);
+            }
+            ATTACK_MOVE_SELECTED_ACTION => {
+                return Err("attack-move requires a selected Lantern unit".to_owned());
+            }
+            PATROL_SELECTED_ACTION if !self.world.selection().ids().is_empty() => {
+                self.issue_patrol_order(Self::command_destination(command)?, false);
+            }
+            PATROL_SELECTED_ACTION => {
+                return Err("patrol requires a selected Lantern unit".to_owned());
+            }
             QUEUE_UNIT_ACTION => self
                 .queue_unit(Self::command_kind(command)?)
                 .map_err(|error| format!("could not queue unit: {error:?}"))?,
@@ -803,6 +1141,11 @@ impl DeterministicSimulation for MissionSimulation {
                     hasher.write_u64(u64::from(position.x.to_bits()));
                     hasher.write_u64(u64::from(position.y.to_bits()));
                 }
+                UnitOrder::AttackMove(position) => {
+                    hasher.write_u64(5);
+                    hasher.write_u64(u64::from(position.x.to_bits()));
+                    hasher.write_u64(u64::from(position.y.to_bits()));
+                }
                 UnitOrder::Attack(target) => {
                     hasher.write_u64(2);
                     hasher.write_u64(u64::from(target.0));
@@ -812,7 +1155,55 @@ impl DeterministicSimulation for MissionSimulation {
                     hasher.write_u64(u64::from(position.x.to_bits()));
                     hasher.write_u64(u64::from(position.y.to_bits()));
                 }
+                UnitOrder::Patrol(first, second) => {
+                    hasher.write_u64(6);
+                    for position in [first, second] {
+                        hasher.write_u64(u64::from(position.x.to_bits()));
+                        hasher.write_u64(u64::from(position.y.to_bits()));
+                    }
+                }
+                UnitOrder::Follow(target) => {
+                    hasher.write_u64(7);
+                    hasher.write_u64(u64::from(target.0));
+                }
                 UnitOrder::Hold => hasher.write_u64(4),
+            }
+            hasher.write_u64(unit.queued_orders.len() as u64);
+            for order in &unit.queued_orders {
+                match *order {
+                    UnitOrder::Idle => hasher.write_u64(0),
+                    UnitOrder::Move(position) => {
+                        hasher.write_u64(1);
+                        hasher.write_u64(u64::from(position.x.to_bits()));
+                        hasher.write_u64(u64::from(position.y.to_bits()));
+                    }
+                    UnitOrder::Attack(target) => {
+                        hasher.write_u64(2);
+                        hasher.write_u64(u64::from(target.0));
+                    }
+                    UnitOrder::Interact(position) => {
+                        hasher.write_u64(3);
+                        hasher.write_u64(u64::from(position.x.to_bits()));
+                        hasher.write_u64(u64::from(position.y.to_bits()));
+                    }
+                    UnitOrder::Hold => hasher.write_u64(4),
+                    UnitOrder::AttackMove(position) => {
+                        hasher.write_u64(5);
+                        hasher.write_u64(u64::from(position.x.to_bits()));
+                        hasher.write_u64(u64::from(position.y.to_bits()));
+                    }
+                    UnitOrder::Patrol(first, second) => {
+                        hasher.write_u64(6);
+                        for position in [first, second] {
+                            hasher.write_u64(u64::from(position.x.to_bits()));
+                            hasher.write_u64(u64::from(position.y.to_bits()));
+                        }
+                    }
+                    UnitOrder::Follow(target) => {
+                        hasher.write_u64(7);
+                        hasher.write_u64(u64::from(target.0));
+                    }
+                }
             }
         }
         hasher.write_u64(self.world.selection().ids().len() as u64);
@@ -820,6 +1211,28 @@ impl DeterministicSimulation for MissionSimulation {
             hasher.write_u64(u64::from(id.0));
         }
         hasher.write_u64(u64::from(self.resources.amount()));
+        hasher.write_u64(u64::from(self.flux));
+        hasher.write_u64(u64::from(self.supply.used()));
+        hasher.write_u64(u64::from(self.supply.capacity()));
+        hasher.write_u64(self.tech.unlocked().len() as u64);
+        for tech in self.tech.unlocked() {
+            hasher.write_u64(u64::from(tech.0));
+        }
+        hasher.write_u64(u64::from(self.enemy_resources.primary));
+        hasher.write_u64(u64::from(self.enemy_resources.secondary));
+        hasher.write_u64(u64::from(self.enemy_raid_count));
+        hasher.write_u64(u64::from(self.salvage_delivered));
+        hasher.write_u64(u64::from(self.enemy_raid_timer.to_bits()));
+        for kind in [
+            UnitKind::Warden,
+            UnitKind::Engineer,
+            UnitKind::Surveyor,
+            UnitKind::Needle,
+            UnitKind::Canticle,
+            UnitKind::BellMine,
+        ] {
+            hasher.write_u64(u64::from(self.destroyed_count(kind)));
+        }
         hasher.write_u64(u64::from(self.resource_tick.to_bits()));
         if let Some(rally) = self.rally_point {
             hasher.write_bool(true);
@@ -837,6 +1250,24 @@ impl DeterministicSimulation for MissionSimulation {
         for relay in &self.relays {
             hasher.write_u64(u64::from(relay.progress.to_bits()));
             hasher.write_bool(relay.active);
+        }
+        let mut structure_order: Vec<_> =
+            (0..self.relays.len()).map(StructureKind::Relay).collect();
+        structure_order.push(StructureKind::Fabricator);
+        if self.structures.contains_key(&StructureKind::Reactor) {
+            structure_order.push(StructureKind::Reactor);
+        }
+        for kind in structure_order {
+            if let Some(structure) = self.structures.get(&kind) {
+                hasher.write_u64(match kind {
+                    StructureKind::Relay(index) => u64::from(index as u16),
+                    StructureKind::Fabricator => 100,
+                    StructureKind::Reactor => 101,
+                });
+                hasher.write_u64(u64::from(structure.health.to_bits()));
+                hasher.write_u64(u64::from(structure.build_progress.to_bits()));
+                hasher.write_bool(structure.powered);
+            }
         }
         hasher.write_u64(self.events.len() as u64);
         for event in &self.events {
@@ -959,6 +1390,37 @@ mod tests {
             .events()
             .iter()
             .any(|event| matches!(event.kind, SimulationEventKind::ResourcesCredited { .. })));
+    }
+
+    #[test]
+    fn enemy_economy_funds_a_raid_and_damages_the_frontier() {
+        let mission = crate::missions::reclaim_the_reactor();
+        let mut simulation =
+            MissionSimulation::from_mission(&mission, SimulationModifiers::default());
+        for relay in &mut simulation.relays {
+            relay.active = true;
+        }
+        simulation.enemy_resources.primary = 90;
+        simulation.enemy_raid_timer = 0.0;
+        let health_before = simulation
+            .structure(StructureKind::Relay(0))
+            .expect("relay state")
+            .health;
+
+        simulation.fixed_step_with_dt(0.0);
+
+        assert_eq!(simulation.enemy_raid_count, 1);
+        assert!(simulation
+            .events()
+            .iter()
+            .any(|event| matches!(event.kind, SimulationEventKind::EnemyRaidSpawned { .. })));
+        assert!(
+            simulation
+                .structure(StructureKind::Relay(0))
+                .expect("relay state")
+                .health
+                < health_before
+        );
     }
 
     #[test]

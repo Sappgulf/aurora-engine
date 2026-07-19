@@ -1,6 +1,6 @@
 //! Last Light's roster, production identifiers, and presentation balance.
 
-use aurora_engine::{FactionId, ProductId, ProductionRecipe};
+use aurora_engine::{ArmorClass, DamageType, FactionId, ProductId, ProductionRecipe, ResourceCost};
 use serde::{Deserialize, Serialize};
 
 pub const PLAYER: FactionId = FactionId(1);
@@ -9,7 +9,7 @@ const WARDEN_PRODUCT: ProductId = ProductId(0);
 const ENGINEER_PRODUCT: ProductId = ProductId(1);
 const SURVEYOR_PRODUCT: ProductId = ProductId(2);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnitKind {
     Warden,
@@ -26,6 +26,10 @@ pub enum UnitKind {
 pub struct CombatProfile {
     pub range: f32,
     pub damage_per_second: f32,
+    pub damage_type: DamageType,
+    pub armor_class: ArmorClass,
+    pub armor: f32,
+    pub elevation: i8,
 }
 
 impl UnitKind {
@@ -43,6 +47,23 @@ impl UnitKind {
             Self::Engineer => Some(ProductionRecipe::new(ENGINEER_PRODUCT, 70, 5_000)),
             Self::Surveyor => Some(ProductionRecipe::new(SURVEYOR_PRODUCT, 60, 4_000)),
             Self::Needle | Self::Canticle | Self::BellMine => None,
+        }
+    }
+
+    pub const fn resource_cost(self) -> ResourceCost {
+        match self {
+            Self::Warden => ResourceCost::new(90, 0),
+            Self::Engineer => ResourceCost::new(70, 0),
+            Self::Surveyor => ResourceCost::new(60, 1),
+            Self::Needle | Self::Canticle | Self::BellMine => ResourceCost::new(0, 0),
+        }
+    }
+
+    pub const fn supply_cost(self) -> u32 {
+        match self {
+            Self::Canticle => 4,
+            Self::BellMine => 2,
+            _ => 1,
         }
     }
     pub fn atlas_frame(self) -> u32 {
@@ -84,26 +105,50 @@ impl UnitKind {
             Self::Warden => CombatProfile {
                 range: 155.0,
                 damage_per_second: 32.0,
+                damage_type: DamageType::Normal,
+                armor_class: ArmorClass::Large,
+                armor: 2.0,
+                elevation: 0,
             },
             Self::Engineer => CombatProfile {
                 range: 90.0,
                 damage_per_second: 10.0,
+                damage_type: DamageType::Concussive,
+                armor_class: ArmorClass::Medium,
+                armor: 1.0,
+                elevation: 0,
             },
             Self::Surveyor => CombatProfile {
                 range: 225.0,
                 damage_per_second: 15.0,
+                damage_type: DamageType::Explosive,
+                armor_class: ArmorClass::Small,
+                armor: 0.0,
+                elevation: 1,
             },
             Self::Needle => CombatProfile {
                 range: 170.0,
                 damage_per_second: 11.0,
+                damage_type: DamageType::Concussive,
+                armor_class: ArmorClass::Small,
+                armor: 1.0,
+                elevation: 0,
             },
             Self::Canticle => CombatProfile {
                 range: 250.0,
                 damage_per_second: 16.0,
+                damage_type: DamageType::Explosive,
+                armor_class: ArmorClass::Large,
+                armor: 4.0,
+                elevation: 1,
             },
             Self::BellMine => CombatProfile {
                 range: 105.0,
                 damage_per_second: 24.0,
+                damage_type: DamageType::Explosive,
+                armor_class: ArmorClass::Structure,
+                armor: 3.0,
+                elevation: 0,
             },
         }
     }

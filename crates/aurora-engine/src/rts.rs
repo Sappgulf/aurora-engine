@@ -137,6 +137,209 @@ impl ResourceBank {
     }
 }
 
+/// A deterministic two-channel resource wallet for RTS economies. `primary`
+/// is the common construction currency; `secondary` is intentionally generic
+/// so games can name it salvage, gas, flux, or another strategic material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResourceSet {
+    pub primary: u32,
+    pub secondary: u32,
+}
+
+impl ResourceSet {
+    pub const fn new(primary: u32, secondary: u32) -> Self {
+        Self { primary, secondary }
+    }
+
+    pub const fn can_afford(self, cost: ResourceCost) -> bool {
+        self.primary >= cost.primary && self.secondary >= cost.secondary
+    }
+
+    pub fn credit(&mut self, amount: ResourceCost) {
+        self.primary = self.primary.saturating_add(amount.primary);
+        self.secondary = self.secondary.saturating_add(amount.secondary);
+    }
+
+    pub fn spend(&mut self, cost: ResourceCost) -> bool {
+        if !self.can_afford(cost) {
+            return false;
+        }
+        self.primary -= cost.primary;
+        self.secondary -= cost.secondary;
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResourceCost {
+    pub primary: u32,
+    pub secondary: u32,
+}
+
+impl ResourceCost {
+    pub const fn new(primary: u32, secondary: u32) -> Self {
+        Self { primary, secondary }
+    }
+}
+
+/// Supply is reserved when a unit enters a production queue, preventing a
+/// player from over-queuing units and discovering the cap only on deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SupplyLedger {
+    used: u32,
+    capacity: u32,
+}
+
+impl SupplyLedger {
+    pub const fn new(capacity: u32) -> Self {
+        Self { used: 0, capacity }
+    }
+
+    pub const fn used(self) -> u32 {
+        self.used
+    }
+
+    pub const fn capacity(self) -> u32 {
+        self.capacity
+    }
+
+    pub const fn available(self) -> u32 {
+        self.capacity.saturating_sub(self.used)
+    }
+
+    pub fn set_capacity(&mut self, capacity: u32) {
+        self.capacity = capacity;
+    }
+
+    pub fn try_add(&mut self, amount: u32) -> bool {
+        if self.available() < amount {
+            return false;
+        }
+        self.used += amount;
+        true
+    }
+
+    pub fn release(&mut self, amount: u32) {
+        self.used = self.used.saturating_sub(amount);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TechId(pub u16);
+
+/// A compact, data-driven prerequisite graph. Vectors keep iteration order
+/// stable for deterministic replays and save migration.
+#[derive(Debug, Clone, Default)]
+pub struct TechGraph {
+    unlocked: Vec<TechId>,
+    prerequisites: Vec<(TechId, Vec<TechId>)>,
+}
+
+impl TechGraph {
+    pub fn define(&mut self, tech: TechId, prerequisites: impl Into<Vec<TechId>>) {
+        if let Some(entry) = self
+            .prerequisites
+            .iter_mut()
+            .find(|(defined, _)| *defined == tech)
+        {
+            entry.1 = prerequisites.into();
+        } else {
+            self.prerequisites.push((tech, prerequisites.into()));
+        }
+    }
+
+    pub fn is_unlocked(&self, tech: TechId) -> bool {
+        self.unlocked.contains(&tech)
+    }
+
+    pub fn can_unlock(&self, tech: TechId) -> bool {
+        !self.is_unlocked(tech)
+            && self
+                .prerequisites
+                .iter()
+                .find(|(defined, _)| *defined == tech)
+                .is_none_or(|(_, requirements)| {
+                    requirements
+                        .iter()
+                        .all(|requirement| self.is_unlocked(*requirement))
+                })
+    }
+
+    pub fn unlock(&mut self, tech: TechId) -> bool {
+        if !self.can_unlock(tech) {
+            return false;
+        }
+        self.unlocked.push(tech);
+        true
+    }
+
+    pub fn unlocked(&self) -> &[TechId] {
+        &self.unlocked
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DamageType {
+    Normal,
+    Concussive,
+    Explosive,
+    Energy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArmorClass {
+    Small,
+    Medium,
+    Large,
+    Structure,
+}
+
+impl DamageType {
+    pub const fn multiplier(self, armor_class: ArmorClass) -> f32 {
+        match (self, armor_class) {
+            (Self::Concussive, ArmorClass::Medium) => 0.5,
+            (Self::Concussive, ArmorClass::Large) => 0.25,
+            (Self::Concussive, ArmorClass::Structure) => 0.35,
+            (Self::Explosive, ArmorClass::Small) => 0.5,
+            (Self::Explosive, ArmorClass::Medium) => 0.75,
+            (Self::Explosive, ArmorClass::Structure) => 0.75,
+            _ => 1.0,
+        }
+    }
+}
+
+/// Authored strategic map metadata used by combat and future visibility or
+/// movement rules. `cover` is a 0..1 fraction; elevation is a relative band.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TerrainZone {
+    pub bounds: Aabb,
+    pub elevation: i8,
+    pub cover: f32,
+}
+
+impl TerrainZone {
+    pub const fn new(bounds: Aabb, elevation: i8, cover: f32) -> Self {
+        Self {
+            bounds,
+            elevation,
+            cover,
+        }
+    }
+
+    pub fn contains(self, position: Vec2) -> bool {
+        self.bounds.contains_point(position)
+    }
+
+    pub fn damage_multiplier(self, attacker_elevation: i8) -> f32 {
+        let high_ground = if attacker_elevation < self.elevation {
+            0.7
+        } else {
+            1.0
+        };
+        high_ground * (1.0 - self.cover.clamp(0.0, 0.3))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProductionItem {
     pub product: ProductId,
@@ -313,7 +516,10 @@ pub struct FactionId(pub u8);
 pub enum UnitOrder {
     Idle,
     Move(Vec2),
+    AttackMove(Vec2),
     Attack(UnitId),
+    Patrol(Vec2, Vec2),
+    Follow(UnitId),
     Interact(Vec2),
     Hold,
 }
@@ -329,6 +535,7 @@ pub struct RtsUnit {
     pub health: f32,
     pub max_health: f32,
     pub order: UnitOrder,
+    pub queued_orders: VecDeque<UnitOrder>,
 }
 
 impl RtsUnit {
@@ -343,6 +550,7 @@ impl RtsUnit {
             health: 100.0,
             max_health: 100.0,
             order: UnitOrder::Idle,
+            queued_orders: VecDeque::new(),
         }
     }
 
@@ -571,8 +779,93 @@ impl RtsWorld {
             );
             if let Some(unit) = self.unit_mut(id) {
                 unit.order = UnitOrder::Move(destination + centered * spacing.max(0.0));
+                unit.queued_orders.clear();
             }
         }
+    }
+
+    pub fn queue_move(&mut self, destination: Vec2, spacing: f32) {
+        let ids = self.selection.ids.clone();
+        let width = (ids.len() as f32).sqrt().ceil().max(1.0) as usize;
+        for (index, id) in ids.into_iter().enumerate() {
+            let column = index % width;
+            let row = index / width;
+            let centered = Vec2::new(
+                column as f32 - (width.saturating_sub(1)) as f32 * 0.5,
+                row as f32
+                    - self.selection.ids.len().div_ceil(width).saturating_sub(1) as f32 * 0.5,
+            );
+            if let Some(unit) = self.unit_mut(id) {
+                let order = UnitOrder::Move(destination + centered * spacing.max(0.0));
+                if matches!(unit.order, UnitOrder::Idle) {
+                    unit.order = order;
+                } else {
+                    unit.queued_orders.push_back(order);
+                }
+            }
+        }
+    }
+
+    pub fn issue_attack_move(&mut self, destination: Vec2, append: bool) {
+        let ids = self.selection.ids.clone();
+        for id in ids {
+            if let Some(unit) = self.unit_mut(id) {
+                if append && !matches!(unit.order, UnitOrder::Idle) {
+                    unit.queued_orders
+                        .push_back(UnitOrder::AttackMove(destination));
+                } else {
+                    unit.order = UnitOrder::AttackMove(destination);
+                    unit.queued_orders.clear();
+                }
+            }
+        }
+    }
+
+    pub fn issue_patrol(&mut self, destination: Vec2, append: bool) {
+        let ids = self.selection.ids.clone();
+        for id in ids {
+            let Some(unit) = self.unit(id) else {
+                continue;
+            };
+            let start = unit.position;
+            if let Some(unit) = self.unit_mut(id) {
+                let order = UnitOrder::Patrol(start, destination);
+                if append && !matches!(unit.order, UnitOrder::Idle) {
+                    unit.queued_orders.push_back(order);
+                } else {
+                    unit.order = order;
+                    unit.queued_orders.clear();
+                }
+            }
+        }
+    }
+
+    pub fn issue_follow(&mut self, target: UnitId, append: bool) {
+        let ids = self.selection.ids.clone();
+        for id in ids {
+            if id == target {
+                continue;
+            }
+            if let Some(unit) = self.unit_mut(id) {
+                if append && !matches!(unit.order, UnitOrder::Idle) {
+                    unit.queued_orders.push_back(UnitOrder::Follow(target));
+                } else {
+                    unit.order = UnitOrder::Follow(target);
+                    unit.queued_orders.clear();
+                }
+            }
+        }
+    }
+
+    pub fn start_next_queued_order(&mut self, id: UnitId) -> bool {
+        let Some(unit) = self.unit_mut(id) else {
+            return false;
+        };
+        let Some(order) = unit.queued_orders.pop_front() else {
+            return false;
+        };
+        unit.order = order;
+        true
     }
 
     pub fn issue_attack(&mut self, target: UnitId) {
@@ -580,6 +873,7 @@ impl RtsWorld {
         for id in ids {
             if let Some(unit) = self.unit_mut(id) {
                 unit.order = UnitOrder::Attack(target);
+                unit.queued_orders.clear();
             }
         }
     }
@@ -590,6 +884,7 @@ impl RtsWorld {
             if let Some(unit) = self.unit_mut(id) {
                 unit.order = UnitOrder::Hold;
                 unit.velocity = Vec2::ZERO;
+                unit.queued_orders.clear();
             }
         }
     }
@@ -606,11 +901,18 @@ impl RtsWorld {
                 continue;
             }
             let target = match unit.order {
-                UnitOrder::Move(target) | UnitOrder::Interact(target) => Some(target),
+                UnitOrder::Move(target)
+                | UnitOrder::AttackMove(target)
+                | UnitOrder::Interact(target) => Some(target),
                 UnitOrder::Attack(id) => positions
                     .iter()
                     .find(|(candidate, _, alive)| *candidate == id && *alive)
                     .map(|(_, position, _)| *position),
+                UnitOrder::Follow(id) => positions
+                    .iter()
+                    .find(|(candidate, _, alive)| *candidate == id && *alive)
+                    .map(|(_, position, _)| *position),
+                UnitOrder::Patrol(first, _) => Some(first),
                 UnitOrder::Idle | UnitOrder::Hold => None,
             };
             let Some(target) = target else {
@@ -621,8 +923,14 @@ impl RtsWorld {
             if offset.length() <= unit.radius * 0.35 {
                 unit.position = target;
                 unit.velocity = Vec2::ZERO;
-                if matches!(unit.order, UnitOrder::Move(_)) {
-                    unit.order = UnitOrder::Idle;
+                match unit.order {
+                    UnitOrder::Move(_) | UnitOrder::AttackMove(_) | UnitOrder::Interact(_) => {
+                        unit.order = unit.queued_orders.pop_front().unwrap_or(UnitOrder::Idle);
+                    }
+                    UnitOrder::Patrol(first, second) => {
+                        unit.order = UnitOrder::Patrol(second, first);
+                    }
+                    _ => {}
                 }
             } else {
                 unit.velocity = offset.normalize_or_zero() * unit.speed;
@@ -927,6 +1235,58 @@ mod tests {
         assert_eq!(queue.update(1.5), [ProductId(7)]);
         assert!((queue.items()[0].progress() - 0.25).abs() < 0.001);
         assert_eq!(queue.update(1.5), [ProductId(9)]);
+    }
+
+    #[test]
+    fn resource_supply_and_tech_contracts_are_deterministic() {
+        let mut resources = ResourceSet::new(100, 2);
+        assert!(resources.spend(ResourceCost::new(40, 1)));
+        assert_eq!(resources, ResourceSet::new(60, 1));
+        assert!(!resources.spend(ResourceCost::new(61, 0)));
+
+        let mut supply = SupplyLedger::new(3);
+        assert!(supply.try_add(2));
+        assert!(!supply.try_add(2));
+        supply.release(1);
+        assert_eq!(supply.available(), 2);
+
+        let base = TechId(1);
+        let advanced = TechId(2);
+        let mut tech = TechGraph::default();
+        tech.define(base, Vec::new());
+        tech.define(advanced, vec![base]);
+        assert!(tech.can_unlock(base));
+        assert!(!tech.can_unlock(advanced));
+        assert!(tech.unlock(base));
+        assert!(tech.unlock(advanced));
+    }
+
+    #[test]
+    fn tactical_damage_and_cover_preserve_class_counters() {
+        assert_eq!(DamageType::Concussive.multiplier(ArmorClass::Large), 0.25);
+        assert_eq!(DamageType::Explosive.multiplier(ArmorClass::Small), 0.5);
+        let cover = TerrainZone::new(
+            Aabb::from_center_size(Vec2::ZERO, Vec2::splat(100.0)),
+            1,
+            0.2,
+        );
+        assert!((cover.damage_multiplier(0) - 0.56).abs() < 0.001);
+    }
+
+    #[test]
+    fn queued_orders_start_after_waypoint_arrival() {
+        let mut world = RtsWorld::default();
+        let id = world.spawn(PLAYER, Vec2::ZERO);
+        world.select_point(Vec2::ZERO, PLAYER, false);
+        world.issue_move(Vec2::new(50.0, 0.0), 0.0);
+        world.queue_move(Vec2::new(100.0, 0.0), 0.0);
+        world.unit_mut(id).unwrap().position = Vec2::new(50.0, 0.0);
+        world.update(0.0);
+        assert!(matches!(
+            world.unit(id).unwrap().order,
+            UnitOrder::Move(destination) if destination == Vec2::new(100.0, 0.0)
+        ));
+        assert!(world.unit(id).unwrap().queued_orders.is_empty());
     }
 
     #[test]

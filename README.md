@@ -19,7 +19,12 @@ cargo run -p last_light
 | **Left click / drag** | Select one unit or a squad |
 | **Shift + select** | Add units to the current selection |
 | **Right click** | Move or attack contextually |
+| **Shift + right click** | Queue a waypoint after the current order |
+| **A, then right click** | Attack-move to a destination |
+| **P, then right click** | Patrol between the current position and a waypoint |
+| **U, then right click** | Follow a friendly unit |
 | **Q / E / F** | Queue Warden / Engineer / Surveyor |
+| **D (Fabricator selected)** | Buy a Supply Module (+4 capacity, 100 Salvage) |
 | **B, then left click** | Preview and deploy a powered field beacon |
 | **H** | Hold selected units in position |
 | **T** | Stop selected units and clear their queued paths |
@@ -47,7 +52,8 @@ Guardian and Witness protocols. Later campaign decisions unlock `P` for Meridian
 Bastion/Charter accords and `G` for Verdant Bloom/Briar covenants.
 
 Select the Engineer and command it near each of the three power relays. Active
-relays generate salvage for the Lantern fabricator; build reinforcements, hold
+relays generate Salvage for the Lantern fabricator; violet Flux blooms fund
+advanced Surveyors. Build reinforcements, expand supply at the Fabricator, hold
 the sector, defeat the Choir Canticle, and bring the auxiliary reactor online.
 
 **Combat roles:** Idle Wardens and Surveyors automatically acquire nearby visible
@@ -95,7 +101,11 @@ cargo run -p skirmish        # free-play two-base RTS skirmish vs. the engine's 
 | Diagnostics + asset loading queue | ✅ foundation |
 | Feature-gated 3D mesh pipeline (depth-tested, single-light PBR) | ✅ core |
 | RTS selection, formations, orders, navigation, fog | ✅ |
-| RTS economy, production queues, power graphs, control groups | ✅ |
+| RTS economy, two-resource production, supply, tech prerequisites, power graphs, control groups | ✅ |
+| Attack-move, patrol, follow, queued waypoints | ✅ |
+| Combat damage classes, armor, elevation, and cover zones | ✅ |
+| Structure lifecycle (health/build/power) and Engineer repairs | ✅ |
+| Economy-aware Choir raids and data-driven campaign triggers | ✅ |
 | Placement validation, tactical minimap, per-unit clip players | ✅ |
 | Generated Engineer, Surveyor, and Choir action strips | ✅ |
 | Full-roster hit reactions and persistent shutdown wrecks | ✅ |
