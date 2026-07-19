@@ -12,6 +12,7 @@ categories = ["game-engines", "graphics", "wasm"]
 
 [features]
 default = []
+3d = []
 
 [dependencies]
 wgpu = { workspace = true }

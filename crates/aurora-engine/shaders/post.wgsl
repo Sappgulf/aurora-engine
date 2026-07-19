@@ -7,6 +7,12 @@ struct PostUniforms {
     enabled: f32,
     texel_x: f32,
     texel_y: f32,
+    light_count: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+    lights: array<vec4<f32>, 16>,
+    light_colors: array<vec4<f32>, 16>,
 }
 
 @group(0) @binding(0)
@@ -61,6 +67,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let g = textureSample(t_scene, s_scene, uv).g;
     let b = textureSample(t_scene, s_scene, uv - dir * ca).b;
     var color = vec3<f32>(r, g, b);
+
+    // Analytic point lights are added in HDR space. Radius is expressed in
+    // viewport-height UV units so circles remain circular on wide displays.
+    let aspect = u.texel_y / u.texel_x;
+    for (var i = 0; i < 16; i++) {
+        if (f32(i) >= u.light_count) {
+            break;
+        }
+        let light = u.lights[i];
+        var delta = uv - light.xy;
+        delta.x *= aspect;
+        let distance = length(delta) / light.z;
+        let falloff = max(1.0 - distance, 0.0);
+        color += u.light_colors[i].rgb * falloff * falloff * light.w;
+    }
 
     // Cheap bloom: threshold + multi-tap blur on bright areas
     var bloom = vec3<f32>(0.0);

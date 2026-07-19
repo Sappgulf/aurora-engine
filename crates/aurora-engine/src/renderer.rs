@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 
-use glam::Mat4;
+use glam::{Mat4, Vec2};
+use std::time::Instant;
 use winit::window::Window;
 
 use crate::camera::Camera2D;
 use crate::color::Color;
-use crate::post::{PostFxSettings, PostPipeline, PostUniforms};
+use crate::post::{PostFxSettings, PostPipeline, PostUniforms, ScreenLight, MAX_POINT_LIGHTS};
 use crate::sprite::{
     camera_uniform, CameraUniform, QueuedSprite, Sprite, SpriteBatch, SpriteVertex,
 };
@@ -23,6 +24,54 @@ pub struct RenderStats {
     pub queued_sprites: usize,
     pub drawn_sprites: usize,
     pub draw_calls: usize,
+    pub queued_lights: usize,
+    pub composed_lights: usize,
+    /// CPU time spent encoding and presenting the most recent frame.
+    pub cpu_frame_ms: f32,
+}
+
+/// A colored radial light composed over the HDR scene before bloom.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointLight {
+    /// Center in world coordinates.
+    pub position: Vec2,
+    /// Linear HDR color. Values above 1.0 are valid for intense neon light.
+    pub color: Color,
+    /// Radius in world units.
+    pub radius: f32,
+    /// Brightness multiplier applied after distance falloff.
+    pub intensity: f32,
+}
+
+impl PointLight {
+    pub const fn new(position: Vec2, color: Color, radius: f32, intensity: f32) -> Self {
+        Self {
+            position,
+            color,
+            radius,
+            intensity,
+        }
+    }
+}
+
+/// Portable lighting budget presets. The simulation is unaffected; this only
+/// limits the number of lights composed by the renderer each frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderQuality {
+    Performance,
+    #[default]
+    Balanced,
+    Cinematic,
+}
+
+impl RenderQuality {
+    const fn light_budget(self) -> usize {
+        match self {
+            Self::Performance => 4,
+            Self::Balanced => 8,
+            Self::Cinematic => MAX_POINT_LIGHTS,
+        }
+    }
 }
 
 /// Shared GPU objects games use to create textures.
@@ -55,6 +104,7 @@ pub struct Renderer {
     batch: SpriteBatch,
     textures: Vec<Texture>,
     draw_queue: Vec<QueuedSprite>,
+    light_queue: Vec<PointLight>,
 
     // Debug triangle (NDC)
     tri_pipeline: wgpu::RenderPipeline,
@@ -66,6 +116,7 @@ pub struct Renderer {
     post: PostPipeline,
     /// Full-screen post effects (bloom, vignette, chromatic).
     pub post_fx: PostFxSettings,
+    quality: RenderQuality,
 
     pub camera: Camera2D,
     stats: RenderStats,
@@ -388,6 +439,7 @@ impl Renderer {
             batch,
             textures: Vec::new(),
             draw_queue: Vec::with_capacity(1024),
+            light_queue: Vec::with_capacity(MAX_POINT_LIGHTS),
             tri_pipeline,
             tri_vbo,
             tri_uniform,
@@ -395,6 +447,7 @@ impl Renderer {
             show_debug_triangle: false,
             post,
             post_fx: PostFxSettings::default(),
+            quality: RenderQuality::default(),
             camera,
             stats: RenderStats::default(),
             window,
@@ -449,6 +502,23 @@ impl Renderer {
         }
     }
 
+    /// Queue a radial HDR light for this frame. Lights are automatically
+    /// cleared after `render`, matching the sprite queue lifetime.
+    pub fn draw_light(&mut self, light: PointLight) {
+        if light.radius > 0.0 && light.intensity > 0.0 {
+            self.light_queue.push(light);
+        }
+    }
+
+    /// Selects the portable per-frame point-light budget.
+    pub fn set_quality(&mut self, quality: RenderQuality) {
+        self.quality = quality;
+    }
+
+    pub fn quality(&self) -> RenderQuality {
+        self.quality
+    }
+
     pub fn stats(&self) -> RenderStats {
         self.stats
     }
@@ -467,6 +537,7 @@ impl Renderer {
     }
 
     pub fn render(&mut self, elapsed: f32) -> Result<(), wgpu::SurfaceError> {
+        let frame_started = Instant::now();
         let vp: Mat4 = self.camera.view_projection();
         self.queue.write_buffer(
             &self.camera_buffer,
@@ -498,10 +569,15 @@ impl Renderer {
                 .then_with(|| a.texture.0.cmp(&b.texture.0))
         });
         let queue = std::mem::take(&mut self.draw_queue);
+        let lights = std::mem::take(&mut self.light_queue);
+        let composed_lights = lights.len().min(self.quality.light_budget());
         self.stats = RenderStats {
             queued_sprites: queue.len(),
             drawn_sprites: queue.len(),
             draw_calls: 0,
+            queued_lights: lights.len(),
+            composed_lights,
+            cpu_frame_ms: 0.0,
         };
         self.batch.ensure_capacity(&self.device, queue.len());
 
@@ -557,6 +633,10 @@ impl Renderer {
             elapsed,
             self.config.width,
             self.config.height,
+            &lights[..composed_lights]
+                .iter()
+                .map(|light| self.screen_light(*light))
+                .collect::<Vec<_>>(),
         );
         self.queue
             .write_buffer(&self.post.uniform_buffer, 0, bytemuck::bytes_of(&post_u));
@@ -640,7 +720,20 @@ impl Renderer {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+        self.stats.cpu_frame_ms = frame_started.elapsed().as_secs_f32() * 1_000.0;
         Ok(())
+    }
+
+    fn screen_light(&self, light: PointLight) -> ScreenLight {
+        let screen = self.camera.world_to_screen(light.position);
+        let viewport = self.camera.viewport();
+        let radius_pixels = light.radius * self.camera.zoom;
+        ScreenLight {
+            position_uv: [screen.x / viewport.x, screen.y / viewport.y],
+            radius_uv: radius_pixels / viewport.y,
+            intensity: light.intensity,
+            color: [light.color.r, light.color.g, light.color.b],
+        }
     }
 }
 
@@ -684,4 +777,15 @@ fn push_sprite_mesh(
         });
     }
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RenderQuality;
+
+    #[test]
+    fn quality_presets_use_bounded_light_budgets() {
+        assert!(RenderQuality::Performance.light_budget() < RenderQuality::Balanced.light_budget());
+        assert!(RenderQuality::Balanced.light_budget() < RenderQuality::Cinematic.light_budget());
+    }
 }

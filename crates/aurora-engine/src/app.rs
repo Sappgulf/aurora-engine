@@ -5,7 +5,6 @@ use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::audio::Audio;
@@ -243,12 +242,6 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
 
         match event {
             WindowEvent::CloseRequested => {
-                event_loop.exit();
-            }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state.is_pressed()
-                    && matches!(event.logical_key, Key::Named(NamedKey::Escape)) =>
-            {
                 event_loop.exit();
             }
             WindowEvent::Resized(physical_size) => {

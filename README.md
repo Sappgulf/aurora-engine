@@ -16,13 +16,17 @@ cargo run -p aurora_run
 | Input | Action |
 |--------|--------|
 | **WASD** / arrows | Move |
-| Collect **gold orbs** | Score |
-| Avoid **red hazards** | Lose lives |
+| **Space** | Dash (uses a charge) |
+| Collect **gold crystals** | Score and build combo |
+| Collect **green upgrade crystal** | Restore a life + dash charge |
+| Avoid **red drones** | Lose lives |
+| **Esc** | Pause / resume |
 | **R** | Restart |
 | **P** | Toggle bloom / vignette / chromatic |
 | **Esc** | Quit |
 
-Top-left teal pips = lives · top-right gold dots = score. Clear all orbs to win.
+Top-left teal pips = lives · gold crystals = score · green crystals = upgrades.
+Clear a wave to advance; each wave adds more varied drones.
 
 ## Other demos
 
@@ -45,6 +49,7 @@ cargo run -p triangle_demo   # M0 NDC triangle
 | AABB collision | ✅ |
 | Particles | ✅ |
 | WASM / Trunk scaffold | ✅ |
+| Feature-gated 3D camera conventions | ✅ foundation |
 
 ## Library sketch
 
