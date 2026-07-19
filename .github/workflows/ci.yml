@@ -13,7 +13,24 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - run: cargo test -p last_light simulation::tests::reclaim_truth_trace_replays_through_victory_with_the_same_hash -- --exact
       - run: cargo check --workspace --target wasm32-unknown-unknown
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: ./scripts/build-web.sh
+      - run: npm run test:browser
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: last-light-browser-evidence
+          path: |
+            playtests/screenshots/
+            test-results/
+          if-no-files-found: error

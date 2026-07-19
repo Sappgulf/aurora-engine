@@ -31,8 +31,13 @@ reinforcement, defeat, and victory; the 3600-tick Reclaim trace now completes
 the mission and its bounded report is available through an allow-listed MCP
 scenario id.
 
+`FOUNDRY-005`: Automated Chromium captures cover mission select, tactical
+pause, and production at 1280×720 under DPR 1 and 2 with safe-zone, backing
+store, visible-HUD, and console assertions. CI runs the canonical scenario,
+actual Trunk build, browser lane, and uploads screenshot evidence.
+
 ## Next iteration
 
-`FOUNDRY-005`: Add automated 1280×720 browser capture at DPR 1 and 2,
-assert HUD safe zones from deterministic checkpoints, and run the headless
-scenario plus actual Trunk application build in CI.
+`FOUNDRY-006`: Remove the combat loop's per-tick snapshot/work allocations,
+add deterministic allocation-budget evidence, and preserve the canonical
+Reclaim outcome hash contract.

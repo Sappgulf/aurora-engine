@@ -135,6 +135,18 @@ cargo install trunk
 cd games/last-light && trunk serve
 ```
 
+Automated browser evidence uses the actual Trunk output at 1280×720 under DPR
+1 and 2:
+
+```bash
+npm ci
+npx playwright install chromium
+./scripts/build-web.sh
+npm run test:browser
+```
+
+See [playtests/README.md](playtests/README.md) for checkpoints and assertions.
+
 ## MCP support for coding agents
 
 Aurora includes a local, repository-scoped MCP server for model-assisted engine

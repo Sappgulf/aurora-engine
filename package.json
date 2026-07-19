@@ -1,0 +1,11 @@
+{
+  "name": "aurora-engine-playtests",
+  "private": true,
+  "scripts": {
+    "test:browser": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "pngjs": "7.0.0"
+  }
+}

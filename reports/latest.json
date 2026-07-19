@@ -1,18 +1,18 @@
 {
   "schema_version": 1,
-  "iteration": "FOUNDRY-004",
-  "title": "Deterministic Reclaim combat and victory loop",
+  "iteration": "FOUNDRY-005",
+  "title": "Automated Last Light browser evidence and CI truth lane",
   "status": "passed",
   "date": "2026-07-19",
   "acceptance": {
-    "combat_without_renderer": true,
-    "unit_destruction_without_renderer": true,
-    "boss_phase_without_renderer": true,
-    "defeat_and_victory_without_renderer": true,
-    "bounded_ordered_event_log": true,
-    "two_clean_runs_match": true,
-    "allow_listed_mcp_scenario_report": true,
-    "browser_combat_works": true
+    "browser_1280x720_dpr_1": true,
+    "browser_1280x720_dpr_2": true,
+    "hud_safe_zones": true,
+    "visible_command_card_assertion": true,
+    "browser_console_clean": true,
+    "ci_canonical_scenario": true,
+    "ci_actual_trunk_build": true,
+    "ci_screenshot_artifacts": true
   },
   "evidence": {
     "cargo_fmt_check": "passed",
@@ -25,6 +25,11 @@
     "wasm_workspace_check": "passed",
     "trunk_release_build_last_light": "passed",
     "mcp_stdio_smoke_test": "passed",
+    "npm_audit_high": "0 vulnerabilities",
+    "playwright_projects": 2,
+    "browser_checkpoints_per_project": 3,
+    "browser_screenshots": 6,
+    "browser_png_dimensions": ["1280x720", "2560x1440"],
     "deterministic_scenario": "last_light.reclaim.relay_production",
     "deterministic_ticks_per_run": 3600,
     "deterministic_commands": 8,
@@ -34,15 +39,15 @@
     "mcp_scenario_id": "last_light.reclaim.relay_production",
     "browser_smoke": {
       "status": "passed",
-      "browser": "Safari",
-      "actions": ["load latest build", "deploy", "right-click squad toward contact", "observe combat"],
-      "observed": ["squad moved into contact", "attack and hit effects synchronized", "health bars changed", "HUD intact", "minimap updated"]
+      "browser": "Chromium headless with WebGPU",
+      "actions": ["mission select", "deploy", "tactical pause", "resume", "queue Warden"],
+      "observed": ["DPR-scaled backing stores", "six screenshots", "safe zones separated", "production command card visible", "no console errors"]
     }
   },
   "known_gaps": [
-    "Enemy AI and fog-aware auto-target acquisition remain presentation-orchestrated inputs into MissionSimulation",
-    "Automated 1280x720 DPR 1 and 2 screenshot coverage remains pending",
-    "CI does not yet run the canonical scenario and actual Trunk build together"
+    "GitHub-hosted CI execution remains unobserved until this commit is pushed",
+    "Combat still allocates a snapshot map and work vector each fixed tick",
+    "Mobile and ultrawide layouts remain outside the fixed 1280x720 epic contract"
   ],
-  "next_task": "FOUNDRY-005"
+  "next_task": "FOUNDRY-006"
 }

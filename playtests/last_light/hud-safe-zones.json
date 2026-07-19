@@ -1,0 +1,10 @@
+{
+  "viewport": { "width": 1280, "height": 720 },
+  "protected_playfield": { "x": 280, "y": 210, "width": 460, "height": 300 },
+  "hud_regions": {
+    "objective": { "x": 16, "y": 16, "width": 650, "height": 180 },
+    "pause": { "x": 1170, "y": 16, "width": 94, "height": 88 },
+    "minimap": { "x": 0, "y": 550, "width": 260, "height": 170 },
+    "command_card": { "x": 760, "y": 530, "width": 520, "height": 190 }
+  }
+}

@@ -39,3 +39,11 @@
 - Combat retains the pre-existing per-tick snapshot/work-vector allocation pattern moved from `main.rs`; FOUNDRY-004 introduces no new steady-state allocation class, and optimization can now use deterministic evidence.
 - MCP exposes only `last_light.reclaim.relay_production`, returning checked-in trace/report metadata with a 64-command cap and no path or executable input.
 - Safari showed live movement into combat, synchronized attack/hit effects and health changes, a readable HUD, and an updated minimap on the latest WASM build.
+
+## 2026-07-19 — FOUNDRY-005
+
+- A browser screenshot checkpoint needs both fixed input cadence and content assertions; dimension-only checks initially accepted a DPR-2 frame that remained paused because SwiftShader had not rendered between key events.
+- Mission select, tactical pause, and active production now capture at 1280×720 CSS pixels with 1× and 2× backing stores, producing six CI artifacts per run.
+- HUD geometry is an explicit game-owned contract: objective, pause, minimap, and command-card regions cannot overlap one another or the protected central playfield.
+- PNG pixel inspection verifies that the production command card is actually visible, preventing a pause overlay or blank renderer from satisfying geometry alone.
+- Playwright 1.61.1 and pngjs 7.0.0 install with zero audited vulnerabilities; generated screenshots and test traces remain ignored evidence, not source assets.
