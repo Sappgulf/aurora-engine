@@ -16,7 +16,7 @@ tasks:
     priority: P0
     owner: last_light_simulation
     title: Extract renderer-free MissionSimulation
-    status: pending
+    status: complete
     depends_on: [FOUNDRY-001]
     acceptance:
       - selection and movement run without FrameCtx

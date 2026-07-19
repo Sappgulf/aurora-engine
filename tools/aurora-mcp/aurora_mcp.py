@@ -71,6 +71,10 @@ SOURCE_MAP: dict[str, tuple[str, str]] = {
     "engine_3d": ("crates/aurora-engine/src/mesh3d.rs", "Feature-gated mesh/material contracts."),
     "aurora_run": ("games/aurora-run/src/main.rs", "Playable Aurora Run vertical slice."),
     "last_light": ("games/last-light/src/main.rs", "Playable Last Light RTS campaign mission."),
+    "last_light_simulation": (
+        "games/last-light/src/simulation.rs",
+        "Renderer-free Last Light roster, selection, navigation, movement, and trace state.",
+    ),
     "last_light_campaign": ("docs/AURORA_LAST_LIGHT_CAMPAIGN.md", "Campaign, factions, characters, and mission arc."),
     "last_light_assets": ("docs/AURORA_LAST_LIGHT_ASSET_GUIDE.md", "Production asset and animation contract."),
 }

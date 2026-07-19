@@ -1,33 +1,43 @@
 {
   "schema_version": 1,
-  "iteration": "FOUNDRY-001",
-  "title": "Generic semantic trace and stable state hash",
+  "iteration": "FOUNDRY-002",
+  "title": "Renderer-free Last Light selection and movement simulation",
   "status": "passed",
   "date": "2026-07-19",
   "acceptance": {
-    "semantic_commands_game_owned": true,
+    "live_and_headless_share_simulation": true,
+    "selection_without_renderer": true,
+    "movement_without_renderer": true,
     "two_clean_runs_match": true,
-    "trace_round_trip": true,
-    "contract_lab_consumer": true
+    "browser_controls_unchanged": true
   },
   "evidence": {
     "cargo_fmt_check": "passed",
     "cargo_clippy_all_targets_all_features": "passed",
     "cargo_test_workspace": {
       "status": "passed",
-      "tests": 66
+      "tests": 68
     },
+    "last_light_tests": 19,
     "wasm_workspace_check": "passed",
     "trunk_release_build_last_light": "passed",
     "mcp_stdio_smoke_test": "passed",
+    "deterministic_scenario": "last_light.reclaim.selection_move",
+    "deterministic_ticks_per_run": 180,
     "deterministic_replay_runs": 2,
     "determinism_mismatches": 0,
-    "visual_playtest": "not required; no user-facing rendering or input behavior changed"
+    "browser_smoke": {
+      "status": "passed",
+      "browser": "Safari",
+      "actions": ["reload", "deploy", "right-click move"],
+      "observed": ["three units selected", "squad moved", "HUD intact", "minimap updated"]
+    }
   },
   "known_gaps": [
-    "Last Light does not yet implement DeterministicSimulation",
-    "The canonical Reclaim the Reactor trace and event log remain FOUNDRY-002/003",
-    "Browser screenshot automation remains FOUNDRY-004"
+    "Combat, economy, relay restoration, and objectives remain outside MissionSimulation",
+    "The canonical trace is constructed in test code rather than persisted as an artifact",
+    "A bounded event log remains FOUNDRY-003",
+    "Automated DPR screenshot coverage remains FOUNDRY-004"
   ],
-  "next_task": "FOUNDRY-002"
+  "next_task": "FOUNDRY-003"
 }

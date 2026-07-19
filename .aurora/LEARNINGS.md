@@ -15,3 +15,10 @@
 - Strict all-target Clippy exposed test-only contract code leaking into the normal demo binary; `#[cfg(test)]` preserved the proof without shipping dead code.
 - The local Python environment lacked MCP dependencies. The declared requirements passed from an isolated `/tmp/aurora-mcp-venv`; this was an environment prerequisite, not a protocol defect.
 
+## 2026-07-19 — FOUNDRY-002
+
+- Roster creation, spawn modifiers, selection, movement formation, obstacle routing, and path advancement form a coherent renderer-free seam.
+- Campaign upgrades enter the simulation as `SpawnModifiers`; the simulation does not import save or campaign-screen state.
+- Animation players remain presentation-owned and are rebuilt from simulation unit IDs after mission construction.
+- The live game and canonical trace now use the same `MissionSimulation`; the 180-tick Reclaim selection-and-move trace matched across two clean runs.
+- A clean Safari reload confirmed right-click movement, three-unit survival, HUD integrity, and minimap response after the extraction.

@@ -14,12 +14,15 @@ restoration, production, combat, and victory.
 - CI runs the headless scenario and builds the actual Trunk application.
 - MCP exposes only allow-listed scenario IDs and bounded reports.
 
-## Completed iteration
+## Completed iterations
 
 `FOUNDRY-001`: Foundry bootstrap and generic semantic trace/state-hash
 contract. Evidence is recorded in `reports/latest.json`.
 
+`FOUNDRY-002`: Renderer-free Last Light roster, selection, navigation, and
+movement simulation with matching Reclaim trace hashes.
+
 ## Next iteration
 
-`FOUNDRY-002`: Extract a renderer-free `MissionSimulation` seam from Last Light
-and replay the first selection-and-move trace through it twice.
+`FOUNDRY-003`: Move relay restoration and production into `MissionSimulation`,
+emit a bounded event log, and persist the canonical Reclaim `.aurora-trace`.

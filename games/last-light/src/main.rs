@@ -6,28 +6,27 @@ mod campaign;
 mod mission_state;
 mod missions;
 mod save;
+mod simulation;
 mod units;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use assets::TextureAsset;
 use aurora_engine::{
-    mark_obstacles, run, Aabb, AiParams, AnimationClip, AnimationPlayer, BitmapText, Color,
-    FactionId, FogOfWar, FogState, FrameCtx, Game, MinimapTransform, NavGrid, PlacementError,
-    PlacementRules, PointLight, PowerGrid, PowerNode, PowerNodeId, ProductionQueue, QueueError,
-    Renderer, ResourceBank, RtsWorld, SelectionBox, SimpleAggroAi, Sprite, Texture, TextureAtlas,
-    TextureHandle, UnitId, UnitOrder,
+    run, Aabb, AiParams, AnimationClip, AnimationPlayer, BitmapText, Color, FactionId, FogOfWar,
+    FogState, FrameCtx, Game, MinimapTransform, PlacementError, PlacementRules, PointLight,
+    PowerGrid, PowerNode, PowerNodeId, ProductionQueue, QueueError, Renderer, ResourceBank,
+    SelectionBox, SimpleAggroAi, Sprite, Texture, TextureAtlas, TextureHandle, UnitId, UnitOrder,
 };
 use campaign::*;
 use glam::Vec2;
 use mission_state::{FieldBeacon, Relay, SalvageNode, StructureKind};
 use missions::{DialogueTrigger, MissionDef, VictoryCondition};
 use save::{CampaignStore, SaveData};
+use simulation::{MissionSimulation, SpawnModifiers, MAP_SIZE};
 use units::{UnitKind, CHOIR, PLAYER};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
-const MAP_SIZE: Vec2 = Vec2::new(2600.0, 1460.0);
-const NAV_CELL_SIZE: f32 = 40.0;
 const UNIT_ATLAS_SIZE: Vec2 = Vec2::new(1536.0, 1024.0);
 const STRUCTURE_ATLAS_SIZE: Vec2 = Vec2::splat(1254.0);
 const REACTION_ATLAS_SIZE: Vec2 = Vec2::new(1024.0, 1536.0);
@@ -59,8 +58,7 @@ struct LastLight {
     down_reactions_atlas: TextureAtlas,
     animation_players: HashMap<UnitId, AnimationPlayer>,
     structure_atlas: TextureAtlas,
-    world: RtsWorld,
-    kinds: HashMap<UnitId, UnitKind>,
+    simulation: MissionSimulation,
     attack_flash: HashMap<UnitId, f32>,
     damage_flash: HashMap<UnitId, f32>,
     down_units: HashMap<UnitId, f32>,
@@ -101,13 +99,8 @@ struct LastLight {
     enemy_think: f32,
     mission_time: f32,
     mission: MissionDef,
-    escort_unit: Option<UnitId>,
     enemy_ai: SimpleAggroAi,
-    nav: NavGrid,
     selected_structure: Option<StructureKind>,
-    /// Remaining waypoints for units routed around an obstacle by
-    /// `handle_pointer`'s move command. Advanced in `advance_player_paths`.
-    player_paths: HashMap<UnitId, VecDeque<Vec2>>,
     canticle_reinforced: bool,
     dialogue_cursor: usize,
     radio_message: Option<(&'static str, &'static str, f32)>,
@@ -126,6 +119,20 @@ impl LastLight {
             .map(|(index, _)| index)
             .next_back()
             .unwrap_or(0);
+        let initial_mission = missions::reclaim_the_reactor();
+        let initial_modifiers = SpawnModifiers {
+            player_health: if save_data.campaign.has_upgrade(UPGRADE_PLATING) {
+                1.2
+            } else {
+                1.0
+            },
+            player_speed: if save_data.campaign.specialist_module(MARA, MARA_RESCUE) == MARA_RAPID {
+                1.12
+            } else {
+                1.0
+            },
+        };
+        let simulation = MissionSimulation::from_mission(&initial_mission, initial_modifiers);
 
         Self {
             tex_environment: TextureHandle::default(),
@@ -197,8 +204,7 @@ impl LastLight {
                 2,
                 STRUCTURE_ATLAS_SIZE,
             ),
-            world: RtsWorld::default(),
-            kinds: HashMap::new(),
+            simulation,
             attack_flash: HashMap::new(),
             damage_flash: HashMap::new(),
             down_units: HashMap::new(),
@@ -228,12 +234,9 @@ impl LastLight {
             defeat: false,
             enemy_think: 0.0,
             mission_time: 0.0,
-            mission: missions::reclaim_the_reactor(),
-            escort_unit: None,
+            mission: initial_mission,
             enemy_ai: SimpleAggroAi::new(),
-            nav: NavGrid::new(1, 1, Vec2::ZERO, NAV_CELL_SIZE),
             selected_structure: None,
-            player_paths: HashMap::new(),
             canticle_reinforced: false,
             dialogue_cursor: 0,
             radio_message: None,
@@ -244,10 +247,16 @@ impl LastLight {
     /// spawns `mission`'s roster. Campaign-wide state (`save_data`, loaded
     /// textures/atlases) is left untouched.
     fn start_mission(&mut self, mission: MissionDef) {
+        let modifiers = self.spawn_modifiers();
+        self.simulation = MissionSimulation::from_mission(&mission, modifiers);
         self.mission = mission;
-        self.world = RtsWorld::default();
-        self.kinds.clear();
         self.animation_players.clear();
+        self.animation_players.extend(
+            self.simulation
+                .kinds
+                .keys()
+                .map(|id| (*id, AnimationPlayer::default())),
+        );
         self.attack_flash.clear();
         self.damage_flash.clear();
         self.down_units.clear();
@@ -280,10 +289,8 @@ impl LastLight {
         self.placing_beacon = false;
         self.resource_tick = 0.0;
         self.production = ProductionQueue::new(5);
-        self.escort_unit = None;
         self.enemy_ai = SimpleAggroAi::new();
         self.selected_structure = None;
-        self.player_paths.clear();
         self.canticle_reinforced = false;
         self.dialogue_cursor = 0;
         self.radio_message = None;
@@ -307,15 +314,6 @@ impl LastLight {
         }
         self.power = power;
 
-        let mut nav = NavGrid::new(
-            (MAP_SIZE.x / NAV_CELL_SIZE).ceil() as usize,
-            (MAP_SIZE.y / NAV_CELL_SIZE).ceil() as usize,
-            -MAP_SIZE * 0.5,
-            NAV_CELL_SIZE,
-        );
-        mark_obstacles(&mut nav, &self.mission.obstacles);
-        self.nav = nav;
-
         self.victory_saved = false;
         self.briefing = true;
         self.paused = false;
@@ -325,31 +323,24 @@ impl LastLight {
         self.mission_time = 0.0;
         self.status = Some(("FABRICATOR READY — Q/E/F TO BUILD".to_owned(), 7.0));
 
-        self.populate_mission();
         // A mission opens with its field roster ready to command. This avoids
         // making the very first interaction depend on discovering sprites
         // beneath the tactical HUD or minimap.
-        self.world
-            .select_bounds(Aabb::from_center_size(Vec2::ZERO, MAP_SIZE), PLAYER, false);
+        self.simulation.select_all_player_units();
     }
 
-    fn populate_mission(&mut self) {
-        let player_spawns = self.mission.player_spawns.clone();
-        for spawn in player_spawns {
-            let id = self.spawn(
-                spawn.kind,
-                PLAYER,
-                spawn.position,
-                spawn.health,
-                spawn.speed,
-            );
-            if spawn.escort {
-                self.escort_unit = Some(id);
-            }
-        }
-        let enemy_spawns = self.mission.enemy_spawns.clone();
-        for spawn in enemy_spawns {
-            self.spawn(spawn.kind, CHOIR, spawn.position, spawn.health, spawn.speed);
+    fn spawn_modifiers(&self) -> SpawnModifiers {
+        SpawnModifiers {
+            player_health: if self.save_data.campaign.has_upgrade(UPGRADE_PLATING) {
+                1.2
+            } else {
+                1.0
+            },
+            player_speed: if self.specialist_module(MARA, MARA_RESCUE) == MARA_RAPID {
+                1.12
+            } else {
+                1.0
+            },
         }
     }
 
@@ -361,25 +352,10 @@ impl LastLight {
         health: f32,
         speed: f32,
     ) -> UnitId {
-        let id = self.world.spawn(faction, position);
-        let health = if faction == PLAYER && self.save_data.campaign.has_upgrade(UPGRADE_PLATING) {
-            health * 1.2
-        } else {
-            health
-        };
-        let speed = if faction == PLAYER && self.specialist_module(MARA, MARA_RESCUE) == MARA_RAPID
-        {
-            speed * 1.12
-        } else {
-            speed
-        };
-        if let Some(unit) = self.world.unit_mut(id) {
-            unit.health = health;
-            unit.max_health = health;
-            unit.speed = speed;
-            unit.radius = kind.scale() * 0.27;
-        }
-        self.kinds.insert(id, kind);
+        let modifiers = self.spawn_modifiers();
+        let id = self
+            .simulation
+            .spawn(kind, faction, position, health, speed, modifiers);
         self.animation_players
             .insert(id, AnimationPlayer::default());
         id
@@ -767,7 +743,8 @@ impl LastLight {
     }
 
     fn friendly_count(&self) -> usize {
-        self.world
+        self.simulation
+            .world
             .units()
             .iter()
             .filter(|unit| unit.faction == PLAYER && unit.alive())
@@ -844,12 +821,12 @@ impl LastLight {
             KeyCode::KeyE => self.queue_unit(UnitKind::Engineer),
             KeyCode::KeyF => self.queue_unit(UnitKind::Surveyor),
             KeyCode::KeyH => {
-                self.world.issue_hold();
+                self.simulation.world.issue_hold();
                 self.status = Some(("SQUAD HOLDING POSITION".to_owned(), 2.0));
             }
             KeyCode::KeyT => {
-                self.world.issue_hold();
-                self.player_paths.clear();
+                self.simulation.world.issue_hold();
+                self.simulation.player_paths.clear();
                 self.status = Some(("SQUAD ORDERS STOPPED".to_owned(), 2.0));
             }
             KeyCode::KeyB => {
@@ -870,15 +847,16 @@ impl LastLight {
 
     fn control_group_action(&mut self, slot: usize, assign: bool, ctx: &mut FrameCtx<'_>) {
         if assign {
-            self.world.assign_control_group(slot);
+            self.simulation.world.assign_control_group(slot);
             self.status = Some((format!("CONTROL GROUP {slot} ASSIGNED"), 2.0));
-        } else if self.world.recall_control_group(slot, PLAYER) {
+        } else if self.simulation.world.recall_control_group(slot, PLAYER) {
             let (sum, count) = self
+                .simulation
                 .world
                 .selection()
                 .ids()
                 .iter()
-                .filter_map(|id| self.world.unit(*id))
+                .filter_map(|id| self.simulation.world.unit(*id))
                 .fold((Vec2::ZERO, 0_u32), |(sum, count), unit| {
                     (sum + unit.position, count + 1)
                 });
@@ -1041,6 +1019,7 @@ impl LastLight {
     /// fields (no `FrameCtx` needed), so it can run in tests without a GPU.
     fn evaluate_mission_state(&mut self) {
         let friendlies_alive = self
+            .simulation
             .world
             .units()
             .iter()
@@ -1049,30 +1028,33 @@ impl LastLight {
             self.mission.victory,
             VictoryCondition::EscortToExtraction { .. }
         ) && !self
+            .simulation
             .escort_unit
-            .and_then(|id| self.world.unit(id))
+            .and_then(|id| self.simulation.world.unit(id))
             .is_some_and(|unit| unit.alive());
         self.defeat = !friendlies_alive || escort_failed;
         self.victory = match self.mission.victory {
             VictoryCondition::RestoreRelaysAndDefeatBoss { boss_kind } => {
-                let boss_alive = self.world.units().iter().any(|unit| {
+                let boss_alive = self.simulation.world.units().iter().any(|unit| {
                     unit.faction == CHOIR
                         && unit.alive()
-                        && self.kinds.get(&unit.id) == Some(&boss_kind)
+                        && self.simulation.kinds.get(&unit.id) == Some(&boss_kind)
                 });
                 self.relays.iter().all(|relay| relay.active) && !boss_alive
             }
             VictoryCondition::EscortToExtraction { point, radius } => self
+                .simulation
                 .escort_unit
-                .and_then(|id| self.world.unit(id))
+                .and_then(|id| self.simulation.world.unit(id))
                 .is_some_and(|unit| unit.alive() && unit.position.distance(point) <= radius),
         };
     }
 
     fn selected_engineer_near(&self, position: Vec2) -> bool {
-        self.world.selection().ids().iter().any(|id| {
-            self.kinds.get(id) == Some(&UnitKind::Engineer)
+        self.simulation.world.selection().ids().iter().any(|id| {
+            self.simulation.kinds.get(id) == Some(&UnitKind::Engineer)
                 && self
+                    .simulation
                     .world
                     .unit(*id)
                     .is_some_and(|unit| unit.alive() && unit.position.distance(position) < 110.0)
@@ -1096,7 +1078,8 @@ impl LastLight {
     }
 
     fn closest_enemy_at(&self, point: Vec2) -> Option<UnitId> {
-        self.world
+        self.simulation
+            .world
             .units()
             .iter()
             .filter(|unit| unit.faction == CHOIR && unit.alive())
@@ -1125,7 +1108,7 @@ impl LastLight {
     }
 
     fn friendly_unit_at(&self, point: Vec2) -> bool {
-        self.world.units().iter().any(|unit| {
+        self.simulation.world.units().iter().any(|unit| {
             unit.faction == PLAYER
                 && unit.alive()
                 && unit.position.distance(point) <= unit.radius * 1.35
@@ -1133,9 +1116,7 @@ impl LastLight {
     }
 
     fn issue_move_order(&mut self, destination: Vec2) {
-        let selected_ids = self.world.selection().ids().to_vec();
-        self.world.issue_move(destination, 74.0);
-        self.route_around_obstacles(&selected_ids);
+        self.simulation.issue_move_order(destination);
         self.order_marker = Some((destination, 0.65));
     }
 
@@ -1187,13 +1168,14 @@ impl LastLight {
                         format!("RESTORE RELAY {} — ENGINEER REQUIRED", index + 1),
                     ));
                 }
-                self.world
+                self.simulation
+                    .world
                     .units()
                     .iter()
                     .find(|unit| {
                         unit.faction == CHOIR
                             && unit.alive()
-                            && self.kinds.get(&unit.id) == Some(&boss_kind)
+                            && self.simulation.kinds.get(&unit.id) == Some(&boss_kind)
                     })
                     .map(|unit| (unit.position, format!("ELIMINATE {}", boss_kind.label())))
             }
@@ -1267,7 +1249,7 @@ impl LastLight {
                     if let Some(structure) = self.structure_at(mouse_world) {
                         self.selected_structure = Some(structure);
                     } else if !ctx.input.shift_down()
-                        && !self.world.selection().ids().is_empty()
+                        && !self.simulation.world.selection().ids().is_empty()
                         && !self.friendly_unit_at(mouse_world)
                     {
                         // A selected squad can also use the intuitive
@@ -1279,89 +1261,36 @@ impl LastLight {
                         ctx.audio.collect();
                     } else {
                         self.selected_structure = None;
-                        self.world
-                            .select_point(mouse_world, PLAYER, ctx.input.shift_down());
+                        self.simulation.world.select_point(
+                            mouse_world,
+                            PLAYER,
+                            ctx.input.shift_down(),
+                        );
                     }
                 } else {
                     self.selected_structure = None;
-                    self.world
-                        .select_bounds(drag.bounds(), PLAYER, ctx.input.shift_down());
+                    self.simulation.world.select_bounds(
+                        drag.bounds(),
+                        PLAYER,
+                        ctx.input.shift_down(),
+                    );
                 }
             }
         }
-        if ctx.input.mouse_pressed(MouseButton::Right) && !self.world.selection().ids().is_empty() {
-            let selected_ids = self.world.selection().ids().to_vec();
+        if ctx.input.mouse_pressed(MouseButton::Right)
+            && !self.simulation.world.selection().ids().is_empty()
+        {
+            let selected_ids = self.simulation.world.selection().ids().to_vec();
             if let Some(enemy) = self.closest_enemy_at(mouse_world) {
-                self.world.issue_attack(enemy);
+                self.simulation.world.issue_attack(enemy);
                 for id in &selected_ids {
-                    self.player_paths.remove(id);
+                    self.simulation.player_paths.remove(id);
                 }
             } else {
                 self.issue_move_order(mouse_world);
             }
             self.order_marker = Some((mouse_world, 0.65));
             ctx.audio.collect();
-        }
-    }
-
-    /// After `RtsWorld::issue_move` sets each unit's formation destination,
-    /// replace any destination whose straight line crosses a mission
-    /// obstacle with a route through `self.nav`, queuing the remaining
-    /// waypoints for `advance_player_paths` to walk through. No-op on
-    /// missions with no obstacles (`self.nav` has nothing blocked).
-    fn route_around_obstacles(&mut self, selected_ids: &[UnitId]) {
-        for &id in selected_ids {
-            let Some(unit) = self.world.unit(id) else {
-                continue;
-            };
-            let UnitOrder::Move(destination) = unit.order else {
-                continue;
-            };
-            if self.nav.segment_blocked(unit.position, destination) {
-                let mut path: VecDeque<Vec2> =
-                    self.nav.find_path(unit.position, destination).into();
-                if let Some(first) = path.pop_front() {
-                    if let Some(unit) = self.world.unit_mut(id) {
-                        unit.order = UnitOrder::Move(first);
-                    }
-                    self.player_paths.insert(id, path);
-                    continue;
-                }
-            }
-            self.player_paths.remove(&id);
-        }
-    }
-
-    /// Advances any unit whose queued route (see `route_around_obstacles`)
-    /// has more waypoints once it arrives (`RtsWorld::update` sets a
-    /// completed `Move` order to `Idle`).
-    fn advance_player_paths(&mut self) {
-        if self.player_paths.is_empty() {
-            return;
-        }
-        let ids: Vec<UnitId> = self.player_paths.keys().copied().collect();
-        for id in ids {
-            let Some(unit) = self.world.unit(id) else {
-                self.player_paths.remove(&id);
-                continue;
-            };
-            if !matches!(unit.order, UnitOrder::Idle) {
-                continue;
-            }
-            let done = match self.player_paths.get_mut(&id) {
-                Some(queue) => {
-                    if let Some(next) = queue.pop_front() {
-                        if let Some(unit) = self.world.unit_mut(id) {
-                            unit.order = UnitOrder::Move(next);
-                        }
-                    }
-                    queue.is_empty()
-                }
-                None => true,
-            };
-            if done {
-                self.player_paths.remove(&id);
-            }
         }
     }
 
@@ -1409,12 +1338,12 @@ impl LastLight {
             return;
         }
         self.enemy_ai.think(
-            &mut self.world,
+            &mut self.simulation.world,
             CHOIR,
             PLAYER,
             self.mission_time,
             &AiParams::default(),
-            Some(&self.nav),
+            Some(&self.simulation.nav),
         );
     }
 
@@ -1423,6 +1352,7 @@ impl LastLight {
     /// still disengage or focus-fire without the automation fighting them.
     fn update_auto_targeting(&mut self) {
         let enemies: Vec<(UnitId, Vec2)> = self
+            .simulation
             .world
             .units()
             .iter()
@@ -1431,6 +1361,7 @@ impl LastLight {
             .map(|unit| (unit.id, unit.position))
             .collect();
         let orders: Vec<(UnitId, UnitId)> = self
+            .simulation
             .world
             .units()
             .iter()
@@ -1439,12 +1370,12 @@ impl LastLight {
                     && unit.alive()
                     && matches!(unit.order, UnitOrder::Idle | UnitOrder::Hold)
                     && matches!(
-                        self.kinds.get(&unit.id),
+                        self.simulation.kinds.get(&unit.id),
                         Some(UnitKind::Warden | UnitKind::Surveyor)
                     )
             })
             .filter_map(|unit| {
-                let range = self.kinds.get(&unit.id)?.combat().range * 1.15;
+                let range = self.simulation.kinds.get(&unit.id)?.combat().range * 1.15;
                 enemies
                     .iter()
                     .filter_map(|(id, position)| {
@@ -1456,7 +1387,7 @@ impl LastLight {
             })
             .collect();
         for (unit, target) in orders {
-            if let Some(unit) = self.world.unit_mut(unit) {
+            if let Some(unit) = self.simulation.world.unit_mut(unit) {
                 unit.order = UnitOrder::Attack(target);
             }
         }
@@ -1464,13 +1395,14 @@ impl LastLight {
 
     fn update_harvesting(&mut self, dt: f32) -> u32 {
         let surveyors: Vec<Vec2> = self
+            .simulation
             .world
             .units()
             .iter()
             .filter(|unit| {
                 unit.faction == PLAYER
                     && unit.alive()
-                    && self.kinds.get(&unit.id) == Some(&UnitKind::Surveyor)
+                    && self.simulation.kinds.get(&unit.id) == Some(&UnitKind::Surveyor)
             })
             .map(|unit| unit.position)
             .collect();
@@ -1520,16 +1452,21 @@ impl LastLight {
     }
 
     fn unit_engaged(&self, id: UnitId) -> bool {
-        let Some(unit) = self.world.unit(id) else {
+        let Some(unit) = self.simulation.world.unit(id) else {
             return false;
         };
         let UnitOrder::Attack(target) = unit.order else {
             return false;
         };
-        let Some(range) = self.kinds.get(&id).map(|kind| kind.combat().range) else {
+        let Some(range) = self
+            .simulation
+            .kinds
+            .get(&id)
+            .map(|kind| kind.combat().range)
+        else {
             return false;
         };
-        self.world.unit(target).is_some_and(|target| {
+        self.simulation.world.unit(target).is_some_and(|target| {
             target.alive() && unit.position.distance(target.position) <= range
         })
     }
@@ -1544,6 +1481,7 @@ impl LastLight {
         let mut sustain_sources = vec![self.fabricator_position];
         sustain_sources.extend(self.field_beacons.iter().map(|beacon| beacon.position));
         for unit in self
+            .simulation
             .world
             .units_mut()
             .iter_mut()
@@ -1579,10 +1517,10 @@ impl LastLight {
         if self.canticle_reinforced {
             return false;
         }
-        let low_health_canticle = self.world.units().iter().find_map(|unit| {
+        let low_health_canticle = self.simulation.world.units().iter().find_map(|unit| {
             let is_canticle = unit.faction == CHOIR
                 && unit.alive()
-                && self.kinds.get(&unit.id) == Some(&UnitKind::Canticle);
+                && self.simulation.kinds.get(&unit.id) == Some(&UnitKind::Canticle);
             let low_health = unit.health / unit.max_health.max(1.0) <= 0.5;
             (is_canticle && low_health).then_some(unit.position)
         });
@@ -1599,20 +1537,26 @@ impl LastLight {
 
     fn update_combat(&mut self, dt: f32) {
         let snapshot: HashMap<UnitId, (Vec2, bool)> = self
+            .simulation
             .world
             .units()
             .iter()
             .map(|unit| (unit.id, (unit.position, unit.alive())))
             .collect();
         let mut damage = Vec::new();
-        for unit in self.world.units() {
+        for unit in self.simulation.world.units() {
             let UnitOrder::Attack(target) = unit.order else {
                 continue;
             };
             let Some((target_position, true)) = snapshot.get(&target).copied() else {
                 continue;
             };
-            let Some(profile) = self.kinds.get(&unit.id).map(|kind| kind.combat()) else {
+            let Some(profile) = self
+                .simulation
+                .kinds
+                .get(&unit.id)
+                .map(|kind| kind.combat())
+            else {
                 continue;
             };
             if unit.position.distance(target_position) < profile.range {
@@ -1633,6 +1577,7 @@ impl LastLight {
         }
         if self.verdant_covenant() == Some(VERDANT_BRIAR) {
             for unit in self
+                .simulation
                 .world
                 .units()
                 .iter()
@@ -1649,7 +1594,7 @@ impl LastLight {
         }
         let bastion_accord = self.meridian_accord() == Some(MERIDIAN_BASTION);
         for (target, amount) in damage {
-            if let Some(unit) = self.world.unit_mut(target) {
+            if let Some(unit) = self.simulation.world.unit_mut(target) {
                 let was_alive = unit.alive();
                 let amount = if unit.faction == PLAYER && bastion_accord {
                     amount * 0.82
@@ -1680,12 +1625,13 @@ impl LastLight {
     fn update_fog(&mut self) {
         self.fog.begin_frame();
         for unit in self
+            .simulation
             .world
             .units()
             .iter()
             .filter(|unit| unit.faction == PLAYER && unit.alive())
         {
-            let radius = if self.kinds.get(&unit.id) == Some(&UnitKind::Surveyor) {
+            let radius = if self.simulation.kinds.get(&unit.id) == Some(&UnitKind::Surveyor) {
                 let base = if self.specialist_module(SENA, SENA_DEEP_SCAN) == SENA_DEEP_SCAN {
                     540.0
                 } else {
@@ -1850,7 +1796,7 @@ impl LastLight {
     /// Draws the mission's static obstacles (corridor walls in Mission 3)
     /// as solid panels with a bright edge outline — procedural, matching
     /// the metal/cyan palette already used for structures, no new assets.
-    /// These are the same `Aabb`s that block `self.nav`, so what's drawn
+    /// These are the same `Aabb`s that block `self.simulation.nav`, so what's drawn
     /// here always matches what the Choir AI (and now the player, via
     /// `route_around_obstacles`) actually treats as solid.
     fn draw_mission_obstacles(&self, renderer: &mut Renderer) {
@@ -2035,10 +1981,9 @@ impl Game for LastLight {
         }
         self.update_enemy_ai(dt);
         self.update_auto_targeting();
-        self.world.update(dt);
-        self.advance_player_paths();
-        for unit in self.world.units() {
-            let kind = self.kinds.get(&unit.id).copied();
+        self.simulation.fixed_step_with_dt(dt);
+        for unit in self.simulation.world.units() {
+            let kind = self.simulation.kinds.get(&unit.id).copied();
             let engaged = unit.alive() && self.unit_engaged(unit.id);
             let Some(player) = self.animation_players.get_mut(&unit.id) else {
                 continue;
@@ -2333,7 +2278,7 @@ impl Game for LastLight {
             );
         }
 
-        for unit in self.world.units() {
+        for unit in self.simulation.world.units() {
             if unit.faction == CHOIR {
                 let fog_state = self.fog.state_at(unit.position);
                 if (unit.alive() && fog_state != FogState::Visible)
@@ -2342,7 +2287,7 @@ impl Game for LastLight {
                     continue;
                 }
             }
-            let kind = self.kinds[&unit.id];
+            let kind = self.simulation.kinds[&unit.id];
             let frame = self
                 .animation_players
                 .get(&unit.id)
@@ -2359,7 +2304,7 @@ impl Game for LastLight {
                 ctx.renderer.draw_sprite(self.tex_down_reactions, wreck);
                 continue;
             }
-            let selected = self.world.selection().contains(unit.id);
+            let selected = self.simulation.world.selection().contains(unit.id);
             if selected {
                 self.draw_selection_brackets(ctx.renderer, unit.position, unit.radius * 1.35);
             }
@@ -2428,7 +2373,7 @@ impl Game for LastLight {
 
             if self.attack_flash.contains_key(&unit.id) {
                 if let UnitOrder::Attack(target_id) = unit.order {
-                    if let Some(target) = self.world.unit(target_id) {
+                    if let Some(target) = self.simulation.world.unit(target_id) {
                         let delta = target.position - unit.position;
                         let beam_color = if unit.faction == PLAYER {
                             Color::rgba(0.18, 1.7, 1.35, 0.92)
@@ -2586,7 +2531,13 @@ impl Game for LastLight {
                     .with_z(8.25),
                 );
             }
-            for unit in self.world.units().iter().filter(|unit| unit.alive()) {
+            for unit in self
+                .simulation
+                .world
+                .units()
+                .iter()
+                .filter(|unit| unit.alive())
+            {
                 if unit.faction == CHOIR && self.fog.state_at(unit.position) != FogState::Visible {
                     continue;
                 }
@@ -2642,7 +2593,7 @@ impl Game for LastLight {
                 .screen_to_world(ctx.input.mouse_position);
             for slot in 1..=5 {
                 let rect = Self::control_group_chip_rect(minimap.panel, slot, hud_scale);
-                let count = self.world.control_group(slot).len();
+                let count = self.simulation.world.control_group(slot).len();
                 let hovered = rect.contains_point(mouse_world);
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
@@ -2715,8 +2666,9 @@ impl Game for LastLight {
             ),
             VictoryCondition::EscortToExtraction { point, .. } => {
                 let escort_status = self
+                    .simulation
                     .escort_unit
-                    .and_then(|id| self.world.unit(id))
+                    .and_then(|id| self.simulation.world.unit(id))
                     .map(|unit| {
                         if unit.alive() {
                             format!("{:.0}M TO EXTRACTION", unit.position.distance(point))
@@ -2736,7 +2688,7 @@ impl Game for LastLight {
             Color::rgb(0.73, 1.15, 1.08),
             8.0,
         );
-        let control_hint = if self.world.selection().ids().is_empty() {
+        let control_hint = if self.simulation.world.selection().ids().is_empty() {
             "DRAG SELECT  •  CLICK A SQUAD, THEN TERRAIN TO MOVE  •  R OBJECTIVE"
         } else {
             "CLICK TERRAIN MOVE  •  RIGHT CLICK ATTACK  •  H HOLD  •  R OBJECTIVE"
@@ -2764,11 +2716,14 @@ impl Game for LastLight {
             Color::rgb(0.96, 0.72, 0.28),
             8.0,
         );
-        if let Some(selected) = self.world.selection().ids().first() {
-            let count = self.world.selection().ids().len();
+        if let Some(selected) = self.simulation.world.selection().ids().first() {
+            let count = self.simulation.world.selection().ids().len();
             self.draw_text(
                 ctx.renderer,
-                &format!("{}  //  SQUAD {count}", self.kinds[selected].label()),
+                &format!(
+                    "{}  //  SQUAD {count}",
+                    self.simulation.kinds[selected].label()
+                ),
                 top_left + Vec2::new(0.0, -75.0) * hud_scale,
                 2.7 * hud_scale,
                 Color::rgb(0.96, 0.72, 0.28),
@@ -3112,9 +3067,10 @@ mod tests {
         assert_eq!(game.salvage_nodes.len(), 3);
         assert!(game.reactor_position.is_some());
         assert_eq!(game.friendly_count(), 3);
-        assert_eq!(game.world.selection().ids().len(), 3);
+        assert_eq!(game.simulation.world.selection().ids().len(), 3);
         assert_eq!(
-            game.world
+            game.simulation
+                .world
                 .units()
                 .iter()
                 .filter(|unit| unit.faction == CHOIR)
@@ -3128,26 +3084,29 @@ mod tests {
         let mut game = LastLight::new();
         game.start_mission(missions::reclaim_the_reactor());
         let warden = game
+            .simulation
             .kinds
             .iter()
             .find(|(_, kind)| **kind == UnitKind::Warden)
             .map(|(id, _)| *id)
             .unwrap();
         let enemy = game
+            .simulation
             .world
             .units()
             .iter()
             .find(|unit| unit.faction == CHOIR)
             .map(|unit| unit.id)
             .unwrap();
-        let warden_position = game.world.unit(warden).unwrap().position;
-        game.world.unit_mut(enemy).unwrap().position = warden_position + Vec2::new(100.0, 0.0);
+        let warden_position = game.simulation.world.unit(warden).unwrap().position;
+        game.simulation.world.unit_mut(enemy).unwrap().position =
+            warden_position + Vec2::new(100.0, 0.0);
         game.update_fog();
 
         game.update_auto_targeting();
 
         assert_eq!(
-            game.world.unit(warden).unwrap().order,
+            game.simulation.world.unit(warden).unwrap().order,
             UnitOrder::Attack(enemy)
         );
     }
@@ -3157,13 +3116,14 @@ mod tests {
         let mut game = LastLight::new();
         game.start_mission(missions::reclaim_the_reactor());
         let surveyor = game
+            .simulation
             .kinds
             .iter()
             .find(|(_, kind)| **kind == UnitKind::Surveyor)
             .map(|(id, _)| *id)
             .unwrap();
         let node_position = game.salvage_nodes[0].position;
-        game.world.unit_mut(surveyor).unwrap().position = node_position;
+        game.simulation.world.unit_mut(surveyor).unwrap().position = node_position;
         let salvage_before = game.resources.amount();
 
         assert_eq!(game.update_harvesting(1.0), 18);
@@ -3198,10 +3158,11 @@ mod tests {
             relay.active = true;
         }
         let canticle = reclaim
+            .simulation
             .world
             .units()
             .iter()
-            .find(|unit| reclaim.kinds.get(&unit.id) == Some(&UnitKind::Canticle))
+            .find(|unit| reclaim.simulation.kinds.get(&unit.id) == Some(&UnitKind::Canticle))
             .expect("reclaim mission includes the Canticle");
         assert_eq!(
             reclaim.next_objective().map(|(position, _)| position),
@@ -3221,14 +3182,17 @@ mod tests {
         let mut game = LastLight::new();
         game.start_mission(missions::reclaim_the_reactor());
         let engineer = game
+            .simulation
             .kinds
             .iter()
             .find(|(_, kind)| **kind == UnitKind::Engineer)
             .map(|(id, _)| *id)
             .expect("mission includes an engineer");
         let relay_position = game.relays[0].position;
-        game.world.unit_mut(engineer).unwrap().position = relay_position;
-        game.world.select_point(relay_position, PLAYER, false);
+        game.simulation.world.unit_mut(engineer).unwrap().position = relay_position;
+        game.simulation
+            .world
+            .select_point(relay_position, PLAYER, false);
 
         assert_eq!(
             game.engineer_relay_status().as_deref(),
@@ -3240,15 +3204,18 @@ mod tests {
     fn selected_squad_accepts_a_terrain_move_order() {
         let mut game = LastLight::new();
         game.start_mission(missions::reclaim_the_reactor());
-        let selected = game.world.units()[0].id;
+        let selected = game.simulation.world.units()[0].id;
         let destination = Vec2::new(-560.0, -120.0);
-        game.world
-            .select_point(game.world.unit(selected).unwrap().position, PLAYER, false);
+        game.simulation.world.select_point(
+            game.simulation.world.unit(selected).unwrap().position,
+            PLAYER,
+            false,
+        );
 
         game.issue_move_order(destination);
 
         assert!(matches!(
-            game.world.unit(selected).unwrap().order,
+            game.simulation.world.unit(selected).unwrap().order,
             UnitOrder::Move(target) if target.distance(destination) < 1.0
         ));
         assert_eq!(game.order_marker.map(|(point, _)| point), Some(destination));
@@ -3268,13 +3235,14 @@ mod tests {
         assert!(!game.victory, "boss is still alive");
 
         let canticle_ids: Vec<_> = game
+            .simulation
             .kinds
             .iter()
             .filter(|(_, kind)| **kind == UnitKind::Canticle)
             .map(|(id, _)| *id)
             .collect();
         for id in canticle_ids {
-            if let Some(unit) = game.world.unit_mut(id) {
+            if let Some(unit) = game.simulation.world.unit_mut(id) {
                 unit.health = 0.0;
             }
         }
@@ -3286,7 +3254,10 @@ mod tests {
     fn voice_in_conduit_twelve_tracks_escort_survival_and_extraction() {
         let mut game = LastLight::new();
         game.start_mission(missions::voice_in_conduit_twelve());
-        let escort = game.escort_unit.expect("mission defines an escort spawn");
+        let escort = game
+            .simulation
+            .escort_unit
+            .expect("mission defines an escort spawn");
         game.evaluate_mission_state();
         assert!(!game.victory);
         assert!(!game.defeat);
@@ -3294,11 +3265,11 @@ mod tests {
         let VictoryCondition::EscortToExtraction { point, .. } = game.mission.victory else {
             panic!("expected an escort victory condition");
         };
-        game.world.unit_mut(escort).unwrap().position = point;
+        game.simulation.world.unit_mut(escort).unwrap().position = point;
         game.evaluate_mission_state();
         assert!(game.victory);
 
-        game.world.unit_mut(escort).unwrap().health = 0.0;
+        game.simulation.world.unit_mut(escort).unwrap().health = 0.0;
         game.evaluate_mission_state();
         assert!(game.defeat);
     }
@@ -3308,7 +3279,7 @@ mod tests {
         let mut game = LastLight::new();
         game.start_mission(missions::voice_in_conduit_twelve());
         // The mission's obstacles should mark at least one nav cell blocked.
-        let blocked = game.nav.is_blocked_at(Vec2::new(-500.0, 480.0));
+        let blocked = game.simulation.nav.is_blocked_at(Vec2::new(-500.0, 480.0));
         assert!(blocked, "corridor wall should block its own center cell");
     }
 
@@ -3317,12 +3288,14 @@ mod tests {
         let mut game = LastLight::new();
         game.start_mission(missions::reclaim_the_reactor());
         let canticle_id = game
+            .simulation
             .kinds
             .iter()
             .find(|(_, kind)| **kind == UnitKind::Canticle)
             .map(|(id, _)| *id)
             .expect("mission spawns a Canticle");
         let choir_before = game
+            .simulation
             .world
             .units()
             .iter()
@@ -3332,7 +3305,8 @@ mod tests {
         // Still above half health: no trigger yet.
         assert!(!game.update_boss_phase());
         assert_eq!(
-            game.world
+            game.simulation
+                .world
                 .units()
                 .iter()
                 .filter(|unit| unit.faction == CHOIR)
@@ -3340,11 +3314,12 @@ mod tests {
             choir_before
         );
 
-        let canticle = game.world.unit_mut(canticle_id).unwrap();
+        let canticle = game.simulation.world.unit_mut(canticle_id).unwrap();
         canticle.health = canticle.max_health * 0.5;
         assert!(game.update_boss_phase());
         assert_eq!(
-            game.world
+            game.simulation
+                .world
                 .units()
                 .iter()
                 .filter(|unit| unit.faction == CHOIR)
@@ -3360,37 +3335,38 @@ mod tests {
     fn player_move_routes_around_conduit_obstacles() {
         let mut game = LastLight::new();
         game.start_mission(missions::voice_in_conduit_twelve());
-        let unit_id = game.world.units()[0].id;
-        let start = game.world.units()[0].position;
-        game.world.select_point(start, PLAYER, false);
-        assert!(game.world.selection().contains(unit_id));
+        let unit_id = game.simulation.world.units()[0].id;
+        let start = game.simulation.world.units()[0].position;
+        game.simulation.world.select_point(start, PLAYER, false);
+        assert!(game.simulation.world.selection().contains(unit_id));
 
         let destination = Vec2::new(start.x, -200.0);
         assert!(
-            game.nav.segment_blocked(start, destination),
+            game.simulation.nav.segment_blocked(start, destination),
             "test destination should cross a corridor wall"
         );
 
-        game.world.issue_move(destination, 74.0);
-        game.route_around_obstacles(&[unit_id]);
+        game.simulation.world.issue_move(destination, 74.0);
+        game.simulation.route_around_obstacles(&[unit_id]);
 
-        let UnitOrder::Move(first_waypoint) = game.world.unit(unit_id).unwrap().order else {
+        let UnitOrder::Move(first_waypoint) = game.simulation.world.unit(unit_id).unwrap().order
+        else {
             panic!("expected a Move order toward the first routed waypoint");
         };
         assert_ne!(
             first_waypoint, destination,
             "a blocked destination should route via an intermediate waypoint, not go straight there"
         );
-        assert!(game.player_paths.contains_key(&unit_id));
+        assert!(game.simulation.player_paths.contains_key(&unit_id));
 
         // Simulate arrival at the first waypoint and confirm the route continues.
         {
-            let unit = game.world.unit_mut(unit_id).unwrap();
+            let unit = game.simulation.world.unit_mut(unit_id).unwrap();
             unit.position = first_waypoint;
             unit.order = UnitOrder::Idle;
         }
-        game.advance_player_paths();
-        let order_after = game.world.unit(unit_id).unwrap().order;
+        game.simulation.advance_player_paths();
+        let order_after = game.simulation.world.unit(unit_id).unwrap().order;
         assert!(
             matches!(order_after, UnitOrder::Move(_)),
             "should advance to the next queued waypoint after arriving at the first"
