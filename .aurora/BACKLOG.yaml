@@ -1,0 +1,51 @@
+version: 1
+north_star: deterministic campaign strategy on native and browser
+epic: reclaim_the_reactor_truth_machine
+tasks:
+  - id: FOUNDRY-001
+    priority: P0
+    owner: engine
+    title: Generic semantic trace and stable state hash
+    status: complete
+    acceptance:
+      - semantic commands remain game-defined
+      - identical clean runs produce identical hashes
+      - trace encoding round-trips
+      - contract-lab proves the public API
+  - id: FOUNDRY-002
+    priority: P0
+    owner: last_light_simulation
+    title: Extract renderer-free MissionSimulation
+    status: pending
+    depends_on: [FOUNDRY-001]
+    acceptance:
+      - selection and movement run without FrameCtx
+      - canonical trace matches twice
+      - existing browser controls remain unchanged
+  - id: FOUNDRY-003
+    priority: P0
+    owner: devtools_playtest
+    title: Headless Reclaim scenario and event log
+    status: pending
+    depends_on: [FOUNDRY-002]
+  - id: FOUNDRY-004
+    priority: P0
+    owner: browser_platform
+    title: Trunk browser scenario and screenshot harness
+    status: pending
+    depends_on: [FOUNDRY-003]
+  - id: ENGINE-RENDER-001
+    priority: P0
+    owner: engine
+    title: Reusable renderer frame scratch storage
+    status: pending
+  - id: ENGINE-UI-001
+    priority: P0
+    owner: engine
+    title: Generic font-atlas UI and game-owned screens
+    status: pending
+  - id: ENGINE-RTS-001
+    priority: P0
+    owner: engine
+    title: Generation-safe RTS storage and queued orders
+    status: pending

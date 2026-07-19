@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "iteration": "FOUNDRY-001",
+  "title": "Generic semantic trace and stable state hash",
+  "status": "passed",
+  "date": "2026-07-19",
+  "acceptance": {
+    "semantic_commands_game_owned": true,
+    "two_clean_runs_match": true,
+    "trace_round_trip": true,
+    "contract_lab_consumer": true
+  },
+  "evidence": {
+    "cargo_fmt_check": "passed",
+    "cargo_clippy_all_targets_all_features": "passed",
+    "cargo_test_workspace": {
+      "status": "passed",
+      "tests": 66
+    },
+    "wasm_workspace_check": "passed",
+    "trunk_release_build_last_light": "passed",
+    "mcp_stdio_smoke_test": "passed",
+    "deterministic_replay_runs": 2,
+    "determinism_mismatches": 0,
+    "visual_playtest": "not required; no user-facing rendering or input behavior changed"
+  },
+  "known_gaps": [
+    "Last Light does not yet implement DeterministicSimulation",
+    "The canonical Reclaim the Reactor trace and event log remain FOUNDRY-002/003",
+    "Browser screenshot automation remains FOUNDRY-004"
+  ],
+  "next_task": "FOUNDRY-002"
+}

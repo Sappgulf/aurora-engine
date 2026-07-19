@@ -64,6 +64,10 @@ SOURCE_MAP: dict[str, tuple[str, str]] = {
     "engine_save": ("crates/aurora-engine/src/save.rs", "Typed portable storage and versioned save envelopes."),
     "engine_diagnostics": ("crates/aurora-engine/src/diagnostics.rs", "Frame timing and render diagnostics."),
     "engine_rts": ("crates/aurora-engine/src/rts.rs", "RTS orders, economy, production, power, navigation, and fog."),
+    "engine_trace": (
+        "crates/aurora-engine/src/trace.rs",
+        "Deterministic semantic traces, state hashes, and bounded headless replay.",
+    ),
     "engine_3d": ("crates/aurora-engine/src/mesh3d.rs", "Feature-gated mesh/material contracts."),
     "aurora_run": ("games/aurora-run/src/main.rs", "Playable Aurora Run vertical slice."),
     "last_light": ("games/last-light/src/main.rs", "Playable Last Light RTS campaign mission."),

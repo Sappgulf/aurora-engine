@@ -1,0 +1,22 @@
+version = 1
+
+[[scenario]]
+id = "last_light.reclaim.selection_move"
+mission = "reclaim-the-reactor"
+seed = 44117
+fixed_tick_hz = 60
+targets = ["headless", "native", "browser_dpr1", "browser_dpr2"]
+required = ["state_hash", "event_log", "movement", "screenshot"]
+
+[[scenario]]
+id = "last_light.reclaim.relay_production_victory"
+mission = "reclaim-the-reactor"
+seed = 44117
+fixed_tick_hz = 60
+targets = ["headless", "native", "browser_dpr1"]
+required = ["state_hash", "relay_active", "production_once", "victory", "screenshot"]
+
+[viewports]
+desktop = "1280x720"
+compact = "900x600"
+

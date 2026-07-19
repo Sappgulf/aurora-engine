@@ -29,6 +29,7 @@ pub mod sprite;
 pub mod texture;
 pub mod tilemap;
 pub mod time;
+pub mod trace;
 pub mod ui;
 
 pub use ai::{mark_obstacles, AiParams, SimpleAggroAi};
@@ -67,6 +68,10 @@ pub use sprite::{QueuedSprite, Sprite, SpriteBatch};
 pub use texture::Texture;
 pub use tilemap::{TileLayer, TileMap, TileTrigger};
 pub use time::Time;
+pub use trace::{
+    hash_serializable, run_trace, AuroraTrace, DeterministicSimulation, SemanticCommand,
+    StableStateHasher, StateHash, TraceError, TraceRunReport, TRACE_FORMAT_VERSION,
+};
 pub use ui::{BitmapText, GameFlow, GlyphCell, MenuCommand, MenuInput, MenuScreen, MenuState};
 
 /// Engine version string.

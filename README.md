@@ -80,6 +80,7 @@ cargo run -p skirmish        # free-play two-base RTS skirmish vs. the engine's 
 | Camera2D pan/zoom | ✅ |
 | Input (keys/mouse/scroll) | ✅ |
 | Fixed timestep | ✅ |
+| Semantic command traces + stable state hashing | ✅ foundation |
 | Post-FX (bloom, vignette, chromatic) | ✅ |
 | Texture atlases + `Animation` | ✅ |
 | Audio beeps (rodio / Web Audio) | ✅ |

@@ -1,0 +1,18 @@
+[simulation]
+early_active_units_60_fps = 300
+campaign_active_units_60_fps = 1000
+early_p95_ms = 4.0
+campaign_p95_ms = 6.0
+determinism_mismatches = 0
+
+[render]
+early_cpu_p95_ms = 4.0
+campaign_cpu_p95_ms = 6.0
+steady_state_frame_allocations = 0
+
+[web]
+initial_shell_compressed_mb = 12
+campaign_shell_compressed_mb = 15
+mission_pack_early_mb = 20
+mission_pack_campaign_mb = 30
+
