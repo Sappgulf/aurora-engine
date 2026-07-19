@@ -48,16 +48,19 @@
 
 ---
 
-## Milestone 2 — “Beautiful graphics” pass
+## Milestone 2 — Polish + vertical slice ✅
 
-- [ ] HDR-ish color path + tonemapping
-- [ ] Bloom / vignette / film grain post stack
-- [ ] 2D lights (point + ambient) or SDF soft shadows
-- [ ] Particle system (GPU or CPU)
-- [ ] Text rendering (egui debug UI + game fonts)
-- [ ] Screenshot / frame capture for CI
+- [x] Full-screen post stack (bloom threshold blur, vignette, chromatic)
+- [x] Texture atlases + `Animation` frame playback
+- [x] Audio beeps (rodio native, Web Audio wasm)
+- [x] AABB collision
+- [x] CPU particles (from M1)
+- [x] Mini-game **Aurora Run** (`examples/aurora_run`)
+- [ ] HDR / film grain / 2D lights (later)
+- [ ] Text rendering / egui HUD (later)
 
-**Exit criteria:** Demo looks intentionally directed (palette, glow, motion).
+**Exit criteria:** Playable collect/dodge game with post-FX + SFX. ✅  
+**Test:** `cargo run -p aurora_run`
 
 ---
 

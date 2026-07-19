@@ -7,6 +7,7 @@ use winit::window::Window;
 
 use crate::camera::Camera2D;
 use crate::color::Color;
+use crate::post::{PostFxSettings, PostPipeline, PostUniforms};
 use crate::sprite::{camera_uniform, CameraUniform, QueuedSprite, Sprite, SpriteBatch, SpriteVertex};
 use crate::texture::Texture;
 
@@ -47,6 +48,10 @@ pub struct Renderer {
     tri_uniform: wgpu::Buffer,
     tri_bind_group: wgpu::BindGroup,
     show_debug_triangle: bool,
+
+    post: PostPipeline,
+    /// Full-screen post effects (bloom, vignette, chromatic).
+    pub post_fx: PostFxSettings,
 
     pub camera: Camera2D,
     #[allow(dead_code)]
@@ -190,6 +195,9 @@ impl Renderer {
             push_constant_ranges: &[],
         });
 
+        // Scene is always RGBA8 sRGB offscreen; post maps to the surface format.
+        let scene_format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
         let sprite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Sprite Pipeline"),
             layout: Some(&sprite_layout),
@@ -203,7 +211,7 @@ impl Renderer {
                 module: &sprite_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
+                    format: scene_format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -292,7 +300,7 @@ impl Renderer {
                 module: &tri_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
+                    format: scene_format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -333,15 +341,14 @@ impl Renderer {
         queue.write_buffer(&tri_vbo, 0, bytemuck::cast_slice(&tri_verts));
 
         let batch = SpriteBatch::new(&device, SpriteBatch::DEFAULT_CAPACITY);
-        let mut camera = Camera2D::new(width as f32, height as f32);
+        let camera = Camera2D::new(width as f32, height as f32);
+        let post = PostPipeline::new(&device, width, height, surface_format);
 
         log::info!(
             "Aurora renderer ready — adapter: {:?}, format: {:?}",
             adapter.get_info().name,
             surface_format
         );
-
-        let _ = &mut camera; // used below
 
         Self {
             surface,
@@ -363,6 +370,8 @@ impl Renderer {
             tri_uniform,
             tri_bind_group,
             show_debug_triangle: false,
+            post,
+            post_fx: PostFxSettings::default(),
             camera,
             window,
         }
@@ -424,6 +433,8 @@ impl Renderer {
             self.surface.configure(&self.device, &self.config);
             self.camera
                 .set_viewport(new_size.width as f32, new_size.height as f32);
+            self.post
+                .resize(&self.device, new_size.width, new_size.height);
         }
     }
 
@@ -512,8 +523,17 @@ impl Renderer {
             );
         }
 
+        let post_u = PostUniforms::from_settings(
+            &self.post_fx,
+            elapsed,
+            self.config.width,
+            self.config.height,
+        );
+        self.queue
+            .write_buffer(&self.post.uniform_buffer, 0, bytemuck::bytes_of(&post_u));
+
         let output = self.surface.get_current_texture()?;
-        let view = output
+        let surface_view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -523,11 +543,12 @@ impl Renderer {
                 label: Some("Render Encoder"),
             });
 
+        // Pass 1: scene → offscreen
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Main Pass"),
+                label: Some("Scene Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &self.post.scene_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(self.clear_color.to_wgpu()),
@@ -565,6 +586,27 @@ impl Renderer {
                     pass.draw_indexed(start..end, 0, 0..1);
                 }
             }
+        }
+
+        // Pass 2: post → swapchain
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Post Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.post.pipeline);
+            pass.set_bind_group(0, &self.post.bind_group, &[]);
+            pass.draw(0..3, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

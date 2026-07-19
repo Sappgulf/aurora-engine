@@ -2,117 +2,79 @@
 
 **Fast Rust game engine · beautiful wgpu graphics · desktop + browser**
 
-Aurora is a from-scratch engine on [wgpu](https://wgpu.rs): **Vulkan / Metal / DX12** natively and **WebGPU** in the browser via WebAssembly.
+> Status: **v0.3 / Milestone 2** — post-FX, atlases, audio, collision, playable mini-game.
 
-> Status: **Milestone 1** — 2D foundation. Camera, sprites, input, textures, particles, fixed timestep. See [ROADMAP.md](./ROADMAP.md).
-
-## Features
-
-| Area | Status |
-|------|--------|
-| Cross-platform window + loop (`winit`) | ✅ |
-| wgpu device / surface / WGSL | ✅ |
-| `Game` + `FrameCtx` API | ✅ |
-| Orthographic **Camera2D** (pan / zoom / screen↔world) | ✅ |
-| **Sprite** batching (multi-texture, alpha blend) | ✅ |
-| Procedural **textures** + PNG load | ✅ |
-| **Input** (keys, mouse, scroll, WASD axis) | ✅ |
-| Fixed timestep + variable render | ✅ |
-| CPU **particles** | ✅ |
-| Debug NDC triangle (M0) | ✅ |
-| WASM / Trunk scaffold | ✅ |
-
-## Quick start (native)
+## Play now
 
 ```bash
-git clone https://github.com/Sappgulf/aurora-engine.git
-cd aurora-engine
-cargo run -p playground
+cd ~/dev/aurora-engine
+cargo run -p aurora_run
 ```
 
-### Controls (playground)
+### Aurora Run controls
 
 | Input | Action |
 |--------|--------|
-| **WASD** / arrows | Move player |
-| **Scroll** / `+` `-` | Zoom camera |
-| **LMB** / Space | Particle burst |
-| **RMB** drag | Pan camera |
-| **T** | Toggle debug triangle |
-| **R** | Reset camera + player |
-| **Esc** | Quit (native) |
+| **WASD** / arrows | Move |
+| Collect **gold orbs** | Score |
+| Avoid **red hazards** | Lose lives |
+| **R** | Restart |
+| **P** | Toggle bloom / vignette / chromatic |
+| **Esc** | Quit |
 
-M0 triangle-only smoke test:
+Top-left teal pips = lives · top-right gold dots = score. Clear all orbs to win.
+
+## Other demos
 
 ```bash
-cargo run -p triangle_demo
+cargo run -p playground      # free-roam particles / camera
+cargo run -p triangle_demo   # M0 NDC triangle
 ```
 
-## Browser (WebGPU)
+## Features
+
+| System | Notes |
+|--------|--------|
+| wgpu sprites + multi-texture batching | ✅ |
+| Camera2D pan/zoom | ✅ |
+| Input (keys/mouse/scroll) | ✅ |
+| Fixed timestep | ✅ |
+| Post-FX (bloom, vignette, chromatic) | ✅ |
+| Texture atlases + `Animation` | ✅ |
+| Audio beeps (rodio / Web Audio) | ✅ |
+| AABB collision | ✅ |
+| Particles | ✅ |
+| WASM / Trunk scaffold | ✅ |
+
+## Library sketch
+
+```rust
+use aurora_engine::{run, Aabb, FrameCtx, Game, Sprite};
+
+impl Game for MyGame {
+    fn on_fixed_update(&mut self, ctx: &mut FrameCtx<'_>) {
+        if self.player.intersects(self.coin) {
+            ctx.audio.collect();
+            self.score += 1;
+        }
+    }
+
+    fn on_update(&mut self, ctx: &mut FrameCtx<'_>) {
+        ctx.renderer.post_fx.bloom_intensity = 1.0;
+        ctx.renderer.draw_sprite(self.tex, Sprite::new(...));
+    }
+}
+```
+
+## Browser
 
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install trunk
-cd examples/playground
-trunk serve
+cd examples/aurora_run   # add Trunk.toml/index if needed, or use playground
+# playground: cd examples/playground && trunk serve
 ```
-
-## Use as a library
-
-```rust
-use aurora_engine::{run, Color, FrameCtx, Game, Renderer, Sprite, Texture};
-use glam::Vec2;
-
-struct MyGame {
-    tex: usize,
-}
-
-impl Game for MyGame {
-    fn on_start(&mut self, renderer: &mut Renderer) {
-        let tex = {
-            let gpu = renderer.gpu();
-            Texture::soft_circle(&gpu, 64, Color::AURORA_TEAL)
-        };
-        self.tex = renderer.add_texture(tex);
-    }
-
-    fn on_update(&mut self, ctx: &mut FrameCtx<'_>) {
-        let dir = ctx.input.axis_wasd();
-        ctx.renderer.camera.pan(dir * 200.0 * ctx.time.delta);
-        ctx.renderer.draw_sprite(
-            self.tex,
-            Sprite::new(Vec2::ZERO, Vec2::splat(64.0)),
-        );
-    }
-}
-
-fn main() {
-    run(MyGame { tex: 0 });
-}
-```
-
-## Workspace
-
-```
-crates/aurora-engine/     # engine library
-  shaders/                # WGSL (sprite + triangle)
-examples/playground/      # M1 showcase (default)
-examples/triangle_demo/   # M0 smoke test
-scripts/
-ROADMAP.md
-```
-
-## Goal map
-
-| Milestone | Focus |
-|-----------|--------|
-| **M0** ✅ | Loop, wgpu, triangle, native + web scaffold |
-| **M1** ✅ | Camera, sprites, input, assets, particles |
-| **M2** | Post-FX, bloom, more polish |
-| **M3** | Optional 3D / glTF / PBR |
-| **M4** | ECS, hot reload, CI, crates.io |
-| **M5** | Vertical-slice game |
 
 ## License
 
-MIT OR Apache-2.0
+MIT OR Apache-2.0 · Repo: https://github.com/Sappgulf/aurora-engine

@@ -8,6 +8,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::audio::Audio;
 use crate::color::Color;
 use crate::input::Input;
 use crate::renderer::Renderer;
@@ -21,6 +22,8 @@ pub struct FrameCtx<'a> {
     pub input: &'a Input,
     /// GPU renderer + camera + draw queue.
     pub renderer: &'a mut Renderer,
+    /// Procedural beeps / SFX.
+    pub audio: &'a mut Audio,
 }
 
 /// Implement this for your game / demo.
@@ -72,6 +75,7 @@ pub fn run<G: Game>(game: G) {
         renderer: None,
         time: Time::new(),
         input: Input::new(),
+        audio: Audio::new(),
         proxy,
         init_started: false,
     };
@@ -107,6 +111,7 @@ struct EngineApp<G: Game> {
     renderer: Option<Renderer>,
     time: Time,
     input: Input,
+    audio: Audio,
     proxy: EventLoopProxy<UserEvent>,
     init_started: bool,
 }
@@ -268,6 +273,7 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                         time: &mut self.time,
                         input: &self.input,
                         renderer,
+                        audio: &mut self.audio,
                     };
                     game.on_fixed_update(&mut ctx);
                 }
@@ -277,6 +283,7 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                         time: &mut self.time,
                         input: &self.input,
                         renderer,
+                        audio: &mut self.audio,
                     };
                     game.on_update(&mut ctx);
                 }

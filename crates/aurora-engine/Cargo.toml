@@ -25,6 +25,7 @@ image = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = { workspace = true }
 env_logger = { workspace = true }
+rodio = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = { workspace = true }
@@ -38,5 +39,13 @@ web-sys = { workspace = true, features = [
     "Window",
     "Performance",
     "CssStyleDeclaration",
+    "AudioContext",
+    "AudioDestinationNode",
+    "AudioNode",
+    "AudioParam",
+    "BaseAudioContext",
+    "GainNode",
+    "OscillatorNode",
+    "OscillatorType",
 ] }
 js-sys = "0.3"

@@ -153,4 +153,32 @@ impl Texture {
         }
         Self::from_rgba(gpu, size, size, &data, "gradient_h")
     }
+
+    /// Horizontal strip of soft orbs with slight size variation (4 frames) for animation.
+    pub fn orb_atlas_strip(gpu: &GpuContext<'_>, frame_size: u32, frames: u32, color: Color) -> Self {
+        let frames = frames.max(1);
+        let w = frame_size * frames;
+        let h = frame_size;
+        let mut data = vec![0u8; (w * h * 4) as usize];
+        for f in 0..frames {
+            let scale = 0.75 + 0.25 * ((f as f32 / frames as f32) * std::f32::consts::TAU).sin().abs();
+            let cxy = (frame_size as f32 - 1.0) * 0.5;
+            let r = frame_size as f32 * 0.5 * scale;
+            for y in 0..frame_size {
+                for x in 0..frame_size {
+                    let dx = x as f32 - cxy;
+                    let dy = y as f32 - cxy;
+                    let d = (dx * dx + dy * dy).sqrt() / r.max(1.0);
+                    let a = (1.0 - d).clamp(0.0, 1.0).powf(1.4);
+                    let px = f * frame_size + x;
+                    let i = ((y * w + px) * 4) as usize;
+                    data[i] = (color.r * 255.0) as u8;
+                    data[i + 1] = (color.g * 255.0) as u8;
+                    data[i + 2] = (color.b * 255.0) as u8;
+                    data[i + 3] = (a * color.a * 255.0) as u8;
+                }
+            }
+        }
+        Self::from_rgba(gpu, w, h, &data, "orb_atlas")
+    }
 }

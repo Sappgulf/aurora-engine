@@ -97,6 +97,7 @@ impl Game for Playground {
 
     fn on_fixed_update(&mut self, ctx: &mut FrameCtx<'_>) {
         let dt = ctx.time.fixed_dt;
+        let _ = ctx.audio; // available for SFX
         let speed = 320.0;
         let move_dir = ctx.input.axis_wasd();
         self.player += move_dir * speed * dt;
