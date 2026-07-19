@@ -921,6 +921,9 @@ impl LastLight {
 
     fn handle_command_keys(&mut self, ctx: &mut FrameCtx<'_>) {
         let rows = self.command_card_rows();
+        if ctx.input.key_pressed(KeyCode::KeyR) {
+            self.focus_next_objective(ctx);
+        }
         for (key, _) in &rows {
             if ctx.input.key_pressed(*key) {
                 self.apply_command_action(*key);
@@ -1165,6 +1168,51 @@ impl LastLight {
             ),
             StructureKind::Reactor => "AUXILIARY REACTOR — AWAITING FULL POWER LATTICE".to_owned(),
         }
+    }
+
+    /// Resolves the next player-facing objective from the same mission state
+    /// that determines victory. The result drives the HUD, minimap, world
+    /// beacon, and camera-focus key so those surfaces cannot disagree.
+    fn next_objective(&self) -> Option<(Vec2, String)> {
+        match self.mission.victory {
+            VictoryCondition::RestoreRelaysAndDefeatBoss { boss_kind } => {
+                if let Some((index, relay)) = self
+                    .relays
+                    .iter()
+                    .enumerate()
+                    .find(|(_, relay)| !relay.active)
+                {
+                    return Some((
+                        relay.position,
+                        format!("RESTORE RELAY {} — ENGINEER REQUIRED", index + 1),
+                    ));
+                }
+                self.world
+                    .units()
+                    .iter()
+                    .find(|unit| {
+                        unit.faction == CHOIR
+                            && unit.alive()
+                            && self.kinds.get(&unit.id) == Some(&boss_kind)
+                    })
+                    .map(|unit| (unit.position, format!("ELIMINATE {}", boss_kind.label())))
+            }
+            VictoryCondition::EscortToExtraction { point, .. } => {
+                Some((point, "ESCORT SENA TO THE ARRAY".to_owned()))
+            }
+        }
+    }
+
+    fn focus_next_objective(&mut self, ctx: &mut FrameCtx<'_>) {
+        let Some((position, label)) = self.next_objective() else {
+            return;
+        };
+        ctx.renderer.camera.position = position;
+        ctx.renderer
+            .camera
+            .clamp_to_bounds(Aabb::from_center_size(Vec2::ZERO, MAP_SIZE));
+        self.order_marker = Some((position, 1.5));
+        self.status = Some((format!("OBJECTIVE FOCUS — {label}"), 2.5));
     }
 
     fn handle_pointer(&mut self, ctx: &mut FrameCtx<'_>) {
@@ -2470,6 +2518,19 @@ impl Game for LastLight {
             self.draw_selection_brackets(ctx.renderer, position, size);
         }
 
+        if !self.briefing && !self.victory && !self.defeat {
+            if let Some((position, _)) = self.next_objective() {
+                let pulse = 76.0 + (t * 3.4).sin().abs() * 24.0;
+                ctx.renderer.draw_sprite(
+                    self.tex_glow,
+                    Sprite::new(position, Vec2::splat(pulse * 2.4))
+                        .with_color(Color::rgba(0.95, 0.66, 0.16, 0.18))
+                        .with_z(2.0),
+                );
+                self.draw_selection_brackets(ctx.renderer, position, pulse);
+            }
+        }
+
         if !self.briefing && !self.paused && !self.victory && !self.defeat {
             let hud_scale = Self::hud_scale(ctx.renderer);
             let minimap = self.minimap_transform(ctx.renderer);
@@ -2512,6 +2573,17 @@ impl Game for LastLight {
                     )
                     .with_color(Color::rgb(0.18, 1.35, 1.45))
                     .with_z(8.0),
+                );
+            }
+            if let Some((position, _)) = self.next_objective() {
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(
+                        minimap.world_to_panel(position),
+                        Vec2::splat(11.0 * hud_scale),
+                    )
+                    .with_color(Color::rgb(1.2, 0.72, 0.18))
+                    .with_z(8.25),
                 );
             }
             for unit in self.world.units().iter().filter(|unit| unit.alive()) {
@@ -2665,9 +2737,9 @@ impl Game for LastLight {
             8.0,
         );
         let control_hint = if self.world.selection().ids().is_empty() {
-            "DRAG SELECT  •  CLICK A SQUAD, THEN TERRAIN TO MOVE  •  B BEACON"
+            "DRAG SELECT  •  CLICK A SQUAD, THEN TERRAIN TO MOVE  •  R OBJECTIVE"
         } else {
-            "CLICK TERRAIN MOVE  •  RIGHT CLICK ATTACK  •  H HOLD  •  T STOP"
+            "CLICK TERRAIN MOVE  •  RIGHT CLICK ATTACK  •  H HOLD  •  R OBJECTIVE"
         };
         self.draw_text(
             ctx.renderer,
@@ -2728,6 +2800,16 @@ impl Game for LastLight {
                 top_left + Vec2::new(0.0, -100.0) * hud_scale,
                 2.5 * hud_scale,
                 Color::rgb(0.65, 1.15, 1.05),
+                8.0,
+            );
+        }
+        if let Some((_, objective)) = self.next_objective() {
+            self.draw_text(
+                ctx.renderer,
+                &format!("NEXT // {objective}"),
+                top_left + Vec2::new(0.0, -126.0) * hud_scale,
+                1.75 * hud_scale,
+                Color::rgba(1.08, 0.72, 0.28, 0.92),
                 8.0,
             );
         }
@@ -3102,6 +3184,36 @@ mod tests {
             Some("MARA VEY")
         );
         assert_eq!(game.dialogue_cursor, 1);
+    }
+
+    #[test]
+    fn objective_resolution_tracks_mission_progression() {
+        let mut reclaim = LastLight::new();
+        reclaim.start_mission(missions::reclaim_the_reactor());
+        assert_eq!(
+            reclaim.next_objective().map(|(position, _)| position),
+            Some(reclaim.relays[0].position)
+        );
+        for relay in &mut reclaim.relays {
+            relay.active = true;
+        }
+        let canticle = reclaim
+            .world
+            .units()
+            .iter()
+            .find(|unit| reclaim.kinds.get(&unit.id) == Some(&UnitKind::Canticle))
+            .expect("reclaim mission includes the Canticle");
+        assert_eq!(
+            reclaim.next_objective().map(|(position, _)| position),
+            Some(canticle.position)
+        );
+
+        let mut voice = LastLight::new();
+        voice.start_mission(missions::voice_in_conduit_twelve());
+        assert_eq!(
+            voice.next_objective().map(|(_, label)| label),
+            Some("ESCORT SENA TO THE ARRAY".to_owned())
+        );
     }
 
     #[test]

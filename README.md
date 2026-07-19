@@ -23,6 +23,7 @@ cargo run -p last_light
 | **B, then left click** | Preview and deploy a powered field beacon |
 | **H** | Hold selected units in position |
 | **T** | Stop selected units and clear their queued paths |
+| **R** | Focus the tactical camera on the next mission objective |
 | **Cmd/Ctrl + 1–5** | Assign a control group |
 | **1–5** | Recall and focus a control group |
 | **WASD / screen edge** | Pan tactical camera |
