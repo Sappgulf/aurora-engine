@@ -371,6 +371,12 @@ impl Game for AuroraRun {
             return;
         }
 
+        // Menus are modal: keep their arena backdrop alive in `on_update`,
+        // but freeze all simulation (movement, hazards, timers, and scoring).
+        if self.menu.screen().is_some() {
+            return;
+        }
+
         if ctx.input.key_pressed(KeyCode::KeyR) {
             self.reset(true, ctx.audio);
             return;
@@ -621,10 +627,16 @@ impl Game for AuroraRun {
         };
         ctx.renderer.set_clear_color(clear);
 
+        // The arena is camera-derived rather than a fixed pixel rectangle, so
+        // it fills native windows, browser canvases, and DPI-scaled displays.
+        let view_size = ctx.renderer.camera.visible_world_size();
+        let arena_center = ctx.renderer.camera.position;
+        let arena_size = view_size * 1.035;
+
         // Floor
         ctx.renderer.draw_sprite(
             self.tex_floor,
-            Sprite::new(Vec2::ZERO, WORLD + Vec2::splat(100.0)).with_z(-5.0),
+            Sprite::new(arena_center, arena_size).with_z(-5.0),
         );
 
         // Soft emissive pools make the player and hazards read as lights while
@@ -646,10 +658,22 @@ impl Game for AuroraRun {
         let border = Color::rgba(0.08, 1.6, 1.35, 0.28);
         let t_orb = self.tex_orb;
         for (pos, size) in [
-            (Vec2::new(0.0, WORLD.y * 0.5), Vec2::new(WORLD.x, 14.0)),
-            (Vec2::new(0.0, -WORLD.y * 0.5), Vec2::new(WORLD.x, 14.0)),
-            (Vec2::new(WORLD.x * 0.5, 0.0), Vec2::new(14.0, WORLD.y)),
-            (Vec2::new(-WORLD.x * 0.5, 0.0), Vec2::new(14.0, WORLD.y)),
+            (
+                arena_center + Vec2::new(0.0, arena_size.y * 0.5),
+                Vec2::new(arena_size.x, 14.0),
+            ),
+            (
+                arena_center - Vec2::new(0.0, arena_size.y * 0.5),
+                Vec2::new(arena_size.x, 14.0),
+            ),
+            (
+                arena_center + Vec2::new(arena_size.x * 0.5, 0.0),
+                Vec2::new(14.0, arena_size.y),
+            ),
+            (
+                arena_center - Vec2::new(arena_size.x * 0.5, 0.0),
+                Vec2::new(14.0, arena_size.y),
+            ),
         ] {
             ctx.renderer.draw_sprite(
                 t_orb,

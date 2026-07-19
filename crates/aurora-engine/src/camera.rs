@@ -42,6 +42,14 @@ impl Camera2D {
         self.viewport
     }
 
+    /// World-space size currently visible through this orthographic camera.
+    ///
+    /// UI and arena backgrounds should use this instead of fixed pixel-sized
+    /// rectangles so they remain correct after a resize or DPI-scale change.
+    pub fn visible_world_size(&self) -> Vec2 {
+        self.viewport / self.zoom.max(f32::EPSILON)
+    }
+
     pub fn pan(&mut self, delta_world: Vec2) {
         self.position += delta_world;
     }
@@ -59,7 +67,7 @@ impl Camera2D {
 
     /// View-projection matrix for shaders (clip space).
     pub fn view_projection(&self) -> Mat4 {
-        let half = self.viewport / (2.0 * self.zoom);
+        let half = self.visible_world_size() * 0.5;
         let left = self.position.x - half.x;
         let right = self.position.x + half.x;
         let bottom = self.position.y - half.y;
@@ -73,7 +81,7 @@ impl Camera2D {
             (screen.x / self.viewport.x) * 2.0 - 1.0,
             1.0 - (screen.y / self.viewport.y) * 2.0,
         );
-        let half = self.viewport / (2.0 * self.zoom);
+        let half = self.visible_world_size() * 0.5;
         Vec2::new(
             self.position.x + ndc.x * half.x,
             self.position.y + ndc.y * half.y,
@@ -82,7 +90,7 @@ impl Camera2D {
 
     /// Convert world to screen pixels (origin top-left).
     pub fn world_to_screen(&self, world: Vec2) -> Vec2 {
-        let half = self.viewport / (2.0 * self.zoom);
+        let half = self.visible_world_size() * 0.5;
         let ndc = Vec2::new(
             (world.x - self.position.x) / half.x,
             (world.y - self.position.y) / half.y,
@@ -221,6 +229,14 @@ impl CameraRig {
 #[cfg(test)]
 mod rig_tests {
     use super::*;
+
+    #[test]
+    fn visible_world_size_tracks_zoom_without_dpi_assumptions() {
+        let mut camera = Camera2D::new(1920.0, 1080.0);
+        assert_eq!(camera.visible_world_size(), Vec2::new(1920.0, 1080.0));
+        camera.zoom = 1.5;
+        assert_eq!(camera.visible_world_size(), Vec2::new(1280.0, 720.0));
+    }
 
     #[test]
     fn rig_follows_target_outside_dead_zone_and_respects_bounds() {
