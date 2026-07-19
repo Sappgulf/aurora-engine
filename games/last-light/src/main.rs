@@ -1040,6 +1040,22 @@ impl LastLight {
         })
     }
 
+    /// A high-priority, contextual explanation for the Engineer's relay job.
+    /// It deliberately derives from selection + distance, the same conditions
+    /// that advance relay progress, so the HUD cannot promise an interaction
+    /// the simulation will not perform.
+    fn engineer_relay_status(&self) -> Option<String> {
+        self.relays.iter().enumerate().find_map(|(index, relay)| {
+            (!relay.active && self.selected_engineer_near(relay.position)).then(|| {
+                format!(
+                    "ENGINEER LINK // RELAY {} — RESTORING {:02}%",
+                    index + 1,
+                    (relay.progress / 3.0 * 100.0).clamp(0.0, 100.0) as u32
+                )
+            })
+        })
+    }
+
     fn closest_enemy_at(&self, point: Vec2) -> Option<UnitId> {
         self.world
             .units()
@@ -2354,6 +2370,14 @@ impl Game for LastLight {
             .camera
             .world_from_viewport_fraction(Vec2::new(0.0, 1.0))
             + Vec2::new(30.0, -34.0);
+        // Keep combat telemetry legible over the active world without turning
+        // the entire top edge into permanent chrome.
+        ctx.renderer.draw_sprite(
+            self.tex_ui,
+            Sprite::new(top_left + Vec2::new(280.0, -58.0), Vec2::new(590.0, 146.0))
+                .with_color(Color::rgba(0.01, 0.025, 0.05, 0.68))
+                .with_z(7.5),
+        );
         let active_relays = self.relays.iter().filter(|relay| relay.active).count();
         let objective_line = match self.mission.victory {
             VictoryCondition::RestoreRelaysAndDefeatBoss { .. } => format!(
@@ -2380,15 +2404,20 @@ impl Game for LastLight {
             ctx.renderer,
             &objective_line,
             top_left,
-            4.0,
+            3.35,
             Color::rgb(0.73, 1.15, 1.08),
             8.0,
         );
+        let control_hint = if self.world.selection().ids().is_empty() {
+            "DRAG SELECT  •  RIGHT CLICK MOVE / ATTACK  •  B BEACON"
+        } else {
+            "RIGHT CLICK COMMAND  •  H HOLD  •  T STOP  •  B BEACON"
+        };
         self.draw_text(
             ctx.renderer,
-            "SHIFT ADD  RIGHT CLICK COMMAND  B BUILD BEACON  WHEEL ZOOM",
+            control_hint,
             top_left + Vec2::new(0.0, -25.0),
-            2.5,
+            1.9,
             Color::rgba(0.58, 0.7, 0.78, 0.86),
             8.0,
         );
@@ -2408,11 +2437,12 @@ impl Game for LastLight {
             8.0,
         );
         if let Some(selected) = self.world.selection().ids().first() {
+            let count = self.world.selection().ids().len();
             self.draw_text(
                 ctx.renderer,
-                self.kinds[selected].label(),
+                &format!("{}  //  SQUAD {count}", self.kinds[selected].label()),
                 top_left + Vec2::new(0.0, -75.0),
-                3.2,
+                2.7,
                 Color::rgb(0.96, 0.72, 0.28),
                 8.0,
             );
@@ -2426,7 +2456,16 @@ impl Game for LastLight {
                 8.0,
             );
         }
-        if let Some((message, _)) = &self.status {
+        if let Some(message) = self.engineer_relay_status() {
+            self.draw_text(
+                ctx.renderer,
+                &message,
+                top_left + Vec2::new(0.0, -100.0),
+                2.2,
+                Color::rgb(0.3, 1.35, 1.18),
+                8.0,
+            );
+        } else if let Some((message, _)) = &self.status {
             self.draw_text(
                 ctx.renderer,
                 message,
@@ -2702,6 +2741,26 @@ mod tests {
                 .filter(|unit| unit.faction == CHOIR)
                 .count(),
             6
+        );
+    }
+
+    #[test]
+    fn selected_engineer_reports_relay_restoration_job() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        let engineer = game
+            .kinds
+            .iter()
+            .find(|(_, kind)| **kind == UnitKind::Engineer)
+            .map(|(id, _)| *id)
+            .expect("mission includes an engineer");
+        let relay_position = game.relays[0].position;
+        game.world.unit_mut(engineer).unwrap().position = relay_position;
+        game.world.select_point(relay_position, PLAYER, false);
+
+        assert_eq!(
+            game.engineer_relay_status().as_deref(),
+            Some("ENGINEER LINK // RELAY 1 — RESTORING 00%")
         );
     }
 
