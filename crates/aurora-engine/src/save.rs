@@ -11,7 +11,7 @@ use std::fmt;
 use std::{fs, path::PathBuf};
 
 /// Increment this when the meaning of persisted data changes.
-pub const SAVE_FORMAT_VERSION: u32 = 2;
+pub const SAVE_FORMAT_VERSION: u32 = 3;
 
 /// The default slot used by games that do not need multiple player profiles.
 pub const DEFAULT_SAVE_SLOT: &str = "default";
@@ -62,6 +62,8 @@ pub struct CampaignProgress {
     pub completed_missions: Vec<String>,
     pub currency: u64,
     pub decisions: Vec<String>,
+    #[serde(default)]
+    pub upgrades: Vec<String>,
 }
 
 impl Default for CampaignProgress {
@@ -71,6 +73,7 @@ impl Default for CampaignProgress {
             completed_missions: Vec::new(),
             currency: 0,
             decisions: Vec::new(),
+            upgrades: Vec::new(),
         }
     }
 }
@@ -96,6 +99,21 @@ impl CampaignProgress {
         true
     }
 
+    /// Atomically purchases a permanent campaign upgrade.
+    pub fn purchase_upgrade(&mut self, upgrade: impl Into<String>, cost: u64) -> bool {
+        let upgrade = upgrade.into();
+        if upgrade.trim().is_empty() || self.upgrades.contains(&upgrade) || self.currency < cost {
+            return false;
+        }
+        self.currency -= cost;
+        self.upgrades.push(upgrade);
+        true
+    }
+
+    pub fn has_upgrade(&self, upgrade: &str) -> bool {
+        self.upgrades.iter().any(|owned| owned == upgrade)
+    }
+
     fn sanitize(&mut self) {
         self.unlocked_mission = self.unlocked_mission.max(1);
         self.completed_missions.retain(|id| !id.trim().is_empty());
@@ -105,6 +123,9 @@ impl CampaignProgress {
             .retain(|decision| !decision.trim().is_empty());
         self.decisions.sort();
         self.decisions.dedup();
+        self.upgrades.retain(|upgrade| !upgrade.trim().is_empty());
+        self.upgrades.sort();
+        self.upgrades.dedup();
     }
 }
 
@@ -458,6 +479,20 @@ mod tests {
         assert_eq!(campaign.unlocked_mission, 3);
         assert!(campaign.record_decision("wake-lumen"));
         assert!(!campaign.record_decision("wake-lumen"));
+    }
+
+    #[test]
+    fn campaign_upgrade_purchase_is_atomic_and_idempotent() {
+        let mut campaign = CampaignProgress {
+            currency: 100,
+            ..CampaignProgress::default()
+        };
+        assert!(campaign.purchase_upgrade("field-optics", 60));
+        assert_eq!(campaign.currency, 40);
+        assert!(campaign.has_upgrade("field-optics"));
+        assert!(!campaign.purchase_upgrade("field-optics", 60));
+        assert!(!campaign.purchase_upgrade("reactive-plating", 80));
+        assert_eq!(campaign.currency, 40);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

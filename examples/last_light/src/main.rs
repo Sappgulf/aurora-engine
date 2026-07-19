@@ -4,10 +4,11 @@
 use std::collections::HashMap;
 
 use aurora_engine::{
-    run, Aabb, Animation, BitmapText, Color, FactionId, FogOfWar, FogState, FrameCtx, Game,
-    PointLight, PowerGrid, PowerNode, PowerNodeId, ProductId, ProductionQueue, ProductionRecipe,
-    QueueError, Renderer, ResourceBank, RtsWorld, SaveData, SaveStore, SelectionBox, Sprite,
-    Texture, TextureAtlas, TextureHandle, UnitId, UnitOrder,
+    run, Aabb, AnimationClip, AnimationPlayer, BitmapText, Color, FactionId, FogOfWar, FogState,
+    FrameCtx, Game, MinimapTransform, PlacementError, PlacementRules, PointLight, PowerGrid,
+    PowerNode, PowerNodeId, ProductId, ProductionQueue, ProductionRecipe, QueueError, Renderer,
+    ResourceBank, RtsWorld, SaveData, SaveStore, SelectionBox, Sprite, Texture, TextureAtlas,
+    TextureHandle, UnitId, UnitOrder,
 };
 use glam::Vec2;
 use winit::{event::MouseButton, keyboard::KeyCode};
@@ -21,6 +22,10 @@ const FABRICATOR_NODE: PowerNodeId = PowerNodeId(0);
 const WARDEN_PRODUCT: ProductId = ProductId(0);
 const ENGINEER_PRODUCT: ProductId = ProductId(1);
 const SURVEYOR_PRODUCT: ProductId = ProductId(2);
+const BEACON_COST: u32 = 50;
+const UPGRADE_OPTICS: &str = "field-optics";
+const UPGRADE_PLATING: &str = "reactive-plating";
+const UPGRADE_OVERCLOCK: &str = "fabricator-overclock";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnitKind {
@@ -91,6 +96,10 @@ struct Relay {
     active: bool,
 }
 
+struct FieldBeacon {
+    position: Vec2,
+}
+
 struct LastLight {
     tex_environment: TextureHandle,
     tex_units: TextureHandle,
@@ -100,7 +109,7 @@ struct LastLight {
     tex_ui: TextureHandle,
     unit_atlas: TextureAtlas,
     warden_move_atlas: TextureAtlas,
-    warden_move_animation: Animation,
+    animation_players: HashMap<UnitId, AnimationPlayer>,
     structure_atlas: TextureAtlas,
     world: RtsWorld,
     kinds: HashMap<UnitId, UnitKind>,
@@ -111,6 +120,8 @@ struct LastLight {
     relays: Vec<Relay>,
     reactor_position: Vec2,
     fabricator_position: Vec2,
+    field_beacons: Vec<FieldBeacon>,
+    placing_beacon: bool,
     resources: ResourceBank,
     resource_tick: f32,
     production: ProductionQueue,
@@ -163,7 +174,7 @@ impl LastLight {
                 1,
                 Vec2::new(2172.0, 724.0),
             ),
-            warden_move_animation: Animation::new([0, 1, 2, 3, 4, 5], 10.0),
+            animation_players: HashMap::new(),
             structure_atlas: TextureAtlas::new(
                 TextureHandle::default(),
                 2,
@@ -195,6 +206,8 @@ impl LastLight {
             ],
             reactor_position: Vec2::new(520.0, -40.0),
             fabricator_position: Vec2::new(-1_020.0, -120.0),
+            field_beacons: Vec::new(),
+            placing_beacon: false,
             resources: ResourceBank::new(starting_salvage),
             resource_tick: 0.0,
             production: ProductionQueue::new(5),
@@ -273,6 +286,11 @@ impl LastLight {
         speed: f32,
     ) -> UnitId {
         let id = self.world.spawn(faction, position);
+        let health = if faction == PLAYER && self.save_data.campaign.has_upgrade(UPGRADE_PLATING) {
+            health * 1.2
+        } else {
+            health
+        };
         if let Some(unit) = self.world.unit_mut(id) {
             unit.health = health;
             unit.max_health = health;
@@ -280,7 +298,76 @@ impl LastLight {
             unit.radius = kind.scale() * 0.27;
         }
         self.kinds.insert(id, kind);
+        self.animation_players
+            .insert(id, AnimationPlayer::default());
         id
+    }
+
+    fn purchase_upgrade(&mut self, id: &'static str, label: &str, cost: u64) {
+        if self.save_data.campaign.has_upgrade(id) {
+            self.status = Some((format!("{label} ALREADY INSTALLED"), 2.5));
+            return;
+        }
+        if !self.save_data.campaign.purchase_upgrade(id, cost) {
+            self.status = Some((format!("{label} REQUIRES {cost} LUMEN"), 2.5));
+            return;
+        }
+        self.status = Some(match self.save_store.save(&self.save_data) {
+            Ok(()) => (format!("{label} INSTALLED"), 3.5),
+            Err(error) => (format!("UPGRADE SAVE FAILED: {error}"), 5.0),
+        });
+    }
+
+    fn handle_briefing_upgrades(&mut self, ctx: &FrameCtx<'_>) {
+        if ctx.input.key_pressed(KeyCode::KeyZ) {
+            self.purchase_upgrade(UPGRADE_OPTICS, "FIELD OPTICS", 60);
+        }
+        if ctx.input.key_pressed(KeyCode::KeyX) {
+            self.purchase_upgrade(UPGRADE_PLATING, "REACTIVE PLATING", 80);
+        }
+        if ctx.input.key_pressed(KeyCode::KeyC) {
+            self.purchase_upgrade(UPGRADE_OVERCLOCK, "FABRICATOR OVERCLOCK", 100);
+        }
+    }
+
+    fn placement_rules(&self) -> PlacementRules {
+        let mut power_sources = vec![self.fabricator_position];
+        power_sources.extend(
+            self.relays
+                .iter()
+                .filter(|relay| relay.active)
+                .map(|relay| relay.position),
+        );
+        power_sources.extend(self.field_beacons.iter().map(|beacon| beacon.position));
+        let mut obstructions = vec![
+            (self.fabricator_position, 105.0),
+            (self.reactor_position, 135.0),
+        ];
+        obstructions.extend(self.relays.iter().map(|relay| (relay.position, 85.0)));
+        obstructions.extend(
+            self.field_beacons
+                .iter()
+                .map(|beacon| (beacon.position, 65.0)),
+        );
+        PlacementRules {
+            build_area: Aabb::from_center_size(Vec2::ZERO, MAP_SIZE - Vec2::splat(80.0)),
+            power_sources,
+            obstructions,
+            max_power_distance: 470.0,
+        }
+    }
+
+    fn minimap_transform(&self, renderer: &Renderer) -> MinimapTransform {
+        let bottom_left = renderer
+            .camera
+            .world_from_viewport_fraction(Vec2::new(0.0, 0.0));
+        MinimapTransform {
+            world: Aabb::from_center_size(Vec2::ZERO, MAP_SIZE),
+            panel: Aabb::from_center_size(
+                bottom_left + Vec2::new(150.0, 92.0),
+                Vec2::new(260.0, 138.0),
+            ),
+        }
     }
 
     fn friendly_count(&self) -> usize {
@@ -300,9 +387,12 @@ impl LastLight {
             self.status = Some(("FABRICATOR OFFLINE".to_owned(), 2.5));
             return;
         }
-        let Some(recipe) = kind.recipe() else {
+        let Some(mut recipe) = kind.recipe() else {
             return;
         };
+        if self.save_data.campaign.has_upgrade(UPGRADE_OVERCLOCK) {
+            recipe.build_millis = (recipe.build_millis as f32 * 0.75) as u32;
+        }
         match self.production.enqueue(recipe, &mut self.resources) {
             Ok(()) => {
                 self.status = Some((format!("{} ADDED TO QUEUE", kind.label()), 2.5));
@@ -329,6 +419,18 @@ impl LastLight {
         if ctx.input.key_pressed(KeyCode::KeyH) {
             self.world.issue_hold();
             self.status = Some(("SQUAD HOLDING POSITION".to_owned(), 2.0));
+        }
+        if ctx.input.key_pressed(KeyCode::KeyB) {
+            self.placing_beacon = !self.placing_beacon;
+            self.status = Some((
+                if self.placing_beacon {
+                    "BEACON PLACEMENT — LEFT CLICK / ESC CANCEL"
+                } else {
+                    "BEACON PLACEMENT CANCELLED"
+                }
+                .to_owned(),
+                3.0,
+            ));
         }
 
         for (slot, key) in [
@@ -450,6 +552,40 @@ impl LastLight {
             .camera
             .screen_to_world(ctx.input.mouse_position);
         if ctx.input.mouse_pressed(MouseButton::Left) {
+            if let Some(destination) = self
+                .minimap_transform(ctx.renderer)
+                .panel_to_world(mouse_world)
+            {
+                ctx.renderer.camera.position = destination;
+                ctx.renderer
+                    .camera
+                    .clamp_to_bounds(Aabb::from_center_size(Vec2::ZERO, MAP_SIZE));
+                return;
+            }
+            if self.placing_beacon {
+                match self.placement_rules().validate(mouse_world, 54.0) {
+                    Ok(()) if self.resources.spend(BEACON_COST) => {
+                        self.field_beacons.push(FieldBeacon {
+                            position: mouse_world,
+                        });
+                        self.placing_beacon = false;
+                        self.status = Some(("FIELD BEACON DEPLOYED".to_owned(), 3.0));
+                        ctx.audio.collect();
+                    }
+                    Ok(()) => {
+                        self.status = Some(("BEACON REQUIRES 50 SALVAGE".to_owned(), 3.0));
+                    }
+                    Err(reason) => {
+                        let reason = match reason {
+                            PlacementError::OutsideBuildArea => "OUTSIDE BUILD AREA",
+                            PlacementError::TooFarFromPower => "NO POWER LINK",
+                            PlacementError::Obstructed => "PLACEMENT OBSTRUCTED",
+                        };
+                        self.status = Some((reason.to_owned(), 2.5));
+                    }
+                }
+                return;
+            }
             self.drag = Some(SelectionBox::begin(mouse_world));
         }
         if let Some(drag) = self.drag.as_mut() {
@@ -600,6 +736,16 @@ impl LastLight {
             };
             self.fog.reveal(unit.position, radius);
         }
+        for beacon in &self.field_beacons {
+            self.fog.reveal(
+                beacon.position,
+                if self.save_data.campaign.has_upgrade(UPGRADE_OPTICS) {
+                    480.0
+                } else {
+                    380.0
+                },
+            );
+        }
     }
 
     fn draw_text(
@@ -700,6 +846,7 @@ impl Game for LastLight {
         let dt = ctx.time.fixed_dt;
         self.update_camera(ctx, dt);
         if self.briefing {
+            self.handle_briefing_upgrades(ctx);
             if ctx.input.key_pressed(KeyCode::Space) || ctx.input.key_pressed(KeyCode::Enter) {
                 self.briefing = false;
                 ctx.audio.start();
@@ -707,7 +854,12 @@ impl Game for LastLight {
             return;
         }
         if ctx.input.key_pressed(KeyCode::Escape) {
-            self.paused = !self.paused;
+            if self.placing_beacon {
+                self.placing_beacon = false;
+                self.status = Some(("BEACON PLACEMENT CANCELLED".to_owned(), 2.0));
+            } else {
+                self.paused = !self.paused;
+            }
         }
         if self.paused || self.victory || self.defeat {
             return;
@@ -717,14 +869,16 @@ impl Game for LastLight {
         self.handle_pointer(ctx);
         self.update_enemy_ai(dt);
         self.world.update(dt);
-        if self.world.units().iter().any(|unit| {
-            unit.alive()
-                && self.kinds.get(&unit.id) == Some(&UnitKind::Warden)
+        for unit in self.world.units().iter().filter(|unit| unit.alive()) {
+            let Some(player) = self.animation_players.get_mut(&unit.id) else {
+                continue;
+            };
+            if self.kinds.get(&unit.id) == Some(&UnitKind::Warden)
                 && unit.velocity.length_squared() > 1.0
-        }) {
-            self.warden_move_animation.tick(dt);
-        } else {
-            self.warden_move_animation.reset();
+            {
+                player.play(AnimationClip::looping("move", [0, 1, 2, 3, 4, 5], 10.0));
+                player.tick(dt);
+            }
         }
         self.update_combat(dt);
         self.update_fog();
@@ -865,6 +1019,57 @@ impl Game for LastLight {
             ));
         }
 
+        for beacon in &self.field_beacons {
+            let mut sprite = self
+                .structure_atlas
+                .sprite(beacon.position, Vec2::splat(96.0), 0);
+            sprite.z = -0.35;
+            ctx.renderer.draw_sprite(self.tex_structures, sprite);
+            ctx.renderer.draw_light(PointLight::new(
+                beacon.position,
+                Color::rgb(0.1, 1.25, 1.0),
+                210.0,
+                0.22 + (t * 3.0).sin().abs() * 0.08,
+            ));
+        }
+
+        if self.placing_beacon {
+            let position = ctx
+                .renderer
+                .camera
+                .screen_to_world(ctx.input.mouse_position);
+            let rules = self.placement_rules();
+            for source in &rules.power_sources {
+                ctx.renderer.draw_sprite(
+                    self.tex_glow,
+                    Sprite::new(*source, Vec2::splat(rules.max_power_distance * 2.0))
+                        .with_color(Color::rgba(0.04, 0.7, 0.62, 0.065))
+                        .with_z(3.6),
+                );
+                self.draw_selection_brackets(ctx.renderer, *source, 62.0);
+            }
+            let valid =
+                rules.validate(position, 54.0).is_ok() && self.resources.amount() >= BEACON_COST;
+            let mut preview = self.structure_atlas.sprite(position, Vec2::splat(108.0), 0);
+            preview.color = if valid {
+                Color::rgba(0.28, 1.25, 1.05, 0.64)
+            } else {
+                Color::rgba(1.45, 0.16, 0.3, 0.62)
+            };
+            preview.z = 4.0;
+            ctx.renderer.draw_sprite(self.tex_structures, preview);
+            ctx.renderer.draw_sprite(
+                self.tex_glow,
+                Sprite::new(position, Vec2::splat(940.0))
+                    .with_color(if valid {
+                        Color::rgba(0.08, 1.0, 0.8, 0.055)
+                    } else {
+                        Color::rgba(1.2, 0.05, 0.15, 0.045)
+                    })
+                    .with_z(3.8),
+            );
+        }
+
         for unit in self.world.units() {
             if !unit.alive() {
                 continue;
@@ -895,7 +1100,10 @@ impl Game for LastLight {
                         self.warden_move_atlas.sprite(
                             unit.position,
                             Vec2::splat(kind.scale()),
-                            self.warden_move_animation.frame(),
+                            self.animation_players
+                                .get(&unit.id)
+                                .map(AnimationPlayer::frame)
+                                .unwrap_or(0),
                         ),
                     )
                 } else {
@@ -965,6 +1173,71 @@ impl Game for LastLight {
             self.draw_selection_brackets(ctx.renderer, position, size);
         }
 
+        if !self.briefing && !self.paused && !self.victory && !self.defeat {
+            let minimap = self.minimap_transform(ctx.renderer);
+            ctx.renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(
+                    minimap.panel.center(),
+                    minimap.panel.size() + Vec2::splat(12.0),
+                )
+                .with_color(Color::rgba(0.04, 0.48, 0.56, 0.92))
+                .with_z(7.4),
+            );
+            ctx.renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(minimap.panel.center(), minimap.panel.size())
+                    .with_color(Color::rgba(0.006, 0.018, 0.035, 0.94))
+                    .with_z(7.5),
+            );
+            for relay in &self.relays {
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(minimap.world_to_panel(relay.position), Vec2::splat(7.0))
+                        .with_color(if relay.active {
+                            Color::rgb(0.2, 1.5, 1.2)
+                        } else {
+                            Color::rgb(0.45, 0.5, 0.55)
+                        })
+                        .with_z(8.0),
+                );
+            }
+            for unit in self.world.units().iter().filter(|unit| unit.alive()) {
+                if unit.faction == CHOIR && self.fog.state_at(unit.position) != FogState::Visible {
+                    continue;
+                }
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(minimap.world_to_panel(unit.position), Vec2::splat(5.0))
+                        .with_color(if unit.faction == PLAYER {
+                            Color::rgb(0.18, 1.6, 1.25)
+                        } else {
+                            Color::rgb(1.65, 0.12, 0.48)
+                        })
+                        .with_z(8.1),
+                );
+            }
+            let visible = ctx.renderer.camera.visible_world_size();
+            let camera_rect = Aabb::from_center_size(ctx.renderer.camera.position, visible);
+            let map_min = minimap.world_to_panel(camera_rect.min);
+            let map_max = minimap.world_to_panel(camera_rect.max);
+            let center = (map_min + map_max) * 0.5;
+            let size = (map_max - map_min).abs();
+            for (position, dimensions) in [
+                (Vec2::new(center.x, map_min.y), Vec2::new(size.x, 2.0)),
+                (Vec2::new(center.x, map_max.y), Vec2::new(size.x, 2.0)),
+                (Vec2::new(map_min.x, center.y), Vec2::new(2.0, size.y)),
+                (Vec2::new(map_max.x, center.y), Vec2::new(2.0, size.y)),
+            ] {
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(position, dimensions)
+                        .with_color(Color::rgba(0.9, 1.1, 1.0, 0.9))
+                        .with_z(8.2),
+                );
+            }
+        }
+
         let top_left = ctx
             .renderer
             .camera
@@ -981,7 +1254,7 @@ impl Game for LastLight {
         );
         self.draw_text(
             ctx.renderer,
-            "SHIFT ADD  RIGHT CLICK COMMAND  WASD PAN  WHEEL ZOOM",
+            "SHIFT ADD  RIGHT CLICK COMMAND  B BUILD BEACON  WHEEL ZOOM",
             top_left + Vec2::new(0.0, -25.0),
             2.5,
             Color::rgba(0.58, 0.7, 0.78, 0.86),
@@ -1053,7 +1326,7 @@ impl Game for LastLight {
             );
             self.draw_text(
                 ctx.renderer,
-                "F SURVEYOR 60   H HOLD",
+                "F SURVEYOR 60   H HOLD   B BEACON 50",
                 card_text + Vec2::new(0.0, -70.0),
                 2.0,
                 Color::rgb(0.88, 0.92, 0.92),
@@ -1148,6 +1421,29 @@ impl Game for LastLight {
                 Color::rgb(1.25, 0.74, 0.24),
                 11.0,
             );
+            if self.briefing {
+                let owned = |id| {
+                    if self.save_data.campaign.has_upgrade(id) {
+                        "INSTALLED"
+                    } else {
+                        "AVAILABLE"
+                    }
+                };
+                self.draw_text(
+                    ctx.renderer,
+                    &format!(
+                        "LUMEN {}  Z OPTICS 60 {}  X PLATING 80 {}  C OVERCLOCK 100 {}",
+                        self.save_data.campaign.currency,
+                        owned(UPGRADE_OPTICS),
+                        owned(UPGRADE_PLATING),
+                        owned(UPGRADE_OVERCLOCK)
+                    ),
+                    center + Vec2::new(-410.0, -122.0),
+                    1.65,
+                    Color::rgba(0.55, 0.82, 0.88, 0.94),
+                    11.0,
+                );
+            }
         }
     }
 }

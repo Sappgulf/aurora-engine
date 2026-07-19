@@ -113,7 +113,26 @@ relays join the power lattice and generate salvage, letting the player queue
 reinforcements without turning units into disposable spam. Restore three power
 nodes, hold the reactor circle, and defeat the Choir Canticle. Victory persists
 the Lumen contact, campaign currency, and mission-three unlock across native and
-browser sessions.
+browser sessions. The field-beacon tool costs 50 salvage, must remain inside the
+authored build area and within 470 units of the connected lattice, and extends
+sensor coverage. Beacons may chain outward, making map control a deliberate
+infrastructure route rather than free omniscience.
+
+## Lumen upgrade lattice
+
+Campaign Lumen is earned once per mission completion and spent permanently from
+the pre-deployment briefing. Purchases are atomic and saved immediately.
+
+| Upgrade | Cost | Gameplay effect | Fiction |
+|---|---:|---|---|
+| Field Optics | 60 | Field-beacon reveal radius 380→480 | Sena decodes Lumen's sensor harmonics |
+| Reactive Plating | 80 | New Lantern units gain 20% maximum health | Ivo adapts reactor laminate |
+| Fabricator Overclock | 100 | Unit build times fall by 25% | Lumen predicts safe assembly tolerances |
+
+This is the foundation of three later branches: **Witness** (vision and
+diplomacy), **Guardian** (survival and rescue), and **Forge** (production and
+fortification). Specialist loadouts in later missions should require one branch
+choice plus one character relationship, so progression remains tied to story.
 
 ## Campaign continuity data
 

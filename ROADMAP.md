@@ -92,10 +92,12 @@ systems it uses can be adopted by a second 2D game without copying demo code.
 - [x] Resource economy, production queues, and connected power-network graph
 - [x] Control groups and viewport-anchored command-card UI
 - [x] Versioned campaign persistence and mission unlock state
-- [ ] Per-unit animation strips and clip state machine
-- [ ] Player-authored structure placement and validation previews
-- [ ] Tactical minimap with fog, pings, and camera navigation
-- [ ] Mission-to-mission upgrade tree and specialist loadouts
+- [x] Per-entity clip state machine and Warden movement strip
+- [ ] Engineer, Surveyor, and Choir action strips
+- [x] Player-authored field-beacon placement and validation previews
+- [x] Tactical minimap with fog, contacts, camera frame, and navigation
+- [x] Persistent three-branch campaign upgrade foundation
+- [ ] Named-specialist loadouts and mission-specific ability choices
 
 **Exit criteria:** select and command a Lantern squad, reveal the sector, restore
 three relays, defeat a Choir command unit, and complete the mission on native

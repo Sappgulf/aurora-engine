@@ -20,12 +20,17 @@ cargo run -p last_light
 | **Shift + select** | Add units to the current selection |
 | **Right click** | Move or attack contextually |
 | **Q / E / F** | Queue Warden / Engineer / Surveyor |
+| **B, then left click** | Preview and deploy a powered field beacon |
 | **H** | Hold selected units in position |
 | **Cmd/Ctrl + 1–5** | Assign a control group |
 | **1–5** | Recall and focus a control group |
 | **WASD / screen edge** | Pan tactical camera |
 | **Mouse wheel** | Zoom around cursor |
+| **Minimap click** | Move the tactical camera |
 | **Esc** | Tactical pause |
+
+During the mission briefing, `Z`, `X`, and `C` purchase permanent Field Optics,
+Reactive Plating, and Fabricator Overclock upgrades with campaign Lumen.
 
 Select the Engineer and command it near each of the three power relays. Active
 relays generate salvage for the Lantern fabricator; build reinforcements, hold
@@ -66,6 +71,7 @@ cargo run -p triangle_demo   # M0 NDC triangle
 | Feature-gated 3D mesh/material contract | ✅ foundation |
 | RTS selection, formations, orders, navigation, fog | ✅ |
 | RTS economy, production queues, power graphs, control groups | ✅ |
+| Placement validation, tactical minimap, per-unit clip players | ✅ |
 | Versioned campaign progress with v1 save migration | ✅ |
 | Last Light point-and-click campaign mission | ✅ vertical slice |
 

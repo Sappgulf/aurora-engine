@@ -32,7 +32,7 @@ pub use app::{run, FrameCtx, Game, TriangleDemo};
 pub use assets::{
     AssetEntry, AssetKey, AssetKeyError, AssetKind, AssetManifest, AssetManifestError,
 };
-pub use atlas::{Animation, TextureAtlas};
+pub use atlas::{Animation, AnimationClip, AnimationPlayer, TextureAtlas};
 pub use audio::Audio;
 pub use audio::{AudioChannel, AudioMixer};
 pub use camera::{Camera2D, CameraRig};
@@ -50,9 +50,10 @@ pub use post::PostFxSettings;
 pub use renderer::{GpuContext, PointLight, RenderQuality, Renderer};
 pub use renderer::{RenderStats, TextureHandle};
 pub use rts::{
-    FactionId, FogOfWar, FogState, NavGrid, PowerGrid, PowerNode, PowerNodeId, ProductId,
-    ProductionItem, ProductionQueue, ProductionRecipe, QueueError, ResourceBank, RtsUnit, RtsWorld,
-    Selection, SelectionBox, UnitId, UnitOrder,
+    FactionId, FogOfWar, FogState, MinimapTransform, NavGrid, PlacementError, PlacementRules,
+    PowerGrid, PowerNode, PowerNodeId, ProductId, ProductionItem, ProductionQueue,
+    ProductionRecipe, QueueError, ResourceBank, RtsUnit, RtsWorld, Selection, SelectionBox, UnitId,
+    UnitOrder,
 };
 pub use save::{
     CampaignProgress, GameSettings, SaveData, SaveError, SaveStore, DEFAULT_SAVE_SLOT,

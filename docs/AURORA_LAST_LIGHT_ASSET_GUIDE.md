@@ -78,6 +78,25 @@ Generate each complete strip in one pass from an approved seed. Normalize every
 frame using one shared scale and anchor. Never generate individual frames as
 unrelated images.
 
+### Runtime clip contract
+
+- One `TextureAtlas` is shared by every instance of a unit class.
+- Every unit owns an `AnimationPlayer`; never share playback time across a squad.
+- Stable clip IDs use lowercase verbs: `idle`, `move`, `attack`, `repair`,
+  `build`, `scan`, `hit`, `down`.
+- Re-selecting the active clip must not restart it. A state transition resets to
+  frame zero and non-looping clips hold their last frame until the next state.
+- Movement strips face north in source art and rotate toward velocity in-engine.
+
+### Shipped vertical-slice assets
+
+| File | Grid | Runtime role |
+|---|---:|---|
+| `last-light-units-atlas-v001.png` | 3×2 | Six unit idle silhouettes |
+| `warden-move-strip-v001.png` | 6×1 | Per-Warden locomotion clip |
+| `last-light-structures-atlas-v001.png` | 2×2 | Relay, fabricator, reactor, Choir tower |
+| `reactor-sector-v001.png` | single | 2600×1460 authored mission floor |
+
 ## Environment kit
 
 - Floor: clean plate, worn plate, conduit, grate, coolant stain, breach.
@@ -104,6 +123,13 @@ than three primary recipes at once. Show salvage, power, unit cap, queue depth,
 and build progress with text plus color; never communicate affordability by
 color alone.
 
+The minimap anchors lower-left at a 260×138 logical-unit footprint. Friendly
+contacts are cyan, visible hostiles magenta, inactive objectives gray, active
+power objectives cyan, and the camera rectangle bone-white. Never draw a hidden
+enemy contact. Placement previews use the structure sprite at 62–64% alpha,
+cyan when valid and regulatory red when rejected, plus an understated coverage
+disc beneath it.
+
 ## Audio identity
 
 - Lantern: mechanical clicks, fabric strain, warm two-note confirmations.
@@ -116,7 +142,7 @@ color alone.
 ## Naming and repository layout
 
 ```text
-examples/aurora_run/assets/
+examples/last_light/assets/
   environments/<sector>/<asset>-v###.png
   factions/<faction>/<unit>/<clip>-strip-v###.png
   structures/<faction>/<structure>-v###.png

@@ -10,6 +10,80 @@ use glam::{IVec2, Vec2};
 
 use crate::Aabb;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementError {
+    OutsideBuildArea,
+    TooFarFromPower,
+    Obstructed,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlacementRules {
+    pub build_area: Aabb,
+    pub power_sources: Vec<Vec2>,
+    pub obstructions: Vec<(Vec2, f32)>,
+    pub max_power_distance: f32,
+}
+
+impl PlacementRules {
+    pub fn validate(&self, position: Vec2, radius: f32) -> Result<(), PlacementError> {
+        let radius = radius.max(0.0);
+        if position.x - radius < self.build_area.min.x
+            || position.x + radius > self.build_area.max.x
+            || position.y - radius < self.build_area.min.y
+            || position.y + radius > self.build_area.max.y
+        {
+            return Err(PlacementError::OutsideBuildArea);
+        }
+        if !self.power_sources.is_empty()
+            && !self
+                .power_sources
+                .iter()
+                .any(|source| source.distance(position) <= self.max_power_distance.max(0.0))
+        {
+            return Err(PlacementError::TooFarFromPower);
+        }
+        if self
+            .obstructions
+            .iter()
+            .any(|(center, obstruction_radius)| {
+                center.distance(position) < radius + obstruction_radius.max(0.0)
+            })
+        {
+            return Err(PlacementError::Obstructed);
+        }
+        Ok(())
+    }
+}
+
+/// Converts between authored world coordinates and a rectangular tactical map.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MinimapTransform {
+    pub world: Aabb,
+    pub panel: Aabb,
+}
+
+impl MinimapTransform {
+    pub fn world_to_panel(self, position: Vec2) -> Vec2 {
+        let world_size = self.world.size().max(Vec2::splat(f32::EPSILON));
+        let normalized = ((position - self.world.min) / world_size).clamp(Vec2::ZERO, Vec2::ONE);
+        self.panel.min + normalized * self.panel.size()
+    }
+
+    pub fn panel_to_world(self, position: Vec2) -> Option<Vec2> {
+        if position.x < self.panel.min.x
+            || position.x > self.panel.max.x
+            || position.y < self.panel.min.y
+            || position.y > self.panel.max.y
+        {
+            return None;
+        }
+        let normalized =
+            (position - self.panel.min) / self.panel.size().max(Vec2::splat(f32::EPSILON));
+        Some(self.world.min + normalized * self.world.size())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProductId(pub u16);
 
@@ -685,6 +759,41 @@ impl FogOfWar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placement_rules_report_power_bounds_and_obstructions() {
+        let rules = PlacementRules {
+            build_area: Aabb::from_center_size(Vec2::ZERO, Vec2::splat(1000.0)),
+            power_sources: vec![Vec2::ZERO],
+            obstructions: vec![(Vec2::new(100.0, 0.0), 40.0)],
+            max_power_distance: 300.0,
+        };
+        assert_eq!(rules.validate(Vec2::new(0.0, 200.0), 30.0), Ok(()));
+        assert_eq!(
+            rules.validate(Vec2::new(420.0, 0.0), 30.0),
+            Err(PlacementError::TooFarFromPower)
+        );
+        assert_eq!(
+            rules.validate(Vec2::new(100.0, 0.0), 30.0),
+            Err(PlacementError::Obstructed)
+        );
+        assert_eq!(
+            rules.validate(Vec2::new(-490.0, 0.0), 30.0),
+            Err(PlacementError::OutsideBuildArea)
+        );
+    }
+
+    #[test]
+    fn minimap_transform_round_trips_world_positions() {
+        let transform = MinimapTransform {
+            world: Aabb::new(Vec2::new(-1000.0, -500.0), Vec2::new(1000.0, 500.0)),
+            panel: Aabb::new(Vec2::new(20.0, 30.0), Vec2::new(220.0, 130.0)),
+        };
+        let world = Vec2::new(250.0, -125.0);
+        let panel = transform.world_to_panel(world);
+        assert!(transform.panel_to_world(panel).unwrap().distance(world) < 0.01);
+        assert_eq!(transform.panel_to_world(Vec2::ZERO), None);
+    }
 
     const PLAYER: FactionId = FactionId(1);
 
