@@ -19,7 +19,8 @@ def background_candidate(pixel: tuple[int, int, int], dark_background: bool) -> 
 
 
 def extract_alpha(image: Image.Image) -> Image.Image:
-    rgb = image.convert("RGB")
+    source = image.convert("RGBA")
+    rgb = source.convert("RGB")
     width, height = rgb.size
     pixels = rgb.load()
     corners = [
@@ -29,12 +30,17 @@ def extract_alpha(image: Image.Image) -> Image.Image:
         pixels[width - 1, height - 1],
     ]
     dark_background = sum(sum(pixel) for pixel in corners) / 12 < 64
+    source_alpha = source.getchannel("A")
+    alpha_pixels = source_alpha.load()
     visited = bytearray(width * height)
     frontier: deque[tuple[int, int]] = deque()
 
     def enqueue(x: int, y: int) -> None:
         index = y * width + x
-        if not visited[index] and background_candidate(pixels[x, y], dark_background):
+        removable = alpha_pixels[x, y] == 0 or background_candidate(
+            pixels[x, y], dark_background
+        )
+        if not visited[index] and removable:
             visited[index] = 1
             frontier.append((x, y))
 
@@ -56,9 +62,13 @@ def extract_alpha(image: Image.Image) -> Image.Image:
         if y + 1 < height:
             enqueue(x, y + 1)
 
-    rgba = rgb.convert("RGBA")
-    alpha = Image.new("L", (width, height), 255)
-    alpha.putdata([0 if value else 255 for value in visited])
+    rgba = source.copy()
+    alpha = source_alpha.copy()
+    output_alpha = alpha.load()
+    for y in range(height):
+        for x in range(width):
+            if visited[y * width + x]:
+                output_alpha[x, y] = 0
     rgba.putalpha(alpha)
     remove_small_islands(rgba)
     return rgba
@@ -114,7 +124,7 @@ def normalize_grid(
     frame_size: int,
     row_bounds: list[tuple[int, int]] | None = None,
 ) -> None:
-    source = Image.open(input_path).convert("RGB")
+    source = Image.open(input_path).convert("RGBA")
     if source.width % columns:
         raise ValueError(f"source width {source.width} is not divisible by {columns}")
     if row_bounds is None and source.height % rows:

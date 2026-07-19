@@ -12,6 +12,7 @@ pub enum TextureAsset {
     Units,
     WardenMove,
     EngineerMove,
+    EngineerRepair,
     SurveyorScan,
     NeedleAttack,
     CanticleCommand,
@@ -19,14 +20,16 @@ pub enum TextureAsset {
     HitReactions,
     DownReactions,
     Structures,
+    CommandPortraits,
 }
 
 impl TextureAsset {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::ReactorSector,
         Self::Units,
         Self::WardenMove,
         Self::EngineerMove,
+        Self::EngineerRepair,
         Self::SurveyorScan,
         Self::NeedleAttack,
         Self::CanticleCommand,
@@ -34,6 +37,7 @@ impl TextureAsset {
         Self::HitReactions,
         Self::DownReactions,
         Self::Structures,
+        Self::CommandPortraits,
     ];
     pub fn key(self) -> &'static str {
         match self {
@@ -41,6 +45,7 @@ impl TextureAsset {
             Self::Units => "units.idle",
             Self::WardenMove => "lantern.warden.move",
             Self::EngineerMove => "lantern.engineer.move",
+            Self::EngineerRepair => "lantern.engineer.repair",
             Self::SurveyorScan => "lantern.surveyor.scan",
             Self::NeedleAttack => "choir.needle.attack",
             Self::CanticleCommand => "choir.canticle.command",
@@ -48,6 +53,7 @@ impl TextureAsset {
             Self::HitReactions => "units.reactions.hit",
             Self::DownReactions => "units.reactions.down",
             Self::Structures => "structures.reactor_sector",
+            Self::CommandPortraits => "portraits.command",
         }
     }
     pub fn path(self) -> &'static str {
@@ -56,6 +62,7 @@ impl TextureAsset {
             Self::Units => "last-light-units-atlas-v001.png",
             Self::WardenMove => "warden-move-strip-v001.png",
             Self::EngineerMove => "engineer-move-strip-v001.png",
+            Self::EngineerRepair => "engineer-repair-strip-v001.png",
             Self::SurveyorScan => "surveyor-scan-strip-v001.png",
             Self::NeedleAttack => "needle-attack-strip-v001.png",
             Self::CanticleCommand => "canticle-command-strip-v001.png",
@@ -63,6 +70,7 @@ impl TextureAsset {
             Self::HitReactions => "unit-hit-reactions-atlas-v001.png",
             Self::DownReactions => "unit-down-reactions-atlas-v001.png",
             Self::Structures => "last-light-structures-atlas-v001.png",
+            Self::CommandPortraits => "portraits/lantern-command-portrait-sheet-v001.png",
         }
     }
     fn bytes(self) -> &'static [u8] {
@@ -71,6 +79,7 @@ impl TextureAsset {
             Self::Units => include_bytes!("../assets/last-light-units-atlas-v001.png"),
             Self::WardenMove => include_bytes!("../assets/warden-move-strip-v001.png"),
             Self::EngineerMove => include_bytes!("../assets/engineer-move-strip-v001.png"),
+            Self::EngineerRepair => include_bytes!("../assets/engineer-repair-strip-v001.png"),
             Self::SurveyorScan => include_bytes!("../assets/surveyor-scan-strip-v001.png"),
             Self::NeedleAttack => include_bytes!("../assets/needle-attack-strip-v001.png"),
             Self::CanticleCommand => include_bytes!("../assets/canticle-command-strip-v001.png"),
@@ -78,6 +87,9 @@ impl TextureAsset {
             Self::HitReactions => include_bytes!("../assets/unit-hit-reactions-atlas-v001.png"),
             Self::DownReactions => include_bytes!("../assets/unit-down-reactions-atlas-v001.png"),
             Self::Structures => include_bytes!("../assets/last-light-structures-atlas-v001.png"),
+            Self::CommandPortraits => {
+                include_bytes!("../assets/portraits/lantern-command-portrait-sheet-v001.png")
+            }
         }
     }
 }

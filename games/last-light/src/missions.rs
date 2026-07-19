@@ -109,6 +109,36 @@ pub struct MissionDef {
     pub required_tier: u32,
 }
 
+impl MissionDef {
+    /// Expands authored tactical coordinates while preserving mission logic.
+    /// This keeps spawns, objectives, blockers, and extraction points in one
+    /// transform instead of letting individual systems drift out of sync.
+    fn expanded(mut self, scale: f32) -> Self {
+        for position in &mut self.relays {
+            *position *= scale;
+        }
+        for position in &mut self.salvage_nodes {
+            *position *= scale;
+        }
+        self.reactor_position = self.reactor_position.map(|position| position * scale);
+        self.fabricator_position *= scale;
+        for spawn in &mut self.player_spawns {
+            spawn.position *= scale;
+        }
+        for spawn in &mut self.enemy_spawns {
+            spawn.position *= scale;
+        }
+        for obstacle in &mut self.obstacles {
+            *obstacle = Aabb::new(obstacle.min * scale, obstacle.max * scale);
+        }
+        self.lumen_console = self.lumen_console.map(|position| position * scale);
+        if let VictoryCondition::EscortToExtraction { point, .. } = &mut self.victory {
+            *point *= scale;
+        }
+        self
+    }
+}
+
 /// All missions in campaign order, for the mission-select screen.
 pub fn all() -> Vec<MissionDef> {
     vec![
@@ -136,6 +166,8 @@ pub fn reclaim_the_reactor() -> MissionDef {
             Vec2::new(-610.0, -180.0),
             Vec2::new(40.0, 260.0),
             Vec2::new(720.0, -180.0),
+            Vec2::new(-1_520.0, -720.0),
+            Vec2::new(1_480.0, 720.0),
         ],
         radio_lines: vec![
             RadioLine {
@@ -145,7 +177,7 @@ pub fn reclaim_the_reactor() -> MissionDef {
             },
             RadioLine {
                 speaker: "IVO RENN",
-                text: "SURVEYOR CAN SIP SALVAGE BLOOMS. KEEP IT CLOSE, KEEP IT FUNDED.",
+                text: "SURVEYOR LOADS TWENTY-FOUR. KEEP ITS RETURN LANE TO THE FABRICATOR CLEAR.",
                 trigger: DialogueTrigger::Time(9.0),
             },
             RadioLine {
@@ -157,6 +189,11 @@ pub fn reclaim_the_reactor() -> MissionDef {
                 speaker: "LUMEN",
                 text: "THREE LIGHTS. ONE VOICE. COME FIND ME BENEATH THE REACTOR.",
                 trigger: DialogueTrigger::RelaysOnline(3),
+            },
+            RadioLine {
+                speaker: "MARA VEY",
+                text: "THE LATTICE IS OUR GROUND NOW. HOLD THE LIGHT AND BREAK ITS CONDUCTOR.",
+                trigger: DialogueTrigger::Time(38.0),
             },
         ],
         reactor_position: Some(Vec2::new(520.0, -40.0)),
@@ -202,6 +239,8 @@ pub fn voice_in_conduit_twelve() -> MissionDef {
             Vec2::new(-640.0, 260.0),
             Vec2::new(80.0, 20.0),
             Vec2::new(720.0, 40.0),
+            Vec2::new(-1_470.0, -680.0),
+            Vec2::new(1_500.0, 660.0),
         ],
         radio_lines: vec![
             RadioLine {
@@ -213,6 +252,11 @@ pub fn voice_in_conduit_twelve() -> MissionDef {
                 speaker: "IVO RENN",
                 text: "BELL MINES AHEAD. WARDENS FIRST, SURVEYOR WIDE.",
                 trigger: DialogueTrigger::Time(10.0),
+            },
+            RadioLine {
+                speaker: "LUMEN",
+                text: "SENA QUILL. YOUR SIGNAL FITS THE EMPTY PLACE IN ME.",
+                trigger: DialogueTrigger::Time(24.0),
             },
         ],
         reactor_position: None,
@@ -265,6 +309,8 @@ pub fn terms_of_salvage() -> MissionDef {
             Vec2::new(-720.0, -260.0),
             Vec2::new(-100.0, 180.0),
             Vec2::new(770.0, 250.0),
+            Vec2::new(260.0, -520.0),
+            Vec2::new(1_030.0, -320.0),
         ],
         radio_lines: vec![
             RadioLine {
@@ -309,4 +355,5 @@ pub fn terms_of_salvage() -> MissionDef {
         unlock_decision: Some("meridian-allied"),
         required_tier: 4,
     }
+    .expanded(1.28)
 }

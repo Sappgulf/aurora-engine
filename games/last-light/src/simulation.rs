@@ -14,7 +14,7 @@ use crate::mission_state::Relay;
 use crate::missions::{MissionDef, VictoryCondition};
 use crate::units::{UnitKind, CHOIR, PLAYER};
 
-pub const MAP_SIZE: Vec2 = Vec2::new(2600.0, 1460.0);
+pub const MAP_SIZE: Vec2 = Vec2::new(3600.0, 2200.0);
 pub const NAV_CELL_SIZE: f32 = 40.0;
 const DEFAULT_FIXED_TICK_HZ: u32 = 60;
 const EVENT_LOG_CAPACITY: usize = 256;
@@ -74,6 +74,7 @@ pub enum SimulationEventKind {
     UnitSpawned { unit_id: u32, kind: UnitKind },
     AttackLanded { attacker: u32, target: u32 },
     DamageApplied { target: u32 },
+    UnitRepaired { engineer: u32, target: u32 },
     UnitDestroyed { unit_id: u32, kind: UnitKind },
     BossReinforced,
     MissionVictory,
@@ -109,6 +110,7 @@ pub struct MissionSimulation {
     pub production: ProductionQueue,
     pub power: PowerGrid,
     pub fabricator_position: Vec2,
+    pub rally_point: Option<Vec2>,
     pub outcome: MissionOutcome,
     tick: u64,
     fixed_dt: f32,
@@ -121,6 +123,7 @@ pub struct MissionSimulation {
     path_advance_ids: Vec<UnitId>,
     combat_snapshot: Vec<(UnitId, Vec2, bool)>,
     combat_attacks: Vec<(UnitId, UnitId, f32)>,
+    support_repairs: Vec<(UnitId, UnitId, f32)>,
 }
 
 impl MissionSimulation {
@@ -168,6 +171,7 @@ impl MissionSimulation {
             production: ProductionQueue::new(5),
             power,
             fabricator_position: mission.fabricator_position,
+            rally_point: None,
             outcome: MissionOutcome::InProgress,
             tick: 0,
             fixed_dt: 1.0 / DEFAULT_FIXED_TICK_HZ as f32,
@@ -180,6 +184,7 @@ impl MissionSimulation {
             path_advance_ids: Vec::with_capacity(PATH_ADVANCE_BUFFER_CAPACITY),
             combat_snapshot: Vec::with_capacity(COMBAT_BUFFER_CAPACITY),
             combat_attacks: Vec::with_capacity(COMBAT_BUFFER_CAPACITY),
+            support_repairs: Vec::with_capacity(COMBAT_BUFFER_CAPACITY),
         };
         for spawn in &mission.player_spawns {
             let id = simulation.spawn(
@@ -257,6 +262,23 @@ impl MissionSimulation {
         let selected_ids = self.world.selection().ids().to_vec();
         self.world.issue_move(destination, 74.0);
         self.route_around_obstacles(&selected_ids);
+    }
+
+    /// Issues a path-aware move to one unit without disturbing squad selection.
+    pub fn issue_unit_move(&mut self, id: UnitId, destination: Vec2) -> bool {
+        let Some(unit) = self.world.unit_mut(id) else {
+            return false;
+        };
+        if !unit.alive() {
+            return false;
+        }
+        unit.order = UnitOrder::Move(destination);
+        self.route_around_obstacles(&[id]);
+        true
+    }
+
+    pub fn set_rally_point(&mut self, destination: Vec2) {
+        self.rally_point = Some(destination);
     }
 
     pub fn issue_attack_kind(&mut self, kind: UnitKind) -> bool {
@@ -352,11 +374,12 @@ impl MissionSimulation {
     }
 
     #[cfg(test)]
-    fn allocation_buffer_capacities(&self) -> (usize, usize, usize) {
+    fn allocation_buffer_capacities(&self) -> (usize, usize, usize, usize) {
         (
             self.path_advance_ids.capacity(),
             self.combat_snapshot.capacity(),
             self.combat_attacks.capacity(),
+            self.support_repairs.capacity(),
         )
     }
 
@@ -471,7 +494,7 @@ impl MissionSimulation {
             let id = self.spawn(
                 kind,
                 PLAYER,
-                self.fabricator_position + offset,
+                self.rally_point.unwrap_or(self.fabricator_position) + offset,
                 health,
                 speed,
                 self.modifiers,
@@ -548,6 +571,40 @@ impl MissionSimulation {
                 self.record(SimulationEventKind::UnitDestroyed {
                     unit_id: target.0,
                     kind,
+                });
+            }
+        }
+    }
+
+    fn update_engineer_repairs(&mut self, dt: f32) {
+        const REPAIR_RANGE: f32 = 145.0;
+        const REPAIR_PER_SECOND: f32 = 12.0;
+        self.support_repairs.clear();
+        for engineer in self.world.units().iter().filter(|unit| {
+            unit.faction == PLAYER
+                && unit.alive()
+                && self.kinds.get(&unit.id) == Some(&UnitKind::Engineer)
+        }) {
+            if let Some(target) =
+                self.world
+                    .most_damaged_ally_in_range(engineer.id, PLAYER, REPAIR_RANGE)
+            {
+                self.support_repairs
+                    .push((engineer.id, target, REPAIR_PER_SECOND * dt.max(0.0)));
+            }
+        }
+        for index in 0..self.support_repairs.len() {
+            let (engineer, target, amount) = self.support_repairs[index];
+            let repaired = if let Some(unit) = self.world.unit_mut(target) {
+                unit.health = (unit.health + amount).min(unit.max_health);
+                true
+            } else {
+                false
+            };
+            if repaired {
+                self.record(SimulationEventKind::UnitRepaired {
+                    engineer: engineer.0,
+                    target: target.0,
                 });
             }
         }
@@ -631,6 +688,7 @@ impl MissionSimulation {
         self.advance_player_paths();
         self.update_relays(dt);
         self.update_economy(dt);
+        self.update_engineer_repairs(dt);
         self.update_combat(dt);
         self.update_boss_phase();
         self.evaluate_outcome();
@@ -763,6 +821,13 @@ impl DeterministicSimulation for MissionSimulation {
         }
         hasher.write_u64(u64::from(self.resources.amount()));
         hasher.write_u64(u64::from(self.resource_tick.to_bits()));
+        if let Some(rally) = self.rally_point {
+            hasher.write_bool(true);
+            hasher.write_u64(u64::from(rally.x.to_bits()));
+            hasher.write_u64(u64::from(rally.y.to_bits()));
+        } else {
+            hasher.write_bool(false);
+        }
         hasher.write_u64(self.production.items().len() as u64);
         for item in self.production.items() {
             hasher.write_u64(u64::from(item.product.0));
@@ -825,6 +890,7 @@ mod tests {
         assert!(first_allocation_budget.0 >= PATH_ADVANCE_BUFFER_CAPACITY);
         assert!(first_allocation_budget.1 >= COMBAT_BUFFER_CAPACITY);
         assert!(first_allocation_budget.2 >= COMBAT_BUFFER_CAPACITY);
+        assert!(first_allocation_budget.3 >= COMBAT_BUFFER_CAPACITY);
         assert!(first.relays.iter().all(|relay| relay.active));
         assert_eq!(first.outcome, MissionOutcome::Victory);
         assert_eq!(
@@ -905,5 +971,26 @@ mod tests {
             .unwrap();
 
         assert!(simulation.apply_command(&command).is_err());
+    }
+
+    #[test]
+    fn engineer_repairs_the_most_damaged_nearby_lantern() {
+        let mission = crate::missions::reclaim_the_reactor();
+        let mut simulation =
+            MissionSimulation::from_mission(&mission, SimulationModifiers::default());
+        let warden = simulation
+            .kinds
+            .iter()
+            .find_map(|(id, kind)| (*kind == UnitKind::Warden).then_some(*id))
+            .unwrap();
+        simulation.world.unit_mut(warden).unwrap().health = 80.0;
+
+        simulation.fixed_step_with_dt(1.0 / 60.0);
+
+        assert!(simulation.world.unit(warden).unwrap().health > 80.0);
+        assert!(simulation.events().iter().any(|event| matches!(
+            event.kind,
+            SimulationEventKind::UnitRepaired { target, .. } if target == warden.0
+        )));
     }
 }

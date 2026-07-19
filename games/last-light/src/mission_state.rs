@@ -18,6 +18,20 @@ pub struct SalvageNode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarvestPhase {
+    ToNode,
+    Extracting,
+    ToDepot,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HarvestJob {
+    pub node: usize,
+    pub cargo: u32,
+    pub phase: HarvestPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StructureKind {
     Relay(usize),
     Fabricator,

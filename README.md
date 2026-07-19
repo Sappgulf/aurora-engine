@@ -29,6 +29,7 @@ cargo run -p last_light
 | **WASD / screen edge** | Pan tactical camera |
 | **Mouse wheel** | Zoom around cursor |
 | **Minimap click** | Move the tactical camera |
+| **Fabricator + right click** | Set the rally point for newly deployed units |
 | **Esc** | Tactical pause |
 
 On launch, `Up/Down` (or `Left/Right`) pick a mission from the mission-select

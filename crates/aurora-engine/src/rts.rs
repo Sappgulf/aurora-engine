@@ -438,8 +438,42 @@ impl RtsWorld {
         self.units.iter_mut().find(|unit| unit.id == id)
     }
 
+    /// Finds the most critically damaged living ally in range.
+    ///
+    /// Candidates are ranked by remaining health percentage, then by stable
+    /// unit ID so support behavior remains deterministic across platforms.
+    pub fn most_damaged_ally_in_range(
+        &self,
+        origin: UnitId,
+        faction: FactionId,
+        range: f32,
+    ) -> Option<UnitId> {
+        let origin_position = self.unit(origin)?.position;
+        let range = range.max(0.0);
+        self.units
+            .iter()
+            .filter(|unit| {
+                unit.id != origin
+                    && unit.faction == faction
+                    && unit.alive()
+                    && unit.max_health > 0.0
+                    && unit.health < unit.max_health
+                    && unit.position.distance(origin_position) <= range
+            })
+            .min_by(|left, right| {
+                (left.health / left.max_health)
+                    .total_cmp(&(right.health / right.max_health))
+                    .then_with(|| left.id.0.cmp(&right.id.0))
+            })
+            .map(|unit| unit.id)
+    }
+
     pub fn selection(&self) -> &Selection {
         &self.selection
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
     }
 
     /// Units currently assigned to `slot` (regardless of whether they're
@@ -939,5 +973,36 @@ mod tests {
         assert!(world.recall_control_group(1, PLAYER));
         assert_eq!(world.selection().ids().len(), 1);
         assert!(!world.selection().contains(first));
+    }
+
+    #[test]
+    fn support_targeting_chooses_lowest_health_ratio_deterministically() {
+        let mut world = RtsWorld::default();
+        let engineer = world.spawn(PLAYER, Vec2::ZERO);
+        let first = world.spawn(PLAYER, Vec2::new(20.0, 0.0));
+        let second = world.spawn(PLAYER, Vec2::new(30.0, 0.0));
+        let enemy = world.spawn(FactionId(2), Vec2::new(10.0, 0.0));
+        let distant = world.spawn(PLAYER, Vec2::new(500.0, 0.0));
+        world.unit_mut(first).unwrap().health = 50.0;
+        world.unit_mut(second).unwrap().health = 25.0;
+        world.unit_mut(second).unwrap().max_health = 50.0;
+        world.unit_mut(enemy).unwrap().health = 1.0;
+        world.unit_mut(distant).unwrap().health = 1.0;
+
+        assert_eq!(
+            world.most_damaged_ally_in_range(engineer, PLAYER, 100.0),
+            Some(first)
+        );
+
+        world.unit_mut(first).unwrap().health = 100.0;
+        assert_eq!(
+            world.most_damaged_ally_in_range(engineer, PLAYER, 100.0),
+            Some(second)
+        );
+        world.unit_mut(second).unwrap().health = 0.0;
+        assert_eq!(
+            world.most_damaged_ally_in_range(engineer, PLAYER, 100.0),
+            None
+        );
     }
 }

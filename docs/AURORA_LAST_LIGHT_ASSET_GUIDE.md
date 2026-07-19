@@ -119,6 +119,7 @@ unrelated images.
 | `last-light-units-atlas-v001.png` | 3×2 | Six unit idle silhouettes |
 | `warden-move-strip-v001.png` | 6×1 | Per-Warden locomotion clip |
 | `engineer-move-strip-v001.png` | 6×1 | Engineer manipulator locomotion |
+| `engineer-repair-strip-v001.png` | 6×1 | Tool deploy, repair beam, sparks, and recovery |
 | `surveyor-scan-strip-v001.png` | 6×1 | Survey mast sweep and cyan scan fan |
 | `needle-attack-strip-v001.png` | 6×1 | Choir Needle charge, lance, and recoil |
 | `canticle-command-strip-v001.png` | 6×1 | Canticle charge, command rings, and release |
@@ -127,6 +128,7 @@ unrelated images.
 | `unit-down-reactions-atlas-v001.png` | 4×6 | Full-roster non-gory shutdown and persistent wrecks |
 | `last-light-structures-atlas-v001.png` | 2×2 | Relay, fabricator, reactor, Choir tower |
 | `reactor-sector-v001.png` | single | 2600×1460 authored mission floor |
+| `portraits/lantern-command-portrait-sheet-v001.png` | 3×2 | Mara, Ivo, Sena, Olan, Vale, and Lumen comms portraits |
 
 ### Reaction-atlas contract
 
@@ -217,6 +219,11 @@ matte, flood-removes only background connected to the slot edges, removes small
 detached islands, computes one scale from the largest frame, and writes a
 centered RGBA 1536×256 strip. Always inspect the final strip on a contrasting
 background and confirm `(0, 255)` alpha extrema before integration.
+
+Preserve the untouched generated candidate under
+`tools/asset-sources/last-light/`. Only normalized runtime atlases belong in
+`games/last-light/assets/`; this keeps production provenance available without
+shipping multi-megabyte source sheets to players.
 
 ## Acceptance gates
 
