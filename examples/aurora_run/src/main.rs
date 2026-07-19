@@ -8,7 +8,9 @@ use glam::Vec2;
 use winit::keyboard::KeyCode;
 
 const WORLD: Vec2 = Vec2::new(1180.0, 660.0);
-const PLAYER_SPEED: f32 = 340.0;
+const PLAYER_MAX_SPEED: f32 = 430.0;
+const PLAYER_ACCEL_RESPONSE: f32 = 13.0;
+const PLAYER_BRAKE_RESPONSE: f32 = 8.5;
 const PLAYER_SIZE: f32 = 40.0;
 const COMBAT_ATLAS_SIZE: Vec2 = Vec2::new(1774.0, 887.0);
 
@@ -33,6 +35,7 @@ struct AuroraRun {
     drone_atlas: TextureAtlas,
     player_anim: Animation,
     player: Vec2,
+    player_velocity: Vec2,
     collectibles: Vec<Collectible>,
     hazards: Vec<Hazard>,
     particles: ParticleSystem,
@@ -58,6 +61,7 @@ impl AuroraRun {
             drone_atlas: TextureAtlas::new(TextureHandle::default(), 4, 2, COMBAT_ATLAS_SIZE),
             player_anim: Animation::new([0, 1, 2, 3, 2, 1], 10.0),
             player: Vec2::ZERO,
+            player_velocity: Vec2::ZERO,
             collectibles: Vec::new(),
             hazards: Vec::new(),
             particles: ParticleSystem::new(1500),
@@ -74,6 +78,7 @@ impl AuroraRun {
 
     fn reset(&mut self, audio_start: bool, audio: &aurora_engine::Audio) {
         self.player = Vec2::ZERO;
+        self.player_velocity = Vec2::ZERO;
         self.score = 0;
         self.lives = 3;
         self.hurt_cooldown = 0.0;
@@ -146,6 +151,7 @@ impl Game for AuroraRun {
         renderer.camera.zoom = 1.34;
 
         self.player = Vec2::ZERO;
+        self.player_velocity = Vec2::ZERO;
         self.score = 0;
         self.lives = 3;
         self.collectibles.clear();
@@ -186,11 +192,27 @@ impl Game for AuroraRun {
             return;
         }
 
-        // Move
+        // Accelerated steering preserves the fixed-step collision model while
+        // adding a short, controllable sense of mass to each direction change.
         let dir = ctx.input.axis_wasd();
-        self.player += dir * PLAYER_SPEED * dt;
+        let target_velocity = dir * PLAYER_MAX_SPEED;
+        let response = if dir.length_squared() > 0.0 {
+            PLAYER_ACCEL_RESPONSE
+        } else {
+            PLAYER_BRAKE_RESPONSE
+        };
+        let steering = 1.0 - (-response * dt).exp();
+        self.player_velocity = self.player_velocity.lerp(target_velocity, steering);
+        self.player += self.player_velocity * dt;
         let half = WORLD * 0.5 - Vec2::splat(24.0);
-        self.player = self.player.clamp(-half, half);
+        let clamped = self.player.clamp(-half, half);
+        if clamped.x != self.player.x {
+            self.player_velocity.x = 0.0;
+        }
+        if clamped.y != self.player.y {
+            self.player_velocity.y = 0.0;
+        }
+        self.player = clamped;
 
         if dir.length_squared() > 0.0 {
             self.player_anim.tick(dt);
@@ -297,8 +319,18 @@ impl Game for AuroraRun {
         } else {
             Vec2::ZERO
         };
-        ctx.renderer.camera.position =
-            ctx.renderer.camera.position.lerp(self.player, 0.14) + shake_off;
+        let camera_target = self.player + self.player_velocity * 0.12;
+        let camera_response = 1.0 - (-dt * 7.5).exp();
+        ctx.renderer.camera.position = ctx
+            .renderer
+            .camera
+            .position
+            .lerp(camera_target, camera_response);
+        ctx.renderer.camera.position += shake_off;
+        let speed_ratio = (self.player_velocity.length() / PLAYER_MAX_SPEED).clamp(0.0, 1.0);
+        let target_zoom = 1.34 - speed_ratio * 0.08;
+        ctx.renderer.camera.zoom +=
+            (target_zoom - ctx.renderer.camera.zoom) * (1.0 - (-dt * 4.0).exp());
 
         // Recover chromatic
         let target_ca = 0.003;
@@ -366,6 +398,24 @@ impl Game for AuroraRun {
         // Hazards
         for h in &self.hazards {
             let rot = t * 2.0 + h.pos.x * 0.01;
+            let heading = h.vel.normalize_or_zero();
+            let heading_rotation = heading.y.atan2(heading.x);
+            for trail in 1..=3 {
+                let amount = trail as f32;
+                ctx.renderer.draw_sprite(
+                    self.tex_orb,
+                    Sprite::new(
+                        h.pos - heading * h.size * amount * 0.72,
+                        Vec2::new(
+                            h.size * (4.0 - amount * 0.65),
+                            h.size * (1.7 - amount * 0.22),
+                        ),
+                    )
+                    .with_rotation(heading_rotation)
+                    .with_color(Color::rgba(2.2, 0.05, 0.16, 0.11 - amount * 0.018))
+                    .with_z(-2.5),
+                );
+            }
             ctx.renderer.draw_sprite(
                 self.tex_orb,
                 Sprite::new(h.pos, Vec2::splat(h.size * 5.0))
@@ -397,10 +447,25 @@ impl Game for AuroraRun {
         } else {
             Color::WHITE
         };
+        let speed_ratio = (self.player_velocity.length() / PLAYER_MAX_SPEED).clamp(0.0, 1.0);
+        if speed_ratio > 0.06 {
+            let heading = self.player_velocity.normalize();
+            ctx.renderer.draw_sprite(
+                self.tex_orb,
+                Sprite::new(
+                    self.player - heading * (34.0 + speed_ratio * 20.0),
+                    Vec2::new(100.0 + speed_ratio * 90.0, 28.0),
+                )
+                .with_rotation(heading.y.atan2(heading.x))
+                .with_color(Color::rgba(0.1, 1.4, 1.3, 0.14 + speed_ratio * 0.13))
+                .with_z(-1.0),
+            );
+        }
         let mut spr = self
             .player_atlas
             .sprite(self.player, Vec2::splat(PLAYER_SIZE * 2.45), frame);
         spr.color = flash;
+        spr.rotation = -self.player_velocity.x * 0.00055;
         spr.z = 1.0;
         ctx.renderer.draw_sprite(self.tex_player, spr);
 
