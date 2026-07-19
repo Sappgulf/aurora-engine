@@ -111,7 +111,11 @@ pub struct MissionDef {
 
 /// All missions in campaign order, for the mission-select screen.
 pub fn all() -> Vec<MissionDef> {
-    vec![reclaim_the_reactor(), voice_in_conduit_twelve()]
+    vec![
+        reclaim_the_reactor(),
+        voice_in_conduit_twelve(),
+        terms_of_salvage(),
+    ]
 }
 
 pub fn reclaim_the_reactor() -> MissionDef {
@@ -240,5 +244,69 @@ pub fn voice_in_conduit_twelve() -> MissionDef {
         reward_lumen: 90,
         unlock_decision: None,
         required_tier: 3,
+    }
+}
+
+/// Mission four is intentionally built from the same mission contract as the
+/// first two: authored spawns, power objectives, dialogue, and a game-owned
+/// campaign consequence. It proves that campaign growth does not require a
+/// bespoke screen or renderer branch for every mission.
+pub fn terms_of_salvage() -> MissionDef {
+    MissionDef {
+        id: "terms-of-salvage",
+        title: "TERMS OF SALVAGE",
+        briefing_story: "PREFECT VALE: CLAIM THE VAULT RELAYS BEFORE THE CHOIR DOES. THEN WE TALK.",
+        victory_title: "CHARTER SECURED",
+        victory_story: "VALE: A TEMPORARY ACCORD. DO NOT MAKE ME REGRET IT.",
+        defeat_title: "VAULT LOST",
+        defeat_story: "THE COMPACT CLOSES THE DOORS. THE CHOIR KEEPS THE LIGHT.",
+        relays: vec![Vec2::new(-540.0, 250.0), Vec2::new(610.0, -180.0)],
+        salvage_nodes: vec![
+            Vec2::new(-720.0, -260.0),
+            Vec2::new(-100.0, 180.0),
+            Vec2::new(770.0, 250.0),
+        ],
+        radio_lines: vec![
+            RadioLine {
+                speaker: "PREFECT VALE",
+                text: "THE VAULT IS NOT YOURS. PROVE YOU CAN KEEP ITS POWER STABLE.",
+                trigger: DialogueTrigger::Time(2.0),
+            },
+            RadioLine {
+                speaker: "MARA VEY",
+                text: "WE ARE NOT HERE TO OWN A LIGHT. WE ARE HERE TO KEEP IT ON.",
+                trigger: DialogueTrigger::RelaysOnline(1),
+            },
+            RadioLine {
+                speaker: "IVO ROOK",
+                text: "SECOND RELAY IS LIVE. FABRICATOR HAS A CLEAN LINE TO THE VAULT.",
+                trigger: DialogueTrigger::RelaysOnline(2),
+            },
+        ],
+        reactor_position: Some(Vec2::new(430.0, 10.0)),
+        fabricator_position: Vec2::new(-1_030.0, -160.0),
+        player_spawns: vec![
+            PlayerSpawn::new(UnitKind::Warden, Vec2::new(-890.0, -260.0), 175.0, 175.0),
+            PlayerSpawn::new(UnitKind::Engineer, Vec2::new(-950.0, -340.0), 130.0, 150.0),
+            PlayerSpawn::new(UnitKind::Surveyor, Vec2::new(-820.0, -390.0), 90.0, 210.0),
+        ],
+        enemy_spawns: vec![
+            EnemySpawn::new(UnitKind::Needle, Vec2::new(-330.0, 300.0), 95.0, 130.0),
+            EnemySpawn::new(UnitKind::BellMine, Vec2::new(-60.0, -260.0), 95.0, 80.0),
+            EnemySpawn::new(UnitKind::Needle, Vec2::new(310.0, 220.0), 95.0, 130.0),
+            EnemySpawn::new(UnitKind::Canticle, Vec2::new(560.0, 30.0), 380.0, 120.0),
+        ],
+        obstacles: vec![Aabb::from_center_size(
+            Vec2::new(20.0, 480.0),
+            Vec2::new(1_650.0, 80.0),
+        )],
+        lumen_console: None,
+        victory: VictoryCondition::RestoreRelaysAndDefeatBoss {
+            boss_kind: UnitKind::Canticle,
+        },
+        unlock_next: 5,
+        reward_lumen: 100,
+        unlock_decision: Some("meridian-allied"),
+        required_tier: 4,
     }
 }

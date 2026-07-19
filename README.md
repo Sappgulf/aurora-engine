@@ -102,10 +102,10 @@ cargo run -p skirmish        # free-play two-base RTS skirmish vs. the engine's 
 | Relationship-gated Lumen Guardian/Witness protocols | ✅ |
 | Meridian and Verdant alliance doctrine foundations | ✅ |
 | Versioned campaign progress with v1 save migration | ✅ |
-| Data-driven mission definitions + in-game mission select | ✅ 2-mission campaign |
+| Data-driven mission definitions + in-game mission select | ✅ 3-mission campaign |
 | Generic `SimpleAggroAi` (target scoring, retreat, focus-fire, `NavGrid` pathing) | ✅ |
 | Skirmish free-play mode (reuses RTS core, no campaign/art dependency) | ✅ |
-| Last Light point-and-click campaign missions | ✅ 2-mission vertical slice |
+| Last Light point-and-click campaign missions | ✅ 3-mission vertical slice |
 
 ## Library sketch
 
@@ -146,6 +146,28 @@ npm run test:browser
 ```
 
 See [playtests/README.md](playtests/README.md) for checkpoints and assertions.
+
+## Local release gate
+
+Aurora deliberately uses a reproducible local release gate instead of hosted
+GitHub Actions. Run the native, feature-gated, deterministic, and WASM checks
+with:
+
+```bash
+./scripts/validate-local.sh
+```
+
+Then build the browser deliverable and run its screenshot-based gameplay checks:
+
+```bash
+./scripts/build-web.sh
+npm run test:browser
+```
+
+`./scripts/check-web-budget.sh` enforces the current 18 MiB WASM and 12 MiB
+source-art budgets after the web build. The limits are deliberately visible: an
+asset addition that exceeds either one needs a delivery decision, not a silent
+download-size regression.
 
 ## MCP support for coding agents
 

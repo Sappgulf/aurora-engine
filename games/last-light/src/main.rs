@@ -34,6 +34,21 @@ const UNIT_ATLAS_SIZE: Vec2 = Vec2::new(1536.0, 1024.0);
 const STRUCTURE_ATLAS_SIZE: Vec2 = Vec2::splat(1254.0);
 const REACTION_ATLAS_SIZE: Vec2 = Vec2::new(1024.0, 1536.0);
 const BEACON_COST: u32 = 50;
+const COMMAND_CARD_KEYS: [KeyCode; 6] = [
+    KeyCode::KeyQ,
+    KeyCode::KeyE,
+    KeyCode::KeyF,
+    KeyCode::KeyH,
+    KeyCode::KeyT,
+    KeyCode::KeyB,
+];
+const COMMAND_CARD_LABELS: [&str; 5] = [
+    "Q  BUILD WARDEN — 90",
+    "E  BUILD ENGINEER — 70",
+    "F  BUILD SURVEYOR — 60",
+    "H  HOLD SELECTED",
+    "T  STOP SELECTED",
+];
 
 struct LastLight {
     tex_environment: TextureHandle,
@@ -762,29 +777,16 @@ impl LastLight {
         }
     }
 
-    /// One row per command-card action. A single source of truth for both
-    /// the on-screen card text and its click hit-boxes, mirroring
-    /// `briefing_rows`/`briefing_row_rect`.
-    fn command_card_rows(&self) -> Vec<(KeyCode, String)> {
-        vec![
-            (KeyCode::KeyQ, "Q  BUILD WARDEN — 90".to_owned()),
-            (KeyCode::KeyE, "E  BUILD ENGINEER — 70".to_owned()),
-            (KeyCode::KeyF, "F  BUILD SURVEYOR — 60".to_owned()),
-            (KeyCode::KeyH, "H  HOLD SELECTED".to_owned()),
-            (KeyCode::KeyT, "T  STOP SELECTED".to_owned()),
-            (
-                KeyCode::KeyB,
-                format!(
-                    "B  {} BEACON — {}",
-                    if self.placing_beacon {
-                        "CANCEL"
-                    } else {
-                        "PLACE"
-                    },
-                    self.beacon_cost()
-                ),
-            ),
-        ]
+    /// Static command-card text prevents per-frame row/vector allocation.
+    /// Beacon cost remains visible in placement feedback and the tooltip-like
+    /// status line, while the action text itself stays allocation-free.
+    fn command_card_label(&self, index: usize) -> &'static str {
+        match index {
+            0..=4 => COMMAND_CARD_LABELS[index],
+            5 if self.placing_beacon => "B  CANCEL BEACON",
+            5 => "B  PLACE BEACON",
+            _ => "",
+        }
     }
 
     fn command_card_row_rect(card_text: Vec2, index: usize, scale: f32) -> Aabb {
@@ -881,13 +883,12 @@ impl LastLight {
     }
 
     fn handle_command_keys(&mut self, ctx: &mut FrameCtx<'_>) {
-        let rows = self.command_card_rows();
         if ctx.input.key_pressed(KeyCode::KeyR) {
             self.focus_next_objective(ctx);
         }
-        for (key, _) in &rows {
-            if ctx.input.key_pressed(*key) {
-                self.apply_command_action(*key);
+        for key in COMMAND_CARD_KEYS {
+            if ctx.input.key_pressed(key) {
+                self.apply_command_action(key);
             }
         }
 
@@ -911,7 +912,7 @@ impl LastLight {
                 .screen_to_world(ctx.input.mouse_position);
             let card_text = Self::command_card_text_origin(ctx.renderer);
             let scale = Self::hud_scale(ctx.renderer);
-            for (index, (key, _)) in rows.iter().enumerate() {
+            for (index, key) in COMMAND_CARD_KEYS.iter().enumerate() {
                 if Self::command_card_row_rect(card_text, index, scale).contains_point(mouse_world)
                 {
                     self.apply_command_action(*key);
@@ -2703,7 +2704,7 @@ impl Game for LastLight {
                 .renderer
                 .camera
                 .screen_to_world(ctx.input.mouse_position);
-            for (index, (_, label)) in self.command_card_rows().iter().enumerate() {
+            for (index, _) in COMMAND_CARD_KEYS.iter().enumerate() {
                 let rect = Self::command_card_row_rect(card_text, index, hud_scale);
                 let hovered = rect.contains_point(mouse_world);
                 ctx.renderer.draw_sprite(
@@ -2718,7 +2719,7 @@ impl Game for LastLight {
                 );
                 self.draw_text(
                     ctx.renderer,
-                    label,
+                    self.command_card_label(index),
                     rect.min + Vec2::new(8.0, 8.0) * hud_scale,
                     1.9 * hud_scale,
                     Color::rgb(0.88, 0.92, 0.92),

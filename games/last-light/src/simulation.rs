@@ -19,6 +19,7 @@ pub const NAV_CELL_SIZE: f32 = 40.0;
 const DEFAULT_FIXED_TICK_HZ: u32 = 60;
 const EVENT_LOG_CAPACITY: usize = 256;
 const COMBAT_BUFFER_CAPACITY: usize = 32;
+const PATH_ADVANCE_BUFFER_CAPACITY: usize = 32;
 pub const FABRICATOR_NODE: PowerNodeId = PowerNodeId(0);
 
 pub const SELECT_ALL_ACTION: &str = "last_light.select_all";
@@ -117,6 +118,7 @@ pub struct MissionSimulation {
     boss_reinforced: bool,
     events: VecDeque<SimulationEvent>,
     pending_events: VecDeque<SimulationEvent>,
+    path_advance_ids: Vec<UnitId>,
     combat_snapshot: Vec<(UnitId, Vec2, bool)>,
     combat_attacks: Vec<(UnitId, UnitId, f32)>,
 }
@@ -175,6 +177,7 @@ impl MissionSimulation {
             boss_reinforced: false,
             events: VecDeque::with_capacity(EVENT_LOG_CAPACITY),
             pending_events: VecDeque::with_capacity(EVENT_LOG_CAPACITY),
+            path_advance_ids: Vec::with_capacity(PATH_ADVANCE_BUFFER_CAPACITY),
             combat_snapshot: Vec::with_capacity(COMBAT_BUFFER_CAPACITY),
             combat_attacks: Vec::with_capacity(COMBAT_BUFFER_CAPACITY),
         };
@@ -316,8 +319,13 @@ impl MissionSimulation {
         if self.player_paths.is_empty() {
             return;
         }
-        let ids: Vec<UnitId> = self.player_paths.keys().copied().collect();
-        for id in ids {
+        // Reuse a simulation-owned scratch buffer. We cannot mutate a map
+        // while iterating its keys, but the roster is bounded and this keeps
+        // path following allocation-stable during the fixed update.
+        let mut ids = std::mem::take(&mut self.path_advance_ids);
+        ids.clear();
+        ids.extend(self.player_paths.keys().copied());
+        for &id in &ids {
             let Some(unit) = self.world.unit(id) else {
                 self.player_paths.remove(&id);
                 continue;
@@ -340,6 +348,16 @@ impl MissionSimulation {
                 self.player_paths.remove(&id);
             }
         }
+        self.path_advance_ids = ids;
+    }
+
+    #[cfg(test)]
+    fn allocation_buffer_capacities(&self) -> (usize, usize, usize) {
+        (
+            self.path_advance_ids.capacity(),
+            self.combat_snapshot.capacity(),
+            self.combat_attacks.capacity(),
+        )
     }
 
     pub fn selected_engineer_near(&self, position: Vec2) -> bool {
@@ -533,14 +551,6 @@ impl MissionSimulation {
                 });
             }
         }
-    }
-
-    #[cfg(test)]
-    fn combat_buffer_capacities(&self) -> (usize, usize) {
-        (
-            self.combat_snapshot.capacity(),
-            self.combat_attacks.capacity(),
-        )
     }
 
     fn update_boss_phase(&mut self) {
@@ -793,8 +803,8 @@ mod tests {
         let trace = reclaim_truth_trace();
         let mut first = MissionSimulation::from_mission(&mission, SimulationModifiers::default());
         let mut second = MissionSimulation::from_mission(&mission, SimulationModifiers::default());
-        let first_combat_budget = first.combat_buffer_capacities();
-        let second_combat_budget = second.combat_buffer_capacities();
+        let first_allocation_budget = first.allocation_buffer_capacities();
+        let second_allocation_budget = second.allocation_buffer_capacities();
 
         let first_report = run_trace(&mut first, &trace).unwrap();
         let second_report = run_trace(&mut second, &trace).unwrap();
@@ -804,10 +814,17 @@ mod tests {
             second_report.final_state_hash
         );
         assert_eq!(first_report.commands_applied, 8);
-        assert_eq!(first.combat_buffer_capacities(), first_combat_budget);
-        assert_eq!(second.combat_buffer_capacities(), second_combat_budget);
-        assert!(first_combat_budget.0 >= COMBAT_BUFFER_CAPACITY);
-        assert!(first_combat_budget.1 >= COMBAT_BUFFER_CAPACITY);
+        assert_eq!(
+            first.allocation_buffer_capacities(),
+            first_allocation_budget
+        );
+        assert_eq!(
+            second.allocation_buffer_capacities(),
+            second_allocation_budget
+        );
+        assert!(first_allocation_budget.0 >= PATH_ADVANCE_BUFFER_CAPACITY);
+        assert!(first_allocation_budget.1 >= COMBAT_BUFFER_CAPACITY);
+        assert!(first_allocation_budget.2 >= COMBAT_BUFFER_CAPACITY);
         assert!(first.relays.iter().all(|relay| relay.active));
         assert_eq!(first.outcome, MissionOutcome::Victory);
         assert_eq!(
