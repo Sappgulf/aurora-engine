@@ -22,3 +22,11 @@
 - Animation players remain presentation-owned and are rebuilt from simulation unit IDs after mission construction.
 - The live game and canonical trace now use the same `MissionSimulation`; the 180-tick Reclaim selection-and-move trace matched across two clean runs.
 - A clean Safari reload confirmed right-click movement, three-unit survival, HUD integrity, and minimap response after the extraction.
+
+## 2026-07-19 — FOUNDRY-003
+
+- Relay restoration, power activation, passive relay income, production spending, queue timing, and reinforcement spawning now share one renderer-free owner.
+- Presentation consumes bounded simulation events for relay audio, animation-player creation, and deployment status instead of duplicating gameplay transitions.
+- The checked-in 900-tick Reclaim trace restores relay one and produces exactly one additional Warden with matching hashes across two clean runs.
+- Safari confirmed the same production command spends salvage, updates the queue HUD, completes, and returns the queue to ready without HUD overlap.
+- The retained event history and presentation event queue are both capped at 256 entries; headless traces cannot grow either queue without bound.

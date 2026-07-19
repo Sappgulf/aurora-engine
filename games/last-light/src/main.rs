@@ -15,22 +15,24 @@ use assets::TextureAsset;
 use aurora_engine::{
     run, Aabb, AiParams, AnimationClip, AnimationPlayer, BitmapText, Color, FactionId, FogOfWar,
     FogState, FrameCtx, Game, MinimapTransform, PlacementError, PlacementRules, PointLight,
-    PowerGrid, PowerNode, PowerNodeId, ProductionQueue, QueueError, Renderer, ResourceBank,
-    SelectionBox, SimpleAggroAi, Sprite, Texture, TextureAtlas, TextureHandle, UnitId, UnitOrder,
+    PowerNodeId, QueueError, Renderer, SelectionBox, SimpleAggroAi, Sprite, Texture, TextureAtlas,
+    TextureHandle, UnitId, UnitOrder,
 };
 use campaign::*;
 use glam::Vec2;
-use mission_state::{FieldBeacon, Relay, SalvageNode, StructureKind};
+use mission_state::{FieldBeacon, SalvageNode, StructureKind};
 use missions::{DialogueTrigger, MissionDef, VictoryCondition};
 use save::{CampaignStore, SaveData};
-use simulation::{MissionSimulation, SpawnModifiers, MAP_SIZE};
+use simulation::{
+    MissionSimulation, ProductionCommandError, SimulationEventKind, SimulationModifiers,
+    FABRICATOR_NODE, MAP_SIZE,
+};
 use units::{UnitKind, CHOIR, PLAYER};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 const UNIT_ATLAS_SIZE: Vec2 = Vec2::new(1536.0, 1024.0);
 const STRUCTURE_ATLAS_SIZE: Vec2 = Vec2::splat(1254.0);
 const REACTION_ATLAS_SIZE: Vec2 = Vec2::new(1024.0, 1536.0);
-const FABRICATOR_NODE: PowerNodeId = PowerNodeId(0);
 const BEACON_COST: u32 = 50;
 
 struct LastLight {
@@ -65,16 +67,11 @@ struct LastLight {
     fog: FogOfWar,
     drag: Option<SelectionBox>,
     order_marker: Option<(Vec2, f32)>,
-    relays: Vec<Relay>,
     salvage_nodes: Vec<SalvageNode>,
     reactor_position: Option<Vec2>,
     fabricator_position: Vec2,
     field_beacons: Vec<FieldBeacon>,
     placing_beacon: bool,
-    resources: ResourceBank,
-    resource_tick: f32,
-    production: ProductionQueue,
-    power: PowerGrid,
     status: Option<(String, f32)>,
     save_store: CampaignStore,
     save_data: SaveData,
@@ -120,7 +117,7 @@ impl LastLight {
             .next_back()
             .unwrap_or(0);
         let initial_mission = missions::reclaim_the_reactor();
-        let initial_modifiers = SpawnModifiers {
+        let initial_modifiers = SimulationModifiers {
             player_health: if save_data.campaign.has_upgrade(UPGRADE_PLATING) {
                 1.2
             } else {
@@ -128,6 +125,20 @@ impl LastLight {
             },
             player_speed: if save_data.campaign.specialist_module(MARA, MARA_RESCUE) == MARA_RAPID {
                 1.12
+            } else {
+                1.0
+            },
+            starting_salvage,
+            relay_income_per_second: 3,
+            relay_restore_rate: if save_data.campaign.specialist_module(IVO, IVO_RIGGER)
+                == IVO_RIGGER
+            {
+                1.5
+            } else {
+                1.0
+            },
+            production_time_scale: if save_data.campaign.has_upgrade(UPGRADE_OVERCLOCK) {
+                0.75
             } else {
                 1.0
             },
@@ -211,16 +222,11 @@ impl LastLight {
             fog: FogOfWar::new(26, 15, -MAP_SIZE * 0.5, 100.0),
             drag: None,
             order_marker: None,
-            relays: Vec::new(),
             salvage_nodes: Vec::new(),
             reactor_position: None,
             fabricator_position: Vec2::ZERO,
             field_beacons: Vec::new(),
             placing_beacon: false,
-            resources: ResourceBank::new(starting_salvage),
-            resource_tick: 0.0,
-            production: ProductionQueue::new(5),
-            power: PowerGrid::default(),
             status: None,
             save_store,
             save_data,
@@ -247,7 +253,7 @@ impl LastLight {
     /// spawns `mission`'s roster. Campaign-wide state (`save_data`, loaded
     /// textures/atlases) is left untouched.
     fn start_mission(&mut self, mission: MissionDef) {
-        let modifiers = self.spawn_modifiers();
+        let modifiers = self.simulation_modifiers();
         self.simulation = MissionSimulation::from_mission(&mission, modifiers);
         self.mission = mission;
         self.animation_players.clear();
@@ -263,16 +269,6 @@ impl LastLight {
         self.fog = FogOfWar::new(26, 15, -MAP_SIZE * 0.5, 100.0);
         self.drag = None;
         self.order_marker = None;
-        self.relays = self
-            .mission
-            .relays
-            .iter()
-            .map(|&position| Relay {
-                position,
-                progress: 0.0,
-                active: false,
-            })
-            .collect();
         self.salvage_nodes = self
             .mission
             .salvage_nodes
@@ -287,32 +283,11 @@ impl LastLight {
         self.fabricator_position = self.mission.fabricator_position;
         self.field_beacons.clear();
         self.placing_beacon = false;
-        self.resource_tick = 0.0;
-        self.production = ProductionQueue::new(5);
         self.enemy_ai = SimpleAggroAi::new();
         self.selected_structure = None;
         self.canticle_reinforced = false;
         self.dialogue_cursor = 0;
         self.radio_message = None;
-
-        let mut power = PowerGrid::default();
-        power.add_node(PowerNode {
-            id: FABRICATOR_NODE,
-            supply: 1,
-            demand: 1,
-            online: true,
-        });
-        for index in 0..self.mission.relays.len() {
-            let relay = PowerNodeId(index as u16 + 1);
-            power.add_node(PowerNode {
-                id: relay,
-                supply: 1,
-                demand: 0,
-                online: false,
-            });
-            power.link(FABRICATOR_NODE, relay);
-        }
-        self.power = power;
 
         self.victory_saved = false;
         self.briefing = true;
@@ -329,8 +304,8 @@ impl LastLight {
         self.simulation.select_all_player_units();
     }
 
-    fn spawn_modifiers(&self) -> SpawnModifiers {
-        SpawnModifiers {
+    fn simulation_modifiers(&self) -> SimulationModifiers {
+        SimulationModifiers {
             player_health: if self.save_data.campaign.has_upgrade(UPGRADE_PLATING) {
                 1.2
             } else {
@@ -338,6 +313,18 @@ impl LastLight {
             },
             player_speed: if self.specialist_module(MARA, MARA_RESCUE) == MARA_RAPID {
                 1.12
+            } else {
+                1.0
+            },
+            starting_salvage: self.simulation.resources.amount(),
+            relay_income_per_second: self.relay_income(),
+            relay_restore_rate: if self.specialist_module(IVO, IVO_RIGGER) == IVO_RIGGER {
+                1.5
+            } else {
+                1.0
+            },
+            production_time_scale: if self.save_data.campaign.has_upgrade(UPGRADE_OVERCLOCK) {
+                0.75
             } else {
                 1.0
             },
@@ -352,7 +339,7 @@ impl LastLight {
         health: f32,
         speed: f32,
     ) -> UnitId {
-        let modifiers = self.spawn_modifiers();
+        let modifiers = self.simulation_modifiers();
         let id = self
             .simulation
             .spawn(kind, faction, position, health, speed, modifiers);
@@ -700,7 +687,8 @@ impl LastLight {
     fn placement_rules(&self) -> PlacementRules {
         let mut power_sources = vec![self.fabricator_position];
         power_sources.extend(
-            self.relays
+            self.simulation
+                .relays
                 .iter()
                 .filter(|relay| relay.active)
                 .map(|relay| relay.position),
@@ -710,7 +698,12 @@ impl LastLight {
         if let Some(reactor_position) = self.reactor_position {
             obstructions.push((reactor_position, 135.0));
         }
-        obstructions.extend(self.relays.iter().map(|relay| (relay.position, 85.0)));
+        obstructions.extend(
+            self.simulation
+                .relays
+                .iter()
+                .map(|relay| (relay.position, 85.0)),
+        );
         obstructions.extend(
             self.field_beacons
                 .iter()
@@ -752,28 +745,21 @@ impl LastLight {
     }
 
     fn queue_unit(&mut self, kind: UnitKind) {
-        if self.friendly_count() + self.production.items().len() >= 12 {
-            self.status = Some(("UNIT CAP 12".to_owned(), 2.5));
-            return;
-        }
-        if !self.power.is_powered(FABRICATOR_NODE) {
-            self.status = Some(("FABRICATOR OFFLINE".to_owned(), 2.5));
-            return;
-        }
-        let Some(mut recipe) = kind.recipe() else {
-            return;
-        };
-        if self.save_data.campaign.has_upgrade(UPGRADE_OVERCLOCK) {
-            recipe.build_millis = (recipe.build_millis as f32 * 0.75) as u32;
-        }
-        match self.production.enqueue(recipe, &mut self.resources) {
+        match self.simulation.queue_unit(kind) {
             Ok(()) => {
                 self.status = Some((format!("{} ADDED TO QUEUE", kind.label()), 2.5));
             }
-            Err(QueueError::InsufficientResources) => {
+            Err(ProductionCommandError::UnitCap) => {
+                self.status = Some(("UNIT CAP 12".to_owned(), 2.5));
+            }
+            Err(ProductionCommandError::FabricatorOffline) => {
+                self.status = Some(("FABRICATOR OFFLINE".to_owned(), 2.5));
+            }
+            Err(ProductionCommandError::UnsupportedUnit) => {}
+            Err(ProductionCommandError::Queue(QueueError::InsufficientResources)) => {
                 self.status = Some(("INSUFFICIENT SALVAGE".to_owned(), 2.5));
             }
-            Err(QueueError::Full) => {
+            Err(ProductionCommandError::Queue(QueueError::Full)) => {
                 self.status = Some(("PRODUCTION QUEUE FULL".to_owned(), 2.5));
             }
         }
@@ -945,42 +931,27 @@ impl LastLight {
         }
     }
 
-    fn update_economy(&mut self, dt: f32) {
-        let active_relays = self.relays.iter().filter(|relay| relay.active).count() as f32;
-        self.resource_tick += dt.max(0.0) * active_relays * self.relay_income() as f32;
-        let income = self.resource_tick.floor() as u32;
-        if income > 0 {
-            self.resources.credit(income);
-            self.resource_tick -= income as f32;
-        }
-
-        if self.power.is_powered(FABRICATOR_NODE) {
-            for product in self.production.update(dt) {
-                let Some(kind) = UnitKind::from_product(product) else {
-                    continue;
-                };
-                let offset = Vec2::new(80.0, (self.friendly_count() % 3) as f32 * 70.0 - 70.0);
-                let (health, speed) = match kind {
-                    UnitKind::Warden => (155.0, 175.0),
-                    UnitKind::Engineer => (115.0, 150.0),
-                    UnitKind::Surveyor => (90.0, 215.0),
-                    UnitKind::Needle | UnitKind::Canticle | UnitKind::BellMine => continue,
-                };
-                self.spawn(
-                    kind,
-                    PLAYER,
-                    self.fabricator_position + offset,
-                    health,
-                    speed,
-                );
-                self.status = Some((format!("{} DEPLOYED", kind.label()), 3.0));
-            }
-        }
-
+    fn update_status_timer(&mut self, dt: f32) {
         if let Some((_, remaining)) = self.status.as_mut() {
             *remaining -= dt;
             if *remaining <= 0.0 {
                 self.status = None;
+            }
+        }
+    }
+
+    fn process_simulation_events(&mut self, ctx: &mut FrameCtx<'_>) {
+        while let Some(event) = self.simulation.pop_pending_event() {
+            match event.kind {
+                SimulationEventKind::RelayActivated { .. } => ctx.audio.win_note(),
+                SimulationEventKind::UnitDeployed { unit_id, kind } => {
+                    self.animation_players
+                        .insert(UnitId(unit_id), AnimationPlayer::default());
+                    self.status = Some((format!("{} DEPLOYED", kind.label()), 3.0));
+                }
+                SimulationEventKind::CommandAccepted { .. }
+                | SimulationEventKind::ResourcesCredited { .. }
+                | SimulationEventKind::UnitQueued { .. } => {}
             }
         }
     }
@@ -1040,7 +1011,7 @@ impl LastLight {
                         && unit.alive()
                         && self.simulation.kinds.get(&unit.id) == Some(&boss_kind)
                 });
-                self.relays.iter().all(|relay| relay.active) && !boss_alive
+                self.simulation.relays.iter().all(|relay| relay.active) && !boss_alive
             }
             VictoryCondition::EscortToExtraction { point, radius } => self
                 .simulation
@@ -1051,14 +1022,7 @@ impl LastLight {
     }
 
     fn selected_engineer_near(&self, position: Vec2) -> bool {
-        self.simulation.world.selection().ids().iter().any(|id| {
-            self.simulation.kinds.get(id) == Some(&UnitKind::Engineer)
-                && self
-                    .simulation
-                    .world
-                    .unit(*id)
-                    .is_some_and(|unit| unit.alive() && unit.position.distance(position) < 110.0)
-        })
+        self.simulation.selected_engineer_near(position)
     }
 
     /// A high-priority, contextual explanation for the Engineer's relay job.
@@ -1066,15 +1030,19 @@ impl LastLight {
     /// that advance relay progress, so the HUD cannot promise an interaction
     /// the simulation will not perform.
     fn engineer_relay_status(&self) -> Option<String> {
-        self.relays.iter().enumerate().find_map(|(index, relay)| {
-            (!relay.active && self.selected_engineer_near(relay.position)).then(|| {
-                format!(
-                    "ENGINEER LINK // RELAY {} — RESTORING {:02}%",
-                    index + 1,
-                    (relay.progress / 3.0 * 100.0).clamp(0.0, 100.0) as u32
-                )
+        self.simulation
+            .relays
+            .iter()
+            .enumerate()
+            .find_map(|(index, relay)| {
+                (!relay.active && self.selected_engineer_near(relay.position)).then(|| {
+                    format!(
+                        "ENGINEER LINK // RELAY {} — RESTORING {:02}%",
+                        index + 1,
+                        (relay.progress / 3.0 * 100.0).clamp(0.0, 100.0) as u32
+                    )
+                })
             })
-        })
     }
 
     fn closest_enemy_at(&self, point: Vec2) -> Option<UnitId> {
@@ -1101,7 +1069,8 @@ impl LastLight {
         if self.fabricator_position.distance(point) <= StructureKind::FABRICATOR_RADIUS {
             return Some(StructureKind::Fabricator);
         }
-        self.relays
+        self.simulation
+            .relays
             .iter()
             .position(|relay| relay.position.distance(point) <= StructureKind::RELAY_RADIUS)
             .map(StructureKind::Relay)
@@ -1122,7 +1091,11 @@ impl LastLight {
 
     fn structure_position(&self, structure: StructureKind) -> Option<Vec2> {
         match structure {
-            StructureKind::Relay(index) => self.relays.get(index).map(|relay| relay.position),
+            StructureKind::Relay(index) => self
+                .simulation
+                .relays
+                .get(index)
+                .map(|relay| relay.position),
             StructureKind::Fabricator => Some(self.fabricator_position),
             StructureKind::Reactor => self.reactor_position,
         }
@@ -1130,7 +1103,7 @@ impl LastLight {
 
     fn structure_status_line(&self, structure: StructureKind) -> String {
         match structure {
-            StructureKind::Relay(index) => match self.relays.get(index) {
+            StructureKind::Relay(index) => match self.simulation.relays.get(index) {
                 Some(relay) if relay.active => "RELAY — ONLINE".to_owned(),
                 Some(relay) => format!(
                     "RELAY — CHARGING {:.0}%  (ENGINEER NEARBY TO RESTORE)",
@@ -1140,12 +1113,12 @@ impl LastLight {
             },
             StructureKind::Fabricator => format!(
                 "LANTERN FABRICATOR — {}  QUEUE {}/5",
-                if self.power.is_powered(FABRICATOR_NODE) {
+                if self.simulation.power.is_powered(FABRICATOR_NODE) {
                     "POWERED"
                 } else {
                     "OFFLINE"
                 },
-                self.production.items().len()
+                self.simulation.production.items().len()
             ),
             StructureKind::Reactor => "AUXILIARY REACTOR — AWAITING FULL POWER LATTICE".to_owned(),
         }
@@ -1158,6 +1131,7 @@ impl LastLight {
         match self.mission.victory {
             VictoryCondition::RestoreRelaysAndDefeatBoss { boss_kind } => {
                 if let Some((index, relay)) = self
+                    .simulation
                     .relays
                     .iter()
                     .enumerate()
@@ -1216,7 +1190,7 @@ impl LastLight {
             if self.placing_beacon {
                 let beacon_cost = self.beacon_cost();
                 match self.placement_rules().validate(mouse_world, 54.0) {
-                    Ok(()) if self.resources.spend(beacon_cost) => {
+                    Ok(()) if self.simulation.resources.spend(beacon_cost) => {
                         self.field_beacons.push(FieldBeacon {
                             position: mouse_world,
                         });
@@ -1424,7 +1398,7 @@ impl LastLight {
             }
         }
         if harvested > 0 {
-            self.resources.credit(harvested);
+            self.simulation.resources.credit(harvested);
         }
         harvested
     }
@@ -1440,7 +1414,12 @@ impl LastLight {
         let Some(line) = self.mission.radio_lines.get(self.dialogue_cursor) else {
             return;
         };
-        let active_relays = self.relays.iter().filter(|relay| relay.active).count();
+        let active_relays = self
+            .simulation
+            .relays
+            .iter()
+            .filter(|relay| relay.active)
+            .count();
         let ready = match line.trigger {
             DialogueTrigger::Time(time) => self.mission_time >= time,
             DialogueTrigger::RelaysOnline(count) => active_relays >= count,
@@ -1982,6 +1961,7 @@ impl Game for LastLight {
         self.update_enemy_ai(dt);
         self.update_auto_targeting();
         self.simulation.fixed_step_with_dt(dt);
+        self.process_simulation_events(ctx);
         for unit in self.simulation.world.units() {
             let kind = self.simulation.kinds.get(&unit.id).copied();
             let engaged = unit.alive() && self.unit_engaged(unit.id);
@@ -2040,7 +2020,7 @@ impl Game for LastLight {
         }
         self.update_specialist_doctrines(dt);
         self.update_fog();
-        self.update_economy(dt);
+        self.update_status_timer(dt);
         if self.update_harvesting(dt) > 0 {
             self.status = Some(("SURVEYOR HARVESTING SALVAGE".to_owned(), 0.8));
         }
@@ -2050,27 +2030,6 @@ impl Game for LastLight {
             *time -= dt;
             if *time <= 0.0 {
                 self.order_marker = None;
-            }
-        }
-
-        for index in 0..self.relays.len() {
-            if self.relays[index].active {
-                continue;
-            }
-            let position = self.relays[index].position;
-            if self.selected_engineer_near(position) {
-                let rate = if self.specialist_module(IVO, IVO_RIGGER) == IVO_RIGGER {
-                    1.5
-                } else {
-                    1.0
-                };
-                self.relays[index].progress += dt * rate;
-                if self.relays[index].progress >= 3.0 {
-                    self.relays[index].progress = 3.0;
-                    self.relays[index].active = true;
-                    self.power.set_online(PowerNodeId(index as u16 + 1), true);
-                    ctx.audio.win_note();
-                }
             }
         }
 
@@ -2143,8 +2102,13 @@ impl Game for LastLight {
             ));
         }
 
-        for (index, relay) in self.relays.iter().enumerate() {
-            if !relay.active || !self.power.is_powered(PowerNodeId(index as u16 + 1)) {
+        for (index, relay) in self.simulation.relays.iter().enumerate() {
+            if !relay.active
+                || !self
+                    .simulation
+                    .power
+                    .is_powered(PowerNodeId(index as u16 + 1))
+            {
                 continue;
             }
             let offset = relay.position - self.fabricator_position;
@@ -2198,7 +2162,7 @@ impl Game for LastLight {
             }
         }
 
-        for relay in &self.relays {
+        for relay in &self.simulation.relays {
             let progress = if relay.active {
                 1.0
             } else {
@@ -2257,7 +2221,7 @@ impl Game for LastLight {
                 self.draw_selection_brackets(ctx.renderer, *source, 62.0);
             }
             let valid = rules.validate(position, 54.0).is_ok()
-                && self.resources.amount() >= self.beacon_cost();
+                && self.simulation.resources.amount() >= self.beacon_cost();
             let mut preview = self.structure_atlas.sprite(position, Vec2::splat(108.0), 0);
             preview.color = if valid {
                 Color::rgba(0.28, 1.25, 1.05, 0.64)
@@ -2494,7 +2458,7 @@ impl Game for LastLight {
                     .with_color(Color::rgba(0.006, 0.018, 0.035, 0.94))
                     .with_z(7.5),
             );
-            for relay in &self.relays {
+            for relay in &self.simulation.relays {
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
                     Sprite::new(
@@ -2657,12 +2621,17 @@ impl Game for LastLight {
             .with_color(Color::rgba(0.01, 0.025, 0.05, 0.68))
             .with_z(7.5),
         );
-        let active_relays = self.relays.iter().filter(|relay| relay.active).count();
+        let active_relays = self
+            .simulation
+            .relays
+            .iter()
+            .filter(|relay| relay.active)
+            .count();
         let objective_line = match self.mission.victory {
             VictoryCondition::RestoreRelaysAndDefeatBoss { .. } => format!(
                 "{}  RELAYS {active_relays}/{}",
                 self.mission.title,
-                self.relays.len()
+                self.simulation.relays.len()
             ),
             VictoryCondition::EscortToExtraction { point, .. } => {
                 let escort_status = self
@@ -2706,9 +2675,9 @@ impl Game for LastLight {
             ctx.renderer,
             &format!(
                 "SALVAGE {}  +{income}/S  POWER {}/{}  UNITS {}/12",
-                self.resources.amount(),
+                self.simulation.resources.amount(),
                 active_relays + 1,
-                self.relays.len() + 1,
+                self.simulation.relays.len() + 1,
                 self.friendly_count()
             ),
             top_left + Vec2::new(0.0, -50.0) * hud_scale,
@@ -2853,8 +2822,14 @@ impl Game for LastLight {
                 Color::rgba(0.55, 0.7, 0.78, 0.9),
                 8.0,
             );
-            let front_progress = self.production.items().front().map(|item| item.progress());
+            let front_progress = self
+                .simulation
+                .production
+                .items()
+                .front()
+                .map(|item| item.progress());
             let queue_label = self
+                .simulation
                 .production
                 .items()
                 .front()
@@ -2865,7 +2840,7 @@ impl Game for LastLight {
                     format!(
                         "BUILDING {label}  {:02}%  QUEUE {}",
                         (item.progress() * 100.0) as u32,
-                        self.production.items().len()
+                        self.simulation.production.items().len()
                     )
                 })
                 .unwrap_or_else(|| "QUEUE READY".to_owned());
@@ -3063,7 +3038,7 @@ mod tests {
     fn starting_reclaim_the_reactor_populates_relays_and_roster() {
         let mut game = LastLight::new();
         game.start_mission(missions::reclaim_the_reactor());
-        assert_eq!(game.relays.len(), 3);
+        assert_eq!(game.simulation.relays.len(), 3);
         assert_eq!(game.salvage_nodes.len(), 3);
         assert!(game.reactor_position.is_some());
         assert_eq!(game.friendly_count(), 3);
@@ -3124,10 +3099,10 @@ mod tests {
             .unwrap();
         let node_position = game.salvage_nodes[0].position;
         game.simulation.world.unit_mut(surveyor).unwrap().position = node_position;
-        let salvage_before = game.resources.amount();
+        let salvage_before = game.simulation.resources.amount();
 
         assert_eq!(game.update_harvesting(1.0), 18);
-        assert_eq!(game.resources.amount(), salvage_before + 18);
+        assert_eq!(game.simulation.resources.amount(), salvage_before + 18);
         assert_eq!(game.salvage_nodes[0].remaining, 222);
     }
 
@@ -3152,9 +3127,9 @@ mod tests {
         reclaim.start_mission(missions::reclaim_the_reactor());
         assert_eq!(
             reclaim.next_objective().map(|(position, _)| position),
-            Some(reclaim.relays[0].position)
+            Some(reclaim.simulation.relays[0].position)
         );
-        for relay in &mut reclaim.relays {
+        for relay in &mut reclaim.simulation.relays {
             relay.active = true;
         }
         let canticle = reclaim
@@ -3188,7 +3163,7 @@ mod tests {
             .find(|(_, kind)| **kind == UnitKind::Engineer)
             .map(|(id, _)| *id)
             .expect("mission includes an engineer");
-        let relay_position = game.relays[0].position;
+        let relay_position = game.simulation.relays[0].position;
         game.simulation.world.unit_mut(engineer).unwrap().position = relay_position;
         game.simulation
             .world
@@ -3228,7 +3203,7 @@ mod tests {
         game.evaluate_mission_state();
         assert!(!game.victory);
 
-        for relay in &mut game.relays {
+        for relay in &mut game.simulation.relays {
             relay.active = true;
         }
         game.evaluate_mission_state();

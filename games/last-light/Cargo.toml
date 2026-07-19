@@ -10,3 +10,4 @@ glam = { workspace = true }
 log = { workspace = true }
 winit = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }

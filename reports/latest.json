@@ -1,15 +1,16 @@
 {
   "schema_version": 1,
-  "iteration": "FOUNDRY-002",
-  "title": "Renderer-free Last Light selection and movement simulation",
+  "iteration": "FOUNDRY-003",
+  "title": "Simulation-owned Reclaim relay and production loop",
   "status": "passed",
   "date": "2026-07-19",
   "acceptance": {
-    "live_and_headless_share_simulation": true,
-    "selection_without_renderer": true,
-    "movement_without_renderer": true,
+    "relay_restoration_without_renderer": true,
+    "resource_and_production_without_renderer": true,
+    "bounded_ordered_event_log": true,
+    "persisted_canonical_trace": true,
     "two_clean_runs_match": true,
-    "browser_controls_unchanged": true
+    "browser_production_works": true
   },
   "evidence": {
     "cargo_fmt_check": "passed",
@@ -22,22 +23,21 @@
     "wasm_workspace_check": "passed",
     "trunk_release_build_last_light": "passed",
     "mcp_stdio_smoke_test": "passed",
-    "deterministic_scenario": "last_light.reclaim.selection_move",
-    "deterministic_ticks_per_run": 180,
+    "deterministic_scenario": "last_light.reclaim.relay_production",
+    "deterministic_ticks_per_run": 900,
     "deterministic_replay_runs": 2,
     "determinism_mismatches": 0,
     "browser_smoke": {
       "status": "passed",
       "browser": "Safari",
-      "actions": ["reload", "deploy", "right-click move"],
-      "observed": ["three units selected", "squad moved", "HUD intact", "minimap updated"]
+      "actions": ["load latest build", "deploy", "select", "right-click move", "queue Warden"],
+      "observed": ["salvage spent from 150 to 60", "queue showed Building Warden", "queue returned to ready", "HUD intact", "minimap updated"]
     }
   },
   "known_gaps": [
-    "Combat, economy, relay restoration, and objectives remain outside MissionSimulation",
-    "The canonical trace is constructed in test code rather than persisted as an artifact",
-    "A bounded event log remains FOUNDRY-003",
-    "Automated DPR screenshot coverage remains FOUNDRY-004"
+    "Combat, defeat, and victory resolution remain outside MissionSimulation",
+    "MCP does not yet expose the canonical Last Light scenario report",
+    "Automated 1280x720 DPR 1 and 2 screenshot coverage remains pending"
   ],
-  "next_task": "FOUNDRY-003"
+  "next_task": "FOUNDRY-004"
 }

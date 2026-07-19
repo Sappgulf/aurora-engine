@@ -1153,6 +1153,7 @@ dependencies = [
  "glam",
  "log",
  "serde",
+ "serde_json",
  "winit",
 ]
 

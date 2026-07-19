@@ -1,0 +1,13 @@
+{
+  "format_version": 1,
+  "scenario_id": "last_light.reclaim.relay_production",
+  "seed": 44117,
+  "fixed_tick_hz": 60,
+  "end_tick": 900,
+  "commands": [
+    { "tick": 0, "action": "last_light.select_all" },
+    { "tick": 1, "action": "last_light.select_kind", "payload": "engineer" },
+    { "tick": 5, "action": "last_light.move_selected", "payload": [-790.0, 320.0] },
+    { "tick": 500, "action": "last_light.queue_unit", "payload": "warden" }
+  ]
+}

@@ -22,7 +22,12 @@ contract. Evidence is recorded in `reports/latest.json`.
 `FOUNDRY-002`: Renderer-free Last Light roster, selection, navigation, and
 movement simulation with matching Reclaim trace hashes.
 
+`FOUNDRY-003`: Simulation-owned relay restoration, power, resources, and
+production with a bounded ordered event log and persisted 900-tick Reclaim
+truth trace.
+
 ## Next iteration
 
-`FOUNDRY-003`: Move relay restoration and production into `MissionSimulation`,
-emit a bounded event log, and persist the canonical Reclaim `.aurora-trace`.
+`FOUNDRY-004`: Move combat, defeat, and victory resolution into
+`MissionSimulation`, extend the canonical trace through mission completion,
+and expose its bounded report through the allow-listed MCP scenario lane.

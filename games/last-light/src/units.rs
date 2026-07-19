@@ -1,6 +1,7 @@
 //! Last Light's roster, production identifiers, and presentation balance.
 
 use aurora_engine::{FactionId, ProductId, ProductionRecipe};
+use serde::{Deserialize, Serialize};
 
 pub const PLAYER: FactionId = FactionId(1);
 pub const CHOIR: FactionId = FactionId(2);
@@ -8,7 +9,8 @@ const WARDEN_PRODUCT: ProductId = ProductId(0);
 const ENGINEER_PRODUCT: ProductId = ProductId(1);
 const SURVEYOR_PRODUCT: ProductId = ProductId(2);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UnitKind {
     Warden,
     Engineer,
