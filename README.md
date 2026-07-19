@@ -2,105 +2,116 @@
 
 **Fast Rust game engine · beautiful wgpu graphics · desktop + browser**
 
-Aurora is a from-scratch engine built on [wgpu](https://wgpu.rs) so the same renderer targets **Vulkan / Metal / DX12** natively and **WebGPU** in the browser via WebAssembly.
+Aurora is a from-scratch engine on [wgpu](https://wgpu.rs): **Vulkan / Metal / DX12** natively and **WebGPU** in the browser via WebAssembly.
 
-> Status: **Milestone 0** — bootstrap complete. Rotating triangle demo runs as a smoke test. See [ROADMAP.md](./ROADMAP.md) for the full goal map.
+> Status: **Milestone 1** — 2D foundation. Camera, sprites, input, textures, particles, fixed timestep. See [ROADMAP.md](./ROADMAP.md).
 
-## Features (now)
+## Features
 
-- Cross-platform window + input loop (`winit` 0.30)
-- GPU init, surface, WGSL pipelines (`wgpu` 24)
-- `Game` trait: `on_start` / `on_update` / `on_event`
-- Frame timing (`Time`: `delta`, `elapsed`, `frame`)
-- Built-in **triangle demo** (aurora palette, spin + pulse)
-- Web scaffold via [Trunk](https://trunkrs.dev)
+| Area | Status |
+|------|--------|
+| Cross-platform window + loop (`winit`) | ✅ |
+| wgpu device / surface / WGSL | ✅ |
+| `Game` + `FrameCtx` API | ✅ |
+| Orthographic **Camera2D** (pan / zoom / screen↔world) | ✅ |
+| **Sprite** batching (multi-texture, alpha blend) | ✅ |
+| Procedural **textures** + PNG load | ✅ |
+| **Input** (keys, mouse, scroll, WASD axis) | ✅ |
+| Fixed timestep + variable render | ✅ |
+| CPU **particles** | ✅ |
+| Debug NDC triangle (M0) | ✅ |
+| WASM / Trunk scaffold | ✅ |
 
 ## Quick start (native)
-
-**Requirements:** Rust 1.75+ (edition 2021), a GPU with Vulkan/Metal/DX12.
 
 ```bash
 git clone https://github.com/Sappgulf/aurora-engine.git
 cd aurora-engine
-cargo run -p triangle_demo
+cargo run -p playground
 ```
 
-Or:
+### Controls (playground)
+
+| Input | Action |
+|--------|--------|
+| **WASD** / arrows | Move player |
+| **Scroll** / `+` `-` | Zoom camera |
+| **LMB** / Space | Particle burst |
+| **RMB** drag | Pan camera |
+| **T** | Toggle debug triangle |
+| **R** | Reset camera + player |
+| **Esc** | Quit (native) |
+
+M0 triangle-only smoke test:
 
 ```bash
-./scripts/run-native.sh
+cargo run -p triangle_demo
 ```
-
-You should see a dark window with a **rotating teal / violet / magenta triangle**. Press **Esc** to quit.
 
 ## Browser (WebGPU)
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo install trunk   # once
-cd examples/triangle_demo
+cargo install trunk
+cd examples/playground
 trunk serve
 ```
-
-Open the URL Trunk prints (default `http://127.0.0.1:8080`). Use a recent Chrome, Edge, Firefox, or Safari with WebGPU.
-
-Release web build:
-
-```bash
-./scripts/build-web.sh
-```
-
-Output lands in `dist/`.
 
 ## Use as a library
 
 ```rust
-use aurora_engine::{run, Color, Game, Renderer, Time};
+use aurora_engine::{run, Color, FrameCtx, Game, Renderer, Sprite, Texture};
+use glam::Vec2;
 
-struct MyGame;
+struct MyGame {
+    tex: usize,
+}
 
 impl Game for MyGame {
-    fn name(&self) -> &str {
-        "My Game"
+    fn on_start(&mut self, renderer: &mut Renderer) {
+        let tex = {
+            let gpu = renderer.gpu();
+            Texture::soft_circle(&gpu, 64, Color::AURORA_TEAL)
+        };
+        self.tex = renderer.add_texture(tex);
     }
 
-    fn on_update(&mut self, time: &Time, renderer: &mut Renderer) {
-        let hue = (time.elapsed * 0.1) % 1.0;
-        renderer.set_clear_color(Color::from_hue(hue).night_blend(0.8));
+    fn on_update(&mut self, ctx: &mut FrameCtx<'_>) {
+        let dir = ctx.input.axis_wasd();
+        ctx.renderer.camera.pan(dir * 200.0 * ctx.time.delta);
+        ctx.renderer.draw_sprite(
+            self.tex,
+            Sprite::new(Vec2::ZERO, Vec2::splat(64.0)),
+        );
     }
 }
 
 fn main() {
-    run(MyGame);
+    run(MyGame { tex: 0 });
 }
 ```
 
-## Workspace layout
+## Workspace
 
 ```
-crates/aurora-engine/   # engine library
-examples/triangle_demo/ # smoke-test binary (+ Trunk web entry)
-shaders/                # (crate-local WGSL under crates/aurora-engine/shaders)
-scripts/                # native + web helpers
-ROADMAP.md              # milestones M0–M5
+crates/aurora-engine/     # engine library
+  shaders/                # WGSL (sprite + triangle)
+examples/playground/      # M1 showcase (default)
+examples/triangle_demo/   # M0 smoke test
+scripts/
+ROADMAP.md
 ```
 
-## Goal map (summary)
+## Goal map
 
 | Milestone | Focus |
 |-----------|--------|
 | **M0** ✅ | Loop, wgpu, triangle, native + web scaffold |
-| **M1** | Camera, sprites, input, assets |
-| **M2** | Post-FX, particles, “beautiful” look |
+| **M1** ✅ | Camera, sprites, input, assets, particles |
+| **M2** | Post-FX, bloom, more polish |
 | **M3** | Optional 3D / glTF / PBR |
 | **M4** | ECS, hot reload, CI, crates.io |
-| **M5** | Vertical-slice game shipped in-engine |
-
-Details: [ROADMAP.md](./ROADMAP.md).
-
-## Why not Bevy?
-
-Bevy is excellent. Aurora’s goal is a **small, readable engine** you fully own — ideal for learning GPU/engine structure and keeping WASM size intentional. You can still study Bevy for ECS and architecture ideas.
+| **M5** | Vertical-slice game |
 
 ## License
 

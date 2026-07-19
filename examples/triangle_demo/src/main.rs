@@ -1,4 +1,4 @@
-//! Aurora Engine smoke test: rotating aurora triangle (native + WASM).
+//! M0 smoke test: NDC debug triangle.
 
 use aurora_engine::{run, TriangleDemo};
 

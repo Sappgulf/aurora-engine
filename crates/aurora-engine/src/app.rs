@@ -9,8 +9,19 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::color::Color;
+use crate::input::Input;
 use crate::renderer::Renderer;
 use crate::time::Time;
+
+/// Per-frame context passed into game callbacks.
+pub struct FrameCtx<'a> {
+    /// Timing (delta, fixed step, elapsed).
+    pub time: &'a mut Time,
+    /// Keyboard / mouse state for this frame.
+    pub input: &'a Input,
+    /// GPU renderer + camera + draw queue.
+    pub renderer: &'a mut Renderer,
+}
 
 /// Implement this for your game / demo.
 pub trait Game: 'static {
@@ -21,10 +32,13 @@ pub trait Game: 'static {
     /// Called once after the GPU renderer is ready.
     fn on_start(&mut self, _renderer: &mut Renderer) {}
 
-    /// Called every frame before render.
-    fn on_update(&mut self, time: &Time, renderer: &mut Renderer);
+    /// Fixed-timestep simulation (default 60 Hz). Optional.
+    fn on_fixed_update(&mut self, _ctx: &mut FrameCtx<'_>) {}
 
-    /// Optional: handle raw window events (keys, mouse, etc.).
+    /// Called every frame before render (variable delta).
+    fn on_update(&mut self, ctx: &mut FrameCtx<'_>);
+
+    /// Optional: handle raw window events after engine input is updated.
     /// Return `true` if the event was consumed.
     fn on_event(&mut self, _event: &WindowEvent) -> bool {
         false
@@ -57,6 +71,7 @@ pub fn run<G: Game>(game: G) {
         window: None,
         renderer: None,
         time: Time::new(),
+        input: Input::new(),
         proxy,
         init_started: false,
     };
@@ -91,6 +106,7 @@ struct EngineApp<G: Game> {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     time: Time,
+    input: Input,
     proxy: EventLoopProxy<UserEvent>,
     init_started: bool,
 }
@@ -205,6 +221,9 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Input first so RedrawRequested sees this frame's keys/mouse.
+        self.input.handle_event(&event);
+
         if let Some(game) = self.game.as_mut() {
             if game.on_event(&event) {
                 return;
@@ -239,7 +258,28 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                 };
 
                 self.time.tick();
-                game.on_update(&self.time, renderer);
+
+                // Fixed steps then variable frame update.
+                loop {
+                    if !self.time.step_fixed() {
+                        break;
+                    }
+                    let mut ctx = FrameCtx {
+                        time: &mut self.time,
+                        input: &self.input,
+                        renderer,
+                    };
+                    game.on_fixed_update(&mut ctx);
+                }
+
+                {
+                    let mut ctx = FrameCtx {
+                        time: &mut self.time,
+                        input: &self.input,
+                        renderer,
+                    };
+                    game.on_update(&mut ctx);
+                }
 
                 match renderer.render(self.time.elapsed) {
                     Ok(()) => {}
@@ -257,6 +297,9 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                         log::warn!("Surface error (other)");
                     }
                 }
+
+                // Clear edge-triggered input after the frame has consumed it.
+                self.input.begin_frame();
             }
             _ => {}
         }
@@ -271,7 +314,7 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
     }
 }
 
-/// Built-in smoke-test game used by examples.
+/// Built-in minimal demo (M0 triangle path).
 pub struct TriangleDemo {
     pub title: String,
 }
@@ -289,9 +332,13 @@ impl Game for TriangleDemo {
         &self.title
     }
 
-    fn on_update(&mut self, time: &Time, renderer: &mut Renderer) {
-        let hue = (time.elapsed * 0.05) % 1.0;
+    fn on_start(&mut self, renderer: &mut Renderer) {
+        renderer.set_debug_triangle(true);
+    }
+
+    fn on_update(&mut self, ctx: &mut FrameCtx<'_>) {
+        let hue = (ctx.time.elapsed * 0.05) % 1.0;
         let clear = Color::from_hue(hue).night_blend(0.82);
-        renderer.set_clear_color(clear);
+        ctx.renderer.set_clear_color(clear);
     }
 }

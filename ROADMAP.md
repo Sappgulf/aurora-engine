@@ -14,9 +14,9 @@
 
 ---
 
-## Milestone 0 — Bootstrap ✅ (this repo)
+## Milestone 0 — Bootstrap ✅
 
-- [x] Cargo workspace (`aurora-engine` lib + `triangle_demo`)
+- [x] Cargo workspace (`aurora-engine` lib + demos)
 - [x] Cross-platform window + event loop (`winit`)
 - [x] GPU device / surface / render pipeline (`wgpu`)
 - [x] WGSL triangle with time uniforms (spin + pulse)
@@ -29,17 +29,22 @@
 
 ---
 
-## Milestone 1 — Core 2D foundation
+## Milestone 1 — Core 2D foundation ✅
 
-- [ ] Orthographic camera (zoom, pan)
-- [ ] Sprite batcher (texture atlases, layering)
-- [ ] Instantiated quads + basic materials
-- [ ] Input map (keyboard / mouse / touch abstractions)
-- [ ] Fixed timestep + variable render alpha
-- [ ] Asset loader (images via `image` crate)
-- [ ] Simple audio stub (cpal native / Web Audio later)
+- [x] Orthographic camera (zoom, pan, screen↔world)
+- [x] Sprite batcher (multi-texture runs, z-order, alpha blend)
+- [x] Textured quads + vertex color tint
+- [x] Input map (keyboard / mouse / scroll / WASD axis)
+- [x] Fixed timestep + variable render (`Time::step_fixed`)
+- [x] Texture API: RGBA, PNG bytes, procedural (circle, checker, gradient)
+- [x] CPU particle system
+- [x] `FrameCtx` unifies time + input + renderer
+- [x] `playground` demo (default binary)
+- [ ] Simple audio stub (cpal native / Web Audio later) → deferred to M2
+- [ ] Touch abstractions → deferred to M2
 
-**Exit criteria:** A sprite-based mini scene runs native + web.
+**Exit criteria:** Sprite-based mini scene runs native (+ web scaffold). ✅  
+**Test:** `cargo run -p playground`
 
 ---
 

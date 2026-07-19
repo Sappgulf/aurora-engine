@@ -1,18 +1,17 @@
 //! # Aurora Engine
 //!
-//! A small, fast Rust game engine powered by **wgpu**.
-//! One codebase targets **desktop** (Vulkan / Metal / DX12) and the **browser** (WebGPU).
+//! Fast Rust game engine powered by **wgpu** — desktop + browser (WebGPU).
 //!
 //! ## Quick start
 //!
 //! ```rust,ignore
-//! use aurora_engine::{run, Game, Renderer, Time};
+//! use aurora_engine::{run, FrameCtx, Game, Renderer};
 //!
 //! struct MyGame;
 //!
 //! impl Game for MyGame {
-//!     fn on_update(&mut self, time: &Time, renderer: &mut Renderer) {
-//!         // update + set clear color, etc.
+//!     fn on_update(&mut self, ctx: &mut FrameCtx<'_>) {
+//!         // draw sprites, move camera, read input…
 //!     }
 //! }
 //!
@@ -22,13 +21,23 @@
 //! ```
 
 pub mod app;
+pub mod camera;
 pub mod color;
+pub mod input;
+pub mod particles;
 pub mod renderer;
+pub mod sprite;
+pub mod texture;
 pub mod time;
 
-pub use app::{run, Game, TriangleDemo};
+pub use app::{run, FrameCtx, Game, TriangleDemo};
+pub use camera::Camera2D;
 pub use color::Color;
-pub use renderer::Renderer;
+pub use input::Input;
+pub use particles::{ParticleSystem, RngLite, XorShift32};
+pub use renderer::{GpuContext, Renderer};
+pub use sprite::{QueuedSprite, Sprite, SpriteBatch};
+pub use texture::Texture;
 pub use time::Time;
 
 /// Engine version string.

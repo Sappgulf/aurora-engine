@@ -3,11 +3,12 @@ resolver = "2"
 members = [
     "crates/aurora-engine",
     "examples/triangle_demo",
+    "examples/playground",
 ]
-default-members = ["examples/triangle_demo"]
+default-members = ["examples/playground"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Sappgulf/aurora-engine"
@@ -23,6 +24,7 @@ env_logger = "0.11"
 pollster = "0.4"
 bytemuck = { version = "1.21", features = ["derive"] }
 cfg-if = "1.0"
+image = { version = "0.25", default-features = false, features = ["png"] }
 console_error_panic_hook = "0.1"
 console_log = "1.0"
 wasm-bindgen = "0.2"

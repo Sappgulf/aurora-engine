@@ -10,8 +10,8 @@ if ! command -v trunk >/dev/null 2>&1; then
 fi
 
 rustup target add wasm32-unknown-unknown >/dev/null
-echo "Building web demo → dist/"
-cd examples/triangle_demo
+echo "Building web playground → dist/"
+cd examples/playground
 trunk build --release
-echo "Done. Serve with:  cd examples/triangle_demo && trunk serve"
+echo "Done. Serve with:  cd examples/playground && trunk serve"
 echo "Or: python3 -m http.server -d ../../dist 8080"
