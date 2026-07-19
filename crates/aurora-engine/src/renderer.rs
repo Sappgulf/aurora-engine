@@ -483,8 +483,12 @@ impl Renderer {
 
         // Sort and take ownership so we can build meshes before the pass.
         // Preserve transparent layer order; texture is only a secondary key.
-        self.draw_queue
-            .sort_by_key(|q| (q.sprite.z.to_bits(), q.texture.0));
+        self.draw_queue.sort_by(|a, b| {
+            a.sprite
+                .z
+                .total_cmp(&b.sprite.z)
+                .then_with(|| a.texture.0.cmp(&b.texture.0))
+        });
         let queue = std::mem::take(&mut self.draw_queue);
         self.stats = RenderStats {
             queued_sprites: queue.len(),

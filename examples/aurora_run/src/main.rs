@@ -7,7 +7,7 @@ use aurora_engine::{
 use glam::Vec2;
 use winit::keyboard::KeyCode;
 
-const WORLD: Vec2 = Vec2::new(900.0, 520.0);
+const WORLD: Vec2 = Vec2::new(1180.0, 660.0);
 const PLAYER_SPEED: f32 = 340.0;
 const PLAYER_SIZE: f32 = 40.0;
 
@@ -82,7 +82,7 @@ impl AuroraRun {
         for i in 0..12 {
             let a = (i as f32 / 12.0) * std::f32::consts::TAU;
             self.collectibles.push(Collectible {
-                pos: Vec2::new(a.cos() * 280.0, a.sin() * 160.0),
+                pos: Vec2::new(a.cos() * 400.0, a.sin() * 235.0),
                 alive: true,
             });
         }
@@ -90,7 +90,7 @@ impl AuroraRun {
             let a = i as f32 * 1.3;
             let speed = 80.0 + i as f32 * 25.0;
             self.hazards.push(Hazard {
-                pos: Vec2::new(a.cos() * 200.0, a.sin() * 120.0),
+                pos: Vec2::new(a.cos() * 350.0, a.sin() * 205.0),
                 vel: Vec2::new(a.sin(), -a.cos()) * speed,
                 size: 28.0 + (i % 3) as f32 * 8.0,
             });
@@ -117,12 +117,11 @@ impl Game for AuroraRun {
                 Texture::orb_atlas_strip(&gpu, 64, 4, Color::AURORA_TEAL),
                 Texture::soft_circle(&gpu, 48, Color::rgb(0.95, 0.85, 0.3)),
                 Texture::soft_circle(&gpu, 48, Color::rgb(1.0, 0.25, 0.35)),
-                Texture::checker(
+                Texture::gradient_h(
                     &gpu,
-                    128,
-                    16,
-                    Color::rgb(0.08, 0.1, 0.16),
-                    Color::rgb(0.12, 0.14, 0.22),
+                    256,
+                    Color::rgb(0.035, 0.075, 0.17),
+                    Color::rgb(0.10, 0.028, 0.20),
                 ),
             )
         };
@@ -137,7 +136,7 @@ impl Game for AuroraRun {
         renderer.post_fx.vignette = 0.6;
         renderer.post_fx.chromatic = 0.003;
         renderer.set_clear_color(Color::AURORA_NIGHT);
-        renderer.camera.zoom = 1.0;
+        renderer.camera.zoom = 1.34;
 
         self.player = Vec2::ZERO;
         self.score = 0;
@@ -147,7 +146,7 @@ impl Game for AuroraRun {
         for i in 0..12 {
             let a = (i as f32 / 12.0) * std::f32::consts::TAU;
             self.collectibles.push(Collectible {
-                pos: Vec2::new(a.cos() * 280.0, a.sin() * 160.0),
+                pos: Vec2::new(a.cos() * 400.0, a.sin() * 235.0),
                 alive: true,
             });
         }
@@ -155,7 +154,7 @@ impl Game for AuroraRun {
             let a = i as f32 * 1.3;
             let speed = 80.0 + i as f32 * 25.0;
             self.hazards.push(Hazard {
-                pos: Vec2::new(a.cos() * 200.0, a.sin() * 120.0),
+                pos: Vec2::new(a.cos() * 350.0, a.sin() * 205.0),
                 vel: Vec2::new(a.sin(), -a.cos()) * speed,
                 size: 28.0 + (i % 3) as f32 * 8.0,
             });
@@ -316,7 +315,7 @@ impl Game for AuroraRun {
         // Floor
         ctx.renderer.draw_sprite(
             self.tex_floor,
-            Sprite::new(Vec2::ZERO, WORLD + Vec2::splat(80.0)).with_z(-5.0),
+            Sprite::new(Vec2::ZERO, WORLD + Vec2::splat(100.0)).with_z(-5.0),
         );
 
         // Soft emissive pools make the player and hazards read as lights while
@@ -329,13 +328,13 @@ impl Game for AuroraRun {
         );
 
         // Arena border glow
-        let border = Color::rgba(0.3, 0.8, 1.0, 0.15);
+        let border = Color::rgba(0.08, 1.6, 1.35, 0.28);
         let t_orb = self.tex_orb;
         for (pos, size) in [
-            (Vec2::new(0.0, WORLD.y * 0.5), Vec2::new(WORLD.x, 8.0)),
-            (Vec2::new(0.0, -WORLD.y * 0.5), Vec2::new(WORLD.x, 8.0)),
-            (Vec2::new(WORLD.x * 0.5, 0.0), Vec2::new(8.0, WORLD.y)),
-            (Vec2::new(-WORLD.x * 0.5, 0.0), Vec2::new(8.0, WORLD.y)),
+            (Vec2::new(0.0, WORLD.y * 0.5), Vec2::new(WORLD.x, 14.0)),
+            (Vec2::new(0.0, -WORLD.y * 0.5), Vec2::new(WORLD.x, 14.0)),
+            (Vec2::new(WORLD.x * 0.5, 0.0), Vec2::new(14.0, WORLD.y)),
+            (Vec2::new(-WORLD.x * 0.5, 0.0), Vec2::new(14.0, WORLD.y)),
         ] {
             ctx.renderer.draw_sprite(
                 t_orb,
