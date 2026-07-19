@@ -2,42 +2,39 @@
 
 **Fast Rust game engine · beautiful wgpu graphics · desktop + browser**
 
-> Status: **v0.3 / Milestone 2** — post-FX, atlases, audio, collision, playable mini-game.
+> Status: **v0.3 / Milestone 3 RTS** — point-and-click command simulation, authored campaign, native + browser.
 
 ## Play now
 
 ```bash
 cd ~/dev/aurora-engine
-cargo run -p aurora_run
+cargo run -p last_light
 ```
 
-### Aurora Run controls
+### Aurora: Last Light controls
 
 | Input | Action |
 |--------|--------|
-| **WASD** / arrows | Move |
-| **Space** | Dash (uses a charge) |
-| Collect **gold crystals** | Score and build combo |
-| Collect **green upgrade crystal** | Restore a life + dash charge |
-| Avoid **red drones** | Lose lives |
-| **Esc** | Pause / resume |
-| **R** | Restart |
-| **P** | Toggle bloom / vignette / chromatic |
-| **Esc** | Quit |
+| **Space / Enter** | Deploy from mission briefing |
+| **Left click / drag** | Select one unit or a squad |
+| **Right click** | Move or attack contextually |
+| **WASD / screen edge** | Pan tactical camera |
+| **Mouse wheel** | Zoom around cursor |
+| **Esc** | Tactical pause |
 
-Top-left teal pips = lives · gold crystals = score · green crystals = upgrades.
-Clear a wave to advance; each wave adds more varied drones.
+Select the Engineer and command it near each of the three power relays. Hold the
+sector, defeat the Choir Canticle, and bring the auxiliary reactor online.
 
-### Game flow
+### Campaign and production guide
 
-Aurora Run opens on a keyboard-first title screen. Use **WASD/arrows** to move
-the menu cursor, **Enter/Space** to confirm, and **Esc** to go back or pause a
-run. The pause screen provides resume, restart, settings, and end-run actions.
+- [Campaign bible](docs/AURORA_LAST_LIGHT_CAMPAIGN.md)
+- [Asset production guide](docs/AURORA_LAST_LIGHT_ASSET_GUIDE.md)
 
 ## Other demos
 
 ```bash
 cargo run -p playground      # free-roam particles / camera
+cargo run -p aurora_run      # earlier arcade vertical slice
 cargo run -p triangle_demo   # M0 NDC triangle
 ```
 
@@ -61,6 +58,8 @@ cargo run -p triangle_demo   # M0 NDC triangle
 | Tile collisions/triggers + camera rig | ✅ |
 | Diagnostics + asset loading queue | ✅ foundation |
 | Feature-gated 3D mesh/material contract | ✅ foundation |
+| RTS selection, formations, orders, navigation, fog | ✅ |
+| Last Light point-and-click campaign mission | ✅ vertical slice |
 
 ## Library sketch
 
@@ -87,13 +86,13 @@ impl Game for MyGame {
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install trunk
-cd examples/aurora_run && trunk serve
+cd examples/last_light && trunk serve
 ```
 
 ## MCP support for coding agents
 
 Aurora includes a local, repository-scoped MCP server for model-assisted engine
-work. It provides a systems map, bounded source slices, the Aurora Run playtest
+work. It provides a systems map, bounded source slices, the Last Light playtest
 contract, and explicitly selected Cargo validation lanes—never arbitrary shell
 commands or arbitrary filesystem reads. See [mcp/README.md](mcp/README.md) for
 installation, client configuration, security boundaries, and the stdio protocol

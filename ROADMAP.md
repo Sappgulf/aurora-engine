@@ -80,7 +80,29 @@ systems it uses can be adopted by a second 2D game without copying demo code.
 
 ---
 
-## Milestone 3 — 3D path (feature-gated)
+## Milestone 3 — Aurora: Last Light RTS foundation 🚧
+
+- [x] Point and box selection with faction filtering
+- [x] Contextual move and attack orders with deterministic formation slots
+- [x] Grid navigation and reusable fog-of-war state
+- [x] Strategic pan/zoom camera bounded to the authored world
+- [x] Authored campaign, factions, characters, mission arc, and asset guide
+- [x] Production unit and structure atlases
+- [x] Playable **Reclaim the Reactor** mission (`examples/last_light`)
+- [ ] Per-unit animation strips and clip state machine
+- [ ] Structure placement, resource economy, and power-network graph
+- [ ] Minimap, control groups, and command-card UI
+- [ ] Campaign persistence and mission-to-mission upgrade state
+
+**Exit criteria:** select and command a Lantern squad, reveal the sector, restore
+three relays, defeat a Choir command unit, and complete the mission on native
+and web builds.
+
+**Test:** `cargo run -p last_light`
+
+---
+
+## Milestone 4 — 3D path (feature-gated)
 
 - [x] Perspective camera conventions + projection contract (`3d` feature)
 - [ ] Depth buffer + mesh pipeline
@@ -93,7 +115,7 @@ systems it uses can be adopted by a second 2D game without copying demo code.
 
 ---
 
-## Milestone 4 — Engine productization
+## Milestone 5 — Engine productization
 
 - [ ] Scene graph or lightweight ECS (`hecs` / custom)
 - [ ] Hot reload shaders (native)
@@ -104,7 +126,7 @@ systems it uses can be adopted by a second 2D game without copying demo code.
 
 ---
 
-## Milestone 5 — Vertical slice game
+## Milestone 6 — Vertical slice game
 
 Ship a small complete game *in* Aurora (not a tech demo):
 

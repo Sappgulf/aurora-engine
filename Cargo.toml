@@ -5,8 +5,9 @@ members = [
     "examples/triangle_demo",
     "examples/playground",
     "examples/aurora_run",
+    "examples/last_light",
 ]
-default-members = ["examples/aurora_run"]
+default-members = ["examples/last_light"]
 
 [workspace.package]
 version = "0.3.0"

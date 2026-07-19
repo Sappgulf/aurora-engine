@@ -19,6 +19,7 @@ pub mod mesh3d;
 pub mod particles;
 pub mod post;
 pub mod renderer;
+pub mod rts;
 pub mod save;
 pub mod scene;
 pub mod sprite;
@@ -48,6 +49,10 @@ pub use particles::{ParticleSystem, RngLite, XorShift32};
 pub use post::PostFxSettings;
 pub use renderer::{GpuContext, PointLight, RenderQuality, Renderer};
 pub use renderer::{RenderStats, TextureHandle};
+pub use rts::{
+    FactionId, FogOfWar, FogState, NavGrid, RtsUnit, RtsWorld, Selection, SelectionBox, UnitId,
+    UnitOrder,
+};
 pub use save::{
     GameSettings, SaveData, SaveError, SaveStore, DEFAULT_SAVE_SLOT, SAVE_FORMAT_VERSION,
 };

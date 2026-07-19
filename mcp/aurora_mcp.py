@@ -63,14 +63,18 @@ SOURCE_MAP: dict[str, tuple[str, str]] = {
     "engine_audio": ("crates/aurora-engine/src/audio.rs", "Audio mixer and sound cues."),
     "engine_save": ("crates/aurora-engine/src/save.rs", "Portable save/settings data contracts."),
     "engine_diagnostics": ("crates/aurora-engine/src/diagnostics.rs", "Frame timing and render diagnostics."),
+    "engine_rts": ("crates/aurora-engine/src/rts.rs", "RTS selection, orders, navigation, and fog contracts."),
     "engine_3d": ("crates/aurora-engine/src/mesh3d.rs", "Feature-gated mesh/material contracts."),
     "aurora_run": ("examples/aurora_run/src/main.rs", "Playable Aurora Run vertical slice."),
+    "last_light": ("examples/last_light/src/main.rs", "Playable Last Light RTS campaign mission."),
+    "last_light_campaign": ("docs/AURORA_LAST_LIGHT_CAMPAIGN.md", "Campaign, factions, characters, and mission arc."),
+    "last_light_assets": ("docs/AURORA_LAST_LIGHT_ASSET_GUIDE.md", "Production asset and animation contract."),
 }
 
 VALIDATION_LANES: dict[str, tuple[str, ...]] = {
     "fast": ("cargo", "check", "--workspace"),
     "test": ("cargo", "test", "--workspace"),
-    "web": ("cargo", "check", "--target", "wasm32-unknown-unknown", "-p", "aurora_run"),
+    "web": ("cargo", "check", "--target", "wasm32-unknown-unknown", "-p", "last_light"),
 }
 
 
@@ -161,7 +165,7 @@ def _system_records() -> list[dict[str, str]]:
     """Build an overview from stable, approved source locations."""
     records: list[dict[str, str]] = []
     for system_id, (relative, description) in SOURCE_MAP.items():
-        if system_id in {"readme", "roadmap", "aurora_run"}:
+        if system_id in {"readme", "roadmap", "aurora_run", "last_light", "last_light_campaign", "last_light_assets"}:
             continue
         records.append(
             {
@@ -196,28 +200,27 @@ def _overview_payload() -> dict[str, object]:
         "branch": _git_value("branch", "--show-current"),
         "head": _git_value("rev-parse", "--short", "HEAD"),
         "working_tree": _git_value("status", "--short") or "clean",
-        "default_game": "cargo run -p aurora_run",
+        "default_game": "cargo run -p last_light",
         "systems": _system_records(),
     }
 
 
 def _playtest_payload() -> dict[str, object]:
     return {
-        "title": "Aurora Run playtest contract",
-        "run": "cargo run -p aurora_run",
+        "title": "Aurora: Last Light playtest contract",
+        "run": "cargo run -p last_light",
         "controls": {
-            "move": "WASD or arrow keys",
-            "dash": "Space",
-            "menu": "WASD/arrows, Enter/Space confirms, Esc backs out",
+            "deploy": "Space or Enter closes the briefing",
+            "select": "Left click or left-drag",
+            "command": "Right click moves or attacks contextually",
+            "camera": "WASD or screen edge pans; wheel zooms",
             "pause": "Esc",
-            "restart": "R",
-            "post_fx": "P toggles bloom/vignette/chromatic",
         },
         "acceptance_checks": [
-            "Title, settings, pause, restart, and end-run flows are keyboard operable.",
-            "Gameplay pauses while any modal menu is open.",
-            "HUD remains anchored as the window is resized.",
-            "The arena fills the playable viewport without clipping.",
+            "Briefing, tactical pause, victory, and defeat overlays protect the playfield.",
+            "Point selection, drag selection, move, and attack orders visibly respond.",
+            "Fog reveals around Lantern units while hidden Choir units remain concealed.",
+            "HUD remains anchored and the camera remains map-bounded after resize.",
         ],
         "validation_lanes": {name: " ".join(command) for name, command in VALIDATION_LANES.items()},
         "note": "Run validation only when the user has authorized build-artifact changes.",
