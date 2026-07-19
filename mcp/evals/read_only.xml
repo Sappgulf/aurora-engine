@@ -1,0 +1,42 @@
+<evaluation>
+  <qa_pair>
+    <question>Using only read-only Aurora MCP operations, identify the source id for the subsystem that owns wgpu sprite rendering. Respond with the source id only.</question>
+    <answer>renderer</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Using only read-only Aurora MCP operations, what command launches the playable vertical slice? Respond with the command only.</question>
+    <answer>cargo run -p aurora_run</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Using only read-only Aurora MCP operations, which key pauses an active Aurora Run? Respond with the key only.</question>
+    <answer>Esc</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Using only read-only Aurora MCP operations, name the source id that exposes the audio mixer and cues. Respond with the id only.</question>
+    <answer>audio</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Using only read-only Aurora MCP operations, identify the source id responsible for tile layers, solid tiles, and triggers. Respond with the id only.</question>
+    <answer>tilemap</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Using only read-only Aurora MCP operations, what input toggles the post-processing effects in Aurora Run? Respond with the key only.</question>
+    <answer>P</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Using only read-only Aurora MCP operations, identify the source id holding the feature-gated mesh/material contract. Respond with the id only.</question>
+    <answer>3d</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Using only read-only Aurora MCP operations, what is the upper bound of a single allowed source slice in lines? Respond with the number only.</question>
+    <answer>400</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Using only read-only Aurora MCP operations, which source id maps to the playable game implementation? Respond with the id only.</question>
+    <answer>aurora_run</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Using only read-only Aurora MCP operations, what web validation target is available for Aurora Run? Respond with the target triple only.</question>
+    <answer>wasm32-unknown-unknown</answer>
+  </qa_pair>
+</evaluation>

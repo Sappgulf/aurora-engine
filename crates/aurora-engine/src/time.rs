@@ -63,10 +63,24 @@ impl Time {
             false
         }
     }
+
+    /// Discard overdue simulation time while preserving the interpolation
+    /// remainder. Call this after a bounded fixed-update loop to keep a slow
+    /// frame from causing an ever-growing catch-up backlog.
+    pub fn discard_fixed_backlog(&mut self) {
+        if self.fixed_dt <= f32::EPSILON {
+            self.accumulator = 0.0;
+            self.alpha = 0.0;
+            return;
+        }
+
+        self.accumulator %= self.fixed_dt;
+        self.alpha = self.accumulator / self.fixed_dt;
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
-struct InstantCompat {
+pub(crate) struct InstantCompat {
     #[cfg(not(target_arch = "wasm32"))]
     inner: std::time::Instant,
     #[cfg(target_arch = "wasm32")]
@@ -74,7 +88,7 @@ struct InstantCompat {
 }
 
 impl InstantCompat {
-    fn now() -> Self {
+    pub(crate) fn now() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
             Self {
@@ -89,7 +103,7 @@ impl InstantCompat {
         }
     }
 
-    fn duration_since(self, earlier: Self) -> Duration {
+    pub(crate) fn duration_since(self, earlier: Self) -> Duration {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.inner.duration_since(earlier.inner)
@@ -108,4 +122,21 @@ fn js_sys_now() -> f64 {
         .and_then(|w| w.performance())
         .map(|p| p.now())
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Time;
+
+    #[test]
+    fn discarding_backlog_keeps_only_an_interpolation_remainder() {
+        let mut time = Time::new();
+        time.fixed_dt = 0.02;
+        time.accumulator = 0.117;
+
+        time.discard_fixed_backlog();
+
+        assert!((time.accumulator - 0.017).abs() < 0.000_1);
+        assert!((time.alpha - 0.85).abs() < 0.001);
+    }
 }

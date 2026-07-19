@@ -2,6 +2,22 @@
 
 use bytemuck::{Pod, Zeroable};
 
+/// Maximum number of analytic point lights composed in the post pass.
+///
+/// This stays deliberately small so the same shader and uniform layout work
+/// on native wgpu and the browser's conservative WebGL2 limits.
+pub(crate) const MAX_POINT_LIGHTS: usize = 16;
+
+/// A point light after world-space coordinates have been converted to screen
+/// UVs by the renderer.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ScreenLight {
+    pub position_uv: [f32; 2],
+    pub radius_uv: f32,
+    pub intensity: f32,
+    pub color: [f32; 3],
+}
+
 /// Tunable full-screen effects applied after the scene pass.
 #[derive(Debug, Clone)]
 pub struct PostFxSettings {
@@ -10,6 +26,8 @@ pub struct PostFxSettings {
     pub bloom_intensity: f32,
     pub vignette: f32,
     pub chromatic: f32,
+    /// Enables analytic point-light composition before bloom and tonemapping.
+    pub lighting: bool,
 }
 
 impl Default for PostFxSettings {
@@ -20,6 +38,7 @@ impl Default for PostFxSettings {
             bloom_intensity: 0.85,
             vignette: 0.55,
             chromatic: 0.004,
+            lighting: true,
         }
     }
 }
@@ -35,11 +54,21 @@ pub(crate) struct PostUniforms {
     pub enabled: f32,
     pub texel_x: f32,
     pub texel_y: f32,
+    pub light_count: f32,
+    pub _pad: [f32; 3],
+    pub lights: [[f32; 4]; MAX_POINT_LIGHTS],
+    pub light_colors: [[f32; 4]; MAX_POINT_LIGHTS],
 }
 
 impl PostUniforms {
-    pub fn from_settings(s: &PostFxSettings, time: f32, width: u32, height: u32) -> Self {
-        Self {
+    pub fn from_settings(
+        s: &PostFxSettings,
+        time: f32,
+        width: u32,
+        height: u32,
+        lights: &[ScreenLight],
+    ) -> Self {
+        let mut uniforms = Self {
             time,
             bloom_threshold: s.bloom_threshold,
             bloom_intensity: s.bloom_intensity,
@@ -48,7 +77,33 @@ impl PostUniforms {
             enabled: if s.enabled { 1.0 } else { 0.0 },
             texel_x: 1.0 / width.max(1) as f32,
             texel_y: 1.0 / height.max(1) as f32,
+            light_count: if s.lighting {
+                lights.len().min(MAX_POINT_LIGHTS) as f32
+            } else {
+                0.0
+            },
+            _pad: [0.0; 3],
+            lights: [[0.0; 4]; MAX_POINT_LIGHTS],
+            light_colors: [[0.0; 4]; MAX_POINT_LIGHTS],
+        };
+
+        if s.lighting {
+            for (index, light) in lights.iter().take(MAX_POINT_LIGHTS).enumerate() {
+                uniforms.lights[index] = [
+                    light.position_uv[0],
+                    light.position_uv[1],
+                    light.radius_uv.max(0.0001),
+                    light.intensity.max(0.0),
+                ];
+                uniforms.light_colors[index] = [
+                    light.color[0].max(0.0),
+                    light.color[1].max(0.0),
+                    light.color[2].max(0.0),
+                    0.0,
+                ];
+            }
         }
+        uniforms
     }
 }
 
@@ -71,7 +126,7 @@ impl PostPipeline {
         height: u32,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let format = wgpu::TextureFormat::Rgba16Float;
         let (scene_texture, scene_view) = create_scene_target(device, width, height, format);
 
         let scene_sampler = device.create_sampler(&wgpu::SamplerDescriptor {

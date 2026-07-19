@@ -121,6 +121,40 @@ impl Texture {
         Self::from_rgba(gpu, size, size, &data, "soft_circle")
     }
 
+    /// Faceted diamond pickup with a transparent background.
+    pub fn crystal(gpu: &GpuContext<'_>, size: u32, color: Color) -> Self {
+        let mut data = vec![0u8; (size * size * 4) as usize];
+        let half = (size as f32 - 1.0) * 0.5;
+        for y in 0..size {
+            for x in 0..size {
+                let dx = (x as f32 - half) / half;
+                let dy = (y as f32 - half) / half;
+                let edge = dx.abs() + dy.abs();
+                if edge > 0.94 {
+                    continue;
+                }
+
+                let facet = if dy < -dx.abs() * 0.35 {
+                    1.35
+                } else if dx < 0.0 {
+                    0.78
+                } else {
+                    1.05
+                };
+                let highlight = (1.0 - (dx * 0.7 + dy * 0.9).abs()).powf(2.0) * 0.28;
+                let i = ((y * size + x) * 4) as usize;
+                data[i] = (color.r * (facet + highlight) * 255.0).min(255.0) as u8;
+                data[i + 1] = (color.g * (facet + highlight) * 255.0).min(255.0) as u8;
+                data[i + 2] = (color.b * (facet + highlight) * 255.0).min(255.0) as u8;
+                data[i + 3] = ((0.94 - edge) / 0.08)
+                    .clamp(0.0, 1.0)
+                    .sqrt()
+                    .mul_add(255.0, 0.0) as u8;
+            }
+        }
+        Self::from_rgba(gpu, size, size, &data, "crystal")
+    }
+
     /// Checkerboard for debugging UV / camera.
     pub fn checker(gpu: &GpuContext<'_>, size: u32, cell: u32, a: Color, b: Color) -> Self {
         let mut data = vec![0u8; (size * size * 4) as usize];
@@ -152,6 +186,40 @@ impl Texture {
             }
         }
         Self::from_rgba(gpu, size, size, &data, "gradient_h")
+    }
+
+    /// A low-contrast arena material: indigo depth, cyan lane lines, and a central energy bloom.
+    pub fn arena_floor(gpu: &GpuContext<'_>, size: u32) -> Self {
+        let mut data = vec![0u8; (size * size * 4) as usize];
+        for y in 0..size {
+            for x in 0..size {
+                let u = x as f32 / (size - 1).max(1) as f32;
+                let v = y as f32 / (size - 1).max(1) as f32;
+                let dx = u - 0.5;
+                let dy = v - 0.5;
+                let distance = (dx * dx + dy * dy).sqrt();
+                let bloom = (1.0 - distance * 1.8).clamp(0.0, 1.0).powf(2.5);
+                let grid_x = ((u * 12.0).fract() - 0.5).abs();
+                let grid_y = ((v * 7.0).fract() - 0.5).abs();
+                let grid = if grid_x < 0.008 || grid_y < 0.012 {
+                    1.0
+                } else {
+                    0.0
+                };
+                let lane = if (v - 0.5).abs() < 0.004 || (u - 0.5).abs() < 0.003 {
+                    1.0
+                } else {
+                    0.0
+                };
+                let glow = bloom * 0.14 + grid * 0.035 + lane * 0.10;
+                let i = ((y * size + x) * 4) as usize;
+                data[i] = ((0.012 + glow * 0.15) * 255.0) as u8;
+                data[i + 1] = ((0.025 + glow * 0.52) * 255.0) as u8;
+                data[i + 2] = ((0.075 + glow * 0.82) * 255.0) as u8;
+                data[i + 3] = 255;
+            }
+        }
+        Self::from_rgba(gpu, size, size, &data, "arena_floor")
     }
 
     /// Horizontal strip of soft orbs with slight size variation (4 frames) for animation.

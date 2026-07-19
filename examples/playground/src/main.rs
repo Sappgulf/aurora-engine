@@ -8,10 +8,10 @@ use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 
 struct Playground {
-    tex_orb: usize,
-    tex_checker: usize,
-    tex_player: usize,
-    tex_beam: usize,
+    tex_orb: aurora_engine::TextureHandle,
+    tex_checker: aurora_engine::TextureHandle,
+    tex_player: aurora_engine::TextureHandle,
+    tex_beam: aurora_engine::TextureHandle,
     player: Vec2,
     orbs: Vec<Orb>,
     particles: ParticleSystem,
@@ -30,10 +30,10 @@ struct Orb {
 impl Playground {
     fn new() -> Self {
         Self {
-            tex_orb: 0,
-            tex_checker: 0,
-            tex_player: 0,
-            tex_beam: 0,
+            tex_orb: aurora_engine::TextureHandle::default(),
+            tex_checker: aurora_engine::TextureHandle::default(),
+            tex_player: aurora_engine::TextureHandle::default(),
+            tex_beam: aurora_engine::TextureHandle::default(),
             player: Vec2::ZERO,
             orbs: Vec::new(),
             particles: ParticleSystem::new(2048),

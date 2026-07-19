@@ -3,7 +3,23 @@
 use glam::Vec2;
 use std::collections::HashSet;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+
+/// Semantic controls used by games; physical key bindings remain centralized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Action {
+    MoveUp,
+    MoveDown,
+    MoveLeft,
+    MoveRight,
+    Pause,
+    Restart,
+    TogglePostFx,
+    MenuUp,
+    MenuDown,
+    MenuConfirm,
+    MenuBack,
+}
 
 /// Per-frame input snapshot maintained by the engine.
 #[derive(Debug, Default, Clone)]
@@ -20,6 +36,7 @@ pub struct Input {
     pub mouse_delta: Vec2,
     /// Vertical scroll this frame (lines-ish; positive = up).
     pub scroll: f32,
+    modifiers: ModifiersState,
     prev_mouse: Vec2,
     mouse_initialized: bool,
 }
@@ -73,6 +90,14 @@ impl Input {
             },
             WindowEvent::CursorMoved { position, .. } => {
                 let pos = Vec2::new(position.x as f32, position.y as f32);
+                #[cfg(target_arch = "wasm32")]
+                let pos = {
+                    let scale = web_sys::window()
+                        .map(|window| window.device_pixel_ratio() as f32)
+                        .unwrap_or(1.0)
+                        .max(1.0);
+                    pos / scale
+                };
                 if self.mouse_initialized {
                     self.mouse_delta += pos - self.prev_mouse;
                 }
@@ -85,6 +110,9 @@ impl Input {
                     MouseScrollDelta::LineDelta(_, y) => *y,
                     MouseScrollDelta::PixelDelta(p) => (p.y as f32) * 0.02,
                 };
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
             }
             _ => {}
         }
@@ -102,6 +130,43 @@ impl Input {
         self.keys_released.contains(&key)
     }
 
+    pub fn shift_down(&self) -> bool {
+        self.modifiers.shift_key()
+    }
+
+    /// Treat Command as Control on macOS so RTS control groups remain ergonomic.
+    pub fn control_down(&self) -> bool {
+        self.modifiers.control_key() || self.modifiers.super_key()
+    }
+
+    pub fn action_down(&self, action: Action) -> bool {
+        self.action_keys(action)
+            .iter()
+            .any(|key| self.key_down(*key))
+    }
+
+    pub fn action_pressed(&self, action: Action) -> bool {
+        self.action_keys(action)
+            .iter()
+            .any(|key| self.key_pressed(*key))
+    }
+
+    fn action_keys(&self, action: Action) -> &'static [KeyCode] {
+        match action {
+            Action::MoveUp => &[KeyCode::KeyW, KeyCode::ArrowUp],
+            Action::MoveDown => &[KeyCode::KeyS, KeyCode::ArrowDown],
+            Action::MoveLeft => &[KeyCode::KeyA, KeyCode::ArrowLeft],
+            Action::MoveRight => &[KeyCode::KeyD, KeyCode::ArrowRight],
+            Action::Pause => &[KeyCode::Escape],
+            Action::Restart => &[KeyCode::KeyR],
+            Action::TogglePostFx => &[KeyCode::KeyP],
+            Action::MenuUp => &[KeyCode::ArrowUp, KeyCode::KeyW],
+            Action::MenuDown => &[KeyCode::ArrowDown, KeyCode::KeyS],
+            Action::MenuConfirm => &[KeyCode::Enter, KeyCode::Space],
+            Action::MenuBack => &[KeyCode::Escape],
+        }
+    }
+
     pub fn mouse_down(&self, button: MouseButton) -> bool {
         self.mouse_buttons_down.contains(&button)
     }
@@ -117,16 +182,16 @@ impl Input {
     /// WASD / arrow movement vector (normalized if non-zero).
     pub fn axis_wasd(&self) -> Vec2 {
         let mut v = Vec2::ZERO;
-        if self.key_down(KeyCode::KeyW) || self.key_down(KeyCode::ArrowUp) {
+        if self.action_down(Action::MoveUp) {
             v.y += 1.0;
         }
-        if self.key_down(KeyCode::KeyS) || self.key_down(KeyCode::ArrowDown) {
+        if self.action_down(Action::MoveDown) {
             v.y -= 1.0;
         }
-        if self.key_down(KeyCode::KeyA) || self.key_down(KeyCode::ArrowLeft) {
+        if self.action_down(Action::MoveLeft) {
             v.x -= 1.0;
         }
-        if self.key_down(KeyCode::KeyD) || self.key_down(KeyCode::ArrowRight) {
+        if self.action_down(Action::MoveRight) {
             v.x += 1.0;
         }
         if v.length_squared() > 0.0 {
@@ -134,5 +199,18 @@ impl Input {
         } else {
             v
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actions_keep_physical_bindings_out_of_game_logic() {
+        let mut input = Input::new();
+        input.keys_down.insert(KeyCode::ArrowUp);
+        assert!(input.action_down(Action::MoveUp));
+        assert_eq!(input.axis_wasd(), Vec2::Y);
     }
 }
