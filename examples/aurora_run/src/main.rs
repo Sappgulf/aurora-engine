@@ -319,6 +319,15 @@ impl Game for AuroraRun {
             Sprite::new(Vec2::ZERO, WORLD + Vec2::splat(80.0)).with_z(-5.0),
         );
 
+        // Soft emissive pools make the player and hazards read as lights while
+        // leaving the silhouette and collision geometry crisp.
+        ctx.renderer.draw_sprite(
+            self.tex_orb,
+            Sprite::new(self.player, Vec2::splat(210.0))
+                .with_color(Color::rgba(0.15, 1.8, 1.45, 0.14 + 0.03 * (t * 3.0).sin()))
+                .with_z(-3.0),
+        );
+
         // Arena border glow
         let border = Color::rgba(0.3, 0.8, 1.0, 0.15);
         let t_orb = self.tex_orb;
@@ -343,7 +352,7 @@ impl Game for AuroraRun {
             ctx.renderer.draw_sprite(
                 self.tex_orb,
                 Sprite::new(c.pos, Vec2::splat(32.0 * pulse))
-                    .with_color(Color::rgba(1.0, 0.92, 0.4, 0.95))
+                    .with_color(Color::rgba(2.1, 1.45, 0.22, 0.95))
                     .with_z(0.0),
             );
         }
@@ -352,10 +361,16 @@ impl Game for AuroraRun {
         for h in &self.hazards {
             let rot = t * 2.0 + h.pos.x * 0.01;
             ctx.renderer.draw_sprite(
+                self.tex_orb,
+                Sprite::new(h.pos, Vec2::splat(h.size * 5.0))
+                    .with_color(Color::rgba(2.4, 0.08, 0.18, 0.10))
+                    .with_z(-2.0),
+            );
+            ctx.renderer.draw_sprite(
                 self.tex_hazard,
                 Sprite::new(h.pos, Vec2::splat(h.size))
                     .with_rotation(rot)
-                    .with_color(Color::rgba(1.0, 0.35, 0.4, 0.9))
+                    .with_color(Color::rgba(1.7, 0.22, 0.32, 0.9))
                     .with_z(0.2),
             );
         }

@@ -209,8 +209,9 @@ impl Renderer {
             push_constant_ranges: &[],
         });
 
-        // Scene is always RGBA8 sRGB offscreen; post maps to the surface format.
-        let scene_format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        // Linear floating-point scene color preserves emissive lights for bloom
+        // before the post pass tonemaps to the display surface.
+        let scene_format = wgpu::TextureFormat::Rgba16Float;
 
         let sprite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Sprite Pipeline"),

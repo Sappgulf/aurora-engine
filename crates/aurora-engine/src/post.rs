@@ -71,7 +71,7 @@ impl PostPipeline {
         height: u32,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let format = wgpu::TextureFormat::Rgba16Float;
         let (scene_texture, scene_view) = create_scene_target(device, width, height, format);
 
         let scene_sampler = device.create_sampler(&wgpu::SamplerDescriptor {

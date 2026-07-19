@@ -36,6 +36,15 @@ fn luminance(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
+fn tonemap_aces(c: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let cc = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((c * (a * c + b)) / (c * (cc * c + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let uv = in.uv;
@@ -88,5 +97,5 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Subtle pulse
     color *= 0.97 + 0.03 * sin(u.time * 1.5);
 
-    return vec4<f32>(color, 1.0);
+    return vec4<f32>(tonemap_aces(color), 1.0);
 }
