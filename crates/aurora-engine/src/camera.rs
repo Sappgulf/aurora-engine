@@ -74,6 +74,29 @@ impl Camera2D {
         self.position += before - after;
     }
 
+    /// Keep the whole visible camera view inside a world-space rectangle.
+    ///
+    /// Unlike clamping a player position, this accounts for the current zoom
+    /// and viewport size, so scrolling can never reveal outside-map space.
+    pub fn clamp_to_bounds(&mut self, bounds: Aabb) {
+        let half_view = self.visible_world_size() * 0.5;
+        let center = bounds.center();
+        let min = bounds.min + half_view;
+        let max = bounds.max - half_view;
+        self.position = Vec2::new(
+            if min.x > max.x {
+                center.x
+            } else {
+                self.position.x.clamp(min.x, max.x)
+            },
+            if min.y > max.y {
+                center.y
+            } else {
+                self.position.y.clamp(min.y, max.y)
+            },
+        );
+    }
+
     /// View-projection matrix for shaders (clip space).
     pub fn view_projection(&self) -> Mat4 {
         let half = self.visible_world_size() * 0.5;
@@ -259,6 +282,14 @@ mod rig_tests {
             camera.world_from_viewport_fraction(Vec2::ONE),
             Vec2::new(650.0, 380.0)
         );
+    }
+
+    #[test]
+    fn camera_bounds_keep_the_visible_view_inside_the_map() {
+        let mut camera = Camera2D::new(100.0, 80.0);
+        camera.position = Vec2::new(900.0, -900.0);
+        camera.clamp_to_bounds(Aabb::from_center_size(Vec2::ZERO, Vec2::new(500.0, 400.0)));
+        assert_eq!(camera.position, Vec2::new(200.0, -160.0));
     }
 
     #[test]

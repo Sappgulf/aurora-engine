@@ -8,23 +8,15 @@ use aurora_engine::{
 use glam::Vec2;
 use winit::keyboard::KeyCode;
 
-const WORLD: Vec2 = Vec2::new(1180.0, 660.0);
+/// One shared world extent for simulation, camera limits, and the environment
+/// layer. Keeping these in one coordinate space prevents a decorative frame
+/// from accidentally becoming the playable world boundary.
+const MAP_SIZE: Vec2 = Vec2::new(2600.0, 1460.0);
 const PLAYER_MAX_SPEED: f32 = 430.0;
 const PLAYER_ACCEL_RESPONSE: f32 = 13.0;
 const PLAYER_BRAKE_RESPONSE: f32 = 8.5;
 const PLAYER_SIZE: f32 = 40.0;
 const UNIT_ATLAS_SIZE: Vec2 = Vec2::splat(1254.0);
-
-/// Painted-in set dressing that gives the otherwise procedural arena a few
-/// intentional landmarks. It is deliberately data-only: gameplay collision
-/// remains in the simple world bounds, while the presentation can evolve
-/// without changing the run's movement contract.
-struct ArenaProp {
-    pos: Vec2,
-    size: Vec2,
-    accent: Color,
-    rotation: f32,
-}
 
 struct Collectible {
     pos: Vec2,
@@ -57,7 +49,6 @@ struct AuroraRun {
     tex_floor: TextureHandle,
     tex_backdrop: TextureHandle,
     tex_units: TextureHandle,
-    tex_decal: TextureHandle,
     tex_ui: TextureHandle,
     player_atlas: TextureAtlas,
     drone_atlas: TextureAtlas,
@@ -83,7 +74,6 @@ struct AuroraRun {
     dash_charges: u32,
     facing: Vec2,
     menu: MenuState,
-    arena_props: Vec<ArenaProp>,
     save: SaveData,
     save_store: SaveStore,
     run_recorded: bool,
@@ -99,7 +89,6 @@ impl AuroraRun {
             tex_floor: TextureHandle::default(),
             tex_backdrop: TextureHandle::default(),
             tex_units: TextureHandle::default(),
-            tex_decal: TextureHandle::default(),
             tex_ui: TextureHandle::default(),
             player_atlas: TextureAtlas::new(TextureHandle::default(), 2, 2, UNIT_ATLAS_SIZE),
             drone_atlas: TextureAtlas::new(TextureHandle::default(), 2, 2, UNIT_ATLAS_SIZE),
@@ -128,7 +117,6 @@ impl AuroraRun {
             save: SaveData::default(),
             save_store: SaveStore::new("aurora-run"),
             run_recorded: false,
-            arena_props: Vec::new(),
         }
     }
 
@@ -138,9 +126,9 @@ impl AuroraRun {
         let count = (8 + self.wave * 3).min(22);
         for i in 0..count {
             let a = (i as f32 / count as f32) * std::f32::consts::TAU + self.wave as f32 * 0.23;
-            let radius = 175.0 + (i % 4) as f32 * 62.0;
+            let radius = 300.0 + (i % 5) as f32 * 135.0;
             self.collectibles.push(Collectible {
-                pos: Vec2::new(a.cos() * radius, a.sin() * (120.0 + (i % 3) as f32 * 56.0)),
+                pos: Vec2::new(a.cos() * radius, a.sin() * (220.0 + (i % 4) as f32 * 84.0)),
                 alive: true,
                 upgrade: i == count - 1,
             });
@@ -150,7 +138,7 @@ impl AuroraRun {
             let a = i as f32 * 1.71 + self.wave as f32 * 0.38;
             let speed = 86.0 + self.wave as f32 * 14.0 + (i % 3) as f32 * 22.0;
             self.hazards.push(Hazard {
-                pos: Vec2::new(a.cos() * 390.0, a.sin() * 225.0),
+                pos: Vec2::new(a.cos() * 860.0, a.sin() * 470.0),
                 vel: Vec2::new(a.sin(), -a.cos()) * speed,
                 size: 25.0 + (i % 3) as f32 * 7.0,
                 pattern: match i % 3 {
@@ -279,96 +267,6 @@ impl AuroraRun {
         }
     }
 
-    fn draw_arena_architecture(&self, ctx: &mut FrameCtx<'_>, t: f32) {
-        // Four inset floor seams make the play space read as a constructed
-        // arena rather than an infinite texture. The little corner lights also
-        // give players stable spatial references when the camera is moving.
-        let half = WORLD * 0.5;
-        let seam_color = Color::rgba(0.12, 0.62, 0.9, 0.34);
-        for (pos, size) in [
-            (
-                Vec2::new(0.0, half.y - 34.0),
-                Vec2::new(WORLD.x - 108.0, 3.0),
-            ),
-            (
-                Vec2::new(0.0, -half.y + 34.0),
-                Vec2::new(WORLD.x - 108.0, 3.0),
-            ),
-            (
-                Vec2::new(half.x - 34.0, 0.0),
-                Vec2::new(3.0, WORLD.y - 108.0),
-            ),
-            (
-                Vec2::new(-half.x + 34.0, 0.0),
-                Vec2::new(3.0, WORLD.y - 108.0),
-            ),
-        ] {
-            ctx.renderer.draw_sprite(
-                self.tex_ui,
-                Sprite::new(pos, size).with_color(seam_color).with_z(-3.8),
-            );
-        }
-
-        for prop in &self.arena_props {
-            // Deep shadow, armored panel, then a circuit face. The rotated
-            // panel breaks up the old grid-only arena with deliberately shaped
-            // scenery while still leaving the combat lanes clear.
-            ctx.renderer.draw_sprite(
-                self.tex_ui,
-                Sprite::new(
-                    prop.pos + Vec2::new(8.0, -8.0),
-                    prop.size + Vec2::splat(14.0),
-                )
-                .with_rotation(prop.rotation)
-                .with_color(Color::rgba(0.0, 0.01, 0.045, 0.82))
-                .with_z(-3.7),
-            );
-            ctx.renderer.draw_sprite(
-                self.tex_ui,
-                Sprite::new(prop.pos, prop.size)
-                    .with_rotation(prop.rotation)
-                    .with_color(Color::rgba(0.035, 0.11, 0.22, 0.96))
-                    .with_z(-3.65),
-            );
-            ctx.renderer.draw_sprite(
-                self.tex_decal,
-                Sprite::new(prop.pos, prop.size * 0.88)
-                    .with_rotation(prop.rotation)
-                    .with_color(prop.accent)
-                    .with_z(-3.6),
-            );
-            let pulse = 0.58 + 0.25 * (t * 2.2 + prop.pos.x * 0.01).sin();
-            ctx.renderer.draw_light(PointLight::new(
-                prop.pos,
-                prop.accent,
-                prop.size.length() * 0.58,
-                pulse * 0.18,
-            ));
-        }
-
-        for corner in [
-            Vec2::new(-half.x + 54.0, -half.y + 54.0),
-            Vec2::new(half.x - 54.0, -half.y + 54.0),
-            Vec2::new(-half.x + 54.0, half.y - 54.0),
-            Vec2::new(half.x - 54.0, half.y - 54.0),
-        ] {
-            let pulse = 0.5 + 0.22 * (t * 3.0 + corner.x * 0.007).sin();
-            ctx.renderer.draw_sprite(
-                self.tex_crystal,
-                Sprite::new(corner, Vec2::splat(24.0 + pulse * 8.0))
-                    .with_rotation(t * 0.35)
-                    .with_color(Color::rgba(0.18, 1.25, 1.18, 0.76))
-                    .with_z(-3.45),
-            );
-            ctx.renderer.draw_light(PointLight::new(
-                corner,
-                Color::rgb(0.1, 0.9, 1.2),
-                64.0,
-                0.16 + pulse * 0.08,
-            ));
-        }
-    }
-
     fn draw_menu(&self, ctx: &mut FrameCtx<'_>, screen: MenuScreen, t: f32) {
         let camera = ctx.renderer.camera.position;
         let view = ctx.renderer.camera.visible_world_size();
@@ -484,7 +382,7 @@ impl Game for AuroraRun {
     }
 
     fn on_start(&mut self, renderer: &mut Renderer) {
-        let (units, backdrop, orb, crystal, floor, decal, ui) = {
+        let (units, backdrop, orb, crystal, floor, ui) = {
             let gpu = renderer.gpu();
             (
                 Texture::from_bytes(
@@ -502,7 +400,6 @@ impl Game for AuroraRun {
                 Texture::soft_circle(&gpu, 48, Color::rgb(0.95, 0.85, 0.3)),
                 Texture::crystal(&gpu, 64, Color::rgb(1.0, 0.72, 0.16)),
                 Texture::arena_floor(&gpu, 512),
-                circuit_decal(&gpu),
                 Texture::solid(&gpu, Color::WHITE),
             )
         };
@@ -513,7 +410,6 @@ impl Game for AuroraRun {
         self.tex_crystal = renderer.add_texture(crystal);
         self.tex_hazard = self.tex_units;
         self.tex_floor = renderer.add_texture(floor);
-        self.tex_decal = renderer.add_texture(decal);
         self.tex_ui = renderer.add_texture(ui);
         self.player_atlas = TextureAtlas::new(self.tex_units, 2, 2, UNIT_ATLAS_SIZE);
         self.drone_atlas = TextureAtlas::new(self.tex_units, 2, 2, UNIT_ATLAS_SIZE);
@@ -608,7 +504,7 @@ impl Game for AuroraRun {
         let steering = 1.0 - (-response * dt).exp();
         self.player_velocity = self.player_velocity.lerp(target_velocity, steering);
         self.player += self.player_velocity * dt;
-        let half = WORLD * 0.5 - Vec2::splat(24.0);
+        let half = MAP_SIZE * 0.5 - Vec2::splat(24.0);
         let clamped = self.player.clamp(-half, half);
         if clamped.x != self.player.x {
             self.player_velocity.x = 0.0;
@@ -623,7 +519,7 @@ impl Game for AuroraRun {
         }
 
         // Hazards bounce in world
-        let bound = WORLD * 0.5;
+        let bound = MAP_SIZE * 0.5;
         for h in &mut self.hazards {
             h.phase += dt;
             match h.pattern {
@@ -794,7 +690,7 @@ impl Game for AuroraRun {
             let a = self.rng.f32() * std::f32::consts::TAU;
             let speed = 105.0 + self.rng.f32() * 80.0 + self.wave as f32 * 12.0;
             self.hazards.push(Hazard {
-                pos: Vec2::new(a.cos() * 300.0, a.sin() * 180.0),
+                pos: Vec2::new(a.cos() * 880.0, a.sin() * 470.0),
                 vel: Vec2::new(a.sin(), -a.cos()) * speed,
                 size: 26.0 + self.rng.f32() * 16.0,
                 pattern: if self.rng.f32() > 0.5 {
@@ -828,6 +724,9 @@ impl Game for AuroraRun {
             .position
             .lerp(camera_target, camera_response);
         ctx.renderer.camera.position += shake_off;
+        ctx.renderer
+            .camera
+            .clamp_to_bounds(Aabb::from_center_size(Vec2::ZERO, MAP_SIZE));
         let speed_ratio = (self.player_velocity.length() / PLAYER_MAX_SPEED).clamp(0.0, 1.0);
         let target_zoom = 1.34 - speed_ratio * 0.08;
         ctx.renderer.camera.zoom +=
@@ -852,24 +751,18 @@ impl Game for AuroraRun {
         };
         ctx.renderer.set_clear_color(clear);
 
-        // The arena is camera-derived rather than a fixed pixel rectangle, so
-        // it fills native windows, browser canvases, and DPI-scaled displays.
-        let view_size = ctx.renderer.camera.visible_world_size();
-        let arena_center = ctx.renderer.camera.position;
-        let arena_size = view_size * 1.035;
-
-        // Floor
+        // The environment is map-relative, not camera-relative: moving across
+        // the station reveals new floor detail instead of dragging a border.
         ctx.renderer.draw_sprite(
             self.tex_backdrop,
-            Sprite::new(arena_center, arena_size).with_z(-7.0),
+            Sprite::new(Vec2::ZERO, MAP_SIZE).with_z(-7.0),
         );
         ctx.renderer.draw_sprite(
             self.tex_floor,
-            Sprite::new(arena_center, arena_size)
+            Sprite::new(Vec2::ZERO, MAP_SIZE)
                 .with_color(Color::rgba(0.18, 0.32, 0.58, 0.22))
                 .with_z(-5.0),
         );
-        self.draw_arena_architecture(ctx, t);
 
         // Soft emissive pools make the player and hazards read as lights while
         // leaving the silhouette and collision geometry crisp.
@@ -885,33 +778,6 @@ impl Game for AuroraRun {
             145.0,
             0.46 + 0.08 * (t * 3.0).sin(),
         ));
-
-        // Arena border glow
-        let border = Color::rgba(0.08, 1.6, 1.35, 0.28);
-        let t_orb = self.tex_orb;
-        for (pos, size) in [
-            (
-                arena_center + Vec2::new(0.0, arena_size.y * 0.5),
-                Vec2::new(arena_size.x, 14.0),
-            ),
-            (
-                arena_center - Vec2::new(0.0, arena_size.y * 0.5),
-                Vec2::new(arena_size.x, 14.0),
-            ),
-            (
-                arena_center + Vec2::new(arena_size.x * 0.5, 0.0),
-                Vec2::new(14.0, arena_size.y),
-            ),
-            (
-                arena_center - Vec2::new(arena_size.x * 0.5, 0.0),
-                Vec2::new(14.0, arena_size.y),
-            ),
-        ] {
-            ctx.renderer.draw_sprite(
-                t_orb,
-                Sprite::new(pos, size).with_color(border).with_z(-4.0),
-            );
-        }
 
         // Collectibles
         for c in &self.collectibles {
@@ -1152,30 +1018,4 @@ impl Game for AuroraRun {
 
 fn main() {
     run(AuroraRun::new());
-}
-
-/// A transparent hard-surface decal used by the sample's arena props. Keeping
-/// this local demonstrates that a game can supply authored procedural art via
-/// the public texture API without adding a special renderer path.
-fn circuit_decal(gpu: &aurora_engine::GpuContext<'_>) -> Texture {
-    const SIZE: u32 = 96;
-    let mut rgba = vec![0_u8; (SIZE * SIZE * 4) as usize];
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let edge = x < 3 || y < 3 || x >= SIZE - 3 || y >= SIZE - 3;
-            let spine = (x as i32 - y as i32).abs() < 2 || (x + y > 91 && x + y < 96);
-            let node = ((x as i32 - 22).pow(2) + (y as i32 - 24).pow(2) < 34)
-                || ((x as i32 - 74).pow(2) + (y as i32 - 70).pow(2) < 34)
-                || ((x as i32 - 48).pow(2) + (y as i32 - 48).pow(2) < 24);
-            if !(edge || spine || node) {
-                continue;
-            }
-            let i = ((y * SIZE + x) * 4) as usize;
-            rgba[i] = 132;
-            rgba[i + 1] = 224;
-            rgba[i + 2] = 255;
-            rgba[i + 3] = if node { 238 } else { 156 };
-        }
-    }
-    Texture::from_rgba(gpu, SIZE, SIZE, &rgba, "aurora circuit decal")
 }
