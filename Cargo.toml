@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aurora-engine",
+    "examples/triangle_demo",
+]
+default-members = ["examples/triangle_demo"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Sappgulf/aurora-engine"
+authors = ["Aurora Engine Contributors"]
+
+[workspace.dependencies]
+aurora-engine = { path = "crates/aurora-engine" }
+wgpu = "24.0"
+winit = "0.30"
+glam = "0.29"
+log = "0.4"
+env_logger = "0.11"
+pollster = "0.4"
+bytemuck = { version = "1.21", features = ["derive"] }
+cfg-if = "1.0"
+console_error_panic_hook = "0.1"
+console_log = "1.0"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Window",
+] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[profile.release-web]
+inherits = "release"
+opt-level = "s"
+strip = true

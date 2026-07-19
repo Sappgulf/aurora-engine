@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Aurora Engine — Triangle Demo</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #070a14;
+        --panel: #0e1424;
+        --text: #e8eefc;
+        --muted: #8b9bb8;
+        --accent: #2fd9b8;
+        --accent2: #8b5cf6;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+        background: radial-gradient(1200px 600px at 50% -10%, #1a1040 0%, var(--bg) 55%);
+        color: var(--text);
+      }
+      main {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 2rem 1.25rem 3rem;
+      }
+      header h1 {
+        margin: 0 0 0.35rem;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        background: linear-gradient(120deg, var(--accent), var(--accent2));
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+      header p {
+        margin: 0 0 1.5rem;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .stage {
+        background: var(--panel);
+        border: 1px solid rgba(143, 163, 200, 0.15);
+        border-radius: 16px;
+        padding: 0.75rem;
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+      }
+      #aurora-canvas {
+        width: 100%;
+        max-width: 100%;
+        aspect-ratio: 16 / 9;
+        display: block;
+        border-radius: 10px;
+        background: #0a0d1a;
+      }
+      .hint {
+        margin-top: 1rem;
+        font-size: 0.9rem;
+        color: var(--muted);
+      }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.85em;
+        background: rgba(255, 255, 255, 0.06);
+        padding: 0.15em 0.4em;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Aurora Engine</h1>
+        <p>
+          Rust + wgpu demo running in the browser via WebAssembly / WebGPU.
+          You should see a rotating teal–violet–magenta triangle.
+        </p>
+      </header>
+      <div class="stage">
+        <canvas id="aurora-canvas" width="1280" height="720"></canvas>
+      </div>
+      <p class="hint">
+        Requires a recent Chrome, Edge, Firefox, or Safari with WebGPU enabled.
+        Build with <code>./scripts/build-web.sh</code> and serve the
+        <code>dist/</code> folder.
+      </p>
+    </main>
+    <!-- Trunk injects the WASM bundle when using `trunk serve` -->
+  </body>
+</html>

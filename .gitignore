@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+.DS_Store
+*.pdb
+dist/
+web/pkg/
+.idea/
+.vscode/
+*.swp
+.trunk/
