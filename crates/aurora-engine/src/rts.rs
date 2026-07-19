@@ -442,6 +442,16 @@ impl RtsWorld {
         &self.selection
     }
 
+    /// Units currently assigned to `slot` (regardless of whether they're
+    /// still alive/friendly — see [`RtsWorld::recall_control_group`] for the
+    /// filtered version used to actually select them).
+    pub fn control_group(&self, slot: usize) -> &[UnitId] {
+        self.control_groups
+            .get(slot)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     pub fn assign_control_group(&mut self, slot: usize) -> bool {
         let Some(group) = self.control_groups.get_mut(slot) else {
             return false;
@@ -620,6 +630,24 @@ impl NavGrid {
         if let Some(index) = self.index(cell) {
             self.blocked[index] = blocked;
         }
+    }
+
+    pub fn is_blocked_at(&self, world: Vec2) -> bool {
+        self.index(self.world_to_cell(world))
+            .map(|index| self.blocked[index])
+            .unwrap_or(false)
+    }
+
+    /// Samples a straight line between two world points and reports whether
+    /// any sampled point falls in a blocked cell. Used to decide whether a
+    /// direct approach needs to fall back to `find_path`.
+    pub fn segment_blocked(&self, start: Vec2, end: Vec2) -> bool {
+        let distance = start.distance(end);
+        if distance <= f32::EPSILON {
+            return self.is_blocked_at(start);
+        }
+        let steps = (distance / (self.cell_size * 0.5)).ceil().max(1.0) as u32;
+        (0..=steps).any(|step| self.is_blocked_at(start.lerp(end, step as f32 / steps as f32)))
     }
 
     pub fn find_path(&self, start_world: Vec2, goal_world: Vec2) -> Vec<Vec2> {
@@ -833,6 +861,15 @@ mod tests {
         assert!(path
             .iter()
             .all(|point| grid.world_to_cell(*point) != IVec2::new(2, 1)));
+    }
+
+    #[test]
+    fn segment_blocked_detects_obstacles_between_endpoints() {
+        let mut grid = NavGrid::new(5, 3, Vec2::ZERO, 10.0);
+        assert!(!grid.segment_blocked(Vec2::new(5.0, 15.0), Vec2::new(45.0, 15.0)));
+        grid.set_blocked(IVec2::new(2, 1), true);
+        assert!(grid.segment_blocked(Vec2::new(5.0, 15.0), Vec2::new(45.0, 15.0)));
+        assert!(!grid.segment_blocked(Vec2::new(5.0, 5.0), Vec2::new(45.0, 5.0)));
     }
 
     #[test]

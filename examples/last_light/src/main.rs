@@ -1,19 +1,23 @@
 //! Aurora: Last Light — Reclaim the Reactor.
 //! Point-and-click RTS vertical slice powered by Aurora Engine.
 
-use std::collections::HashMap;
+mod missions;
+
+use std::collections::{HashMap, VecDeque};
 
 use aurora_engine::{
-    run, Aabb, AnimationClip, AnimationPlayer, BitmapText, Color, FactionId, FogOfWar, FogState,
-    FrameCtx, Game, MinimapTransform, PlacementError, PlacementRules, PointLight, PowerGrid,
-    PowerNode, PowerNodeId, ProductId, ProductionQueue, ProductionRecipe, QueueError, Renderer,
-    ResourceBank, RtsWorld, SaveData, SaveStore, SelectionBox, Sprite, Texture, TextureAtlas,
-    TextureHandle, UnitId, UnitOrder,
+    mark_obstacles, run, Aabb, AiParams, AnimationClip, AnimationPlayer, BitmapText, Color,
+    FactionId, FogOfWar, FogState, FrameCtx, Game, MinimapTransform, NavGrid, PlacementError,
+    PlacementRules, PointLight, PowerGrid, PowerNode, PowerNodeId, ProductId, ProductionQueue,
+    ProductionRecipe, QueueError, Renderer, ResourceBank, RtsWorld, SaveData, SaveStore,
+    SelectionBox, SimpleAggroAi, Sprite, Texture, TextureAtlas, TextureHandle, UnitId, UnitOrder,
 };
 use glam::Vec2;
+use missions::{MissionDef, VictoryCondition};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 const MAP_SIZE: Vec2 = Vec2::new(2600.0, 1460.0);
+const NAV_CELL_SIZE: f32 = 40.0;
 const PLAYER: FactionId = FactionId(1);
 const CHOIR: FactionId = FactionId(2);
 const UNIT_ATLAS_SIZE: Vec2 = Vec2::new(1536.0, 1024.0);
@@ -43,6 +47,7 @@ const LUMEN: &str = "lumen-voice";
 const LUMEN_CONTACT: &str = "lumen-contact-established";
 const LUMEN_GUARDIAN: &str = "guardian-protocol";
 const LUMEN_WITNESS: &str = "witness-protocol";
+const LUMEN_AWAKENED: &str = "lumen-awakened";
 const MERIDIAN: &str = "meridian-compact";
 const MERIDIAN_ALLIED: &str = "meridian-allied";
 const MERIDIAN_BASTION: &str = "bastion-accord";
@@ -125,6 +130,19 @@ struct FieldBeacon {
     position: Vec2,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StructureKind {
+    Relay(usize),
+    Fabricator,
+    Reactor,
+}
+
+impl StructureKind {
+    const RELAY_RADIUS: f32 = 85.0;
+    const FABRICATOR_RADIUS: f32 = 105.0;
+    const REACTOR_RADIUS: f32 = 135.0;
+}
+
 struct LastLight {
     tex_environment: TextureHandle,
     tex_units: TextureHandle,
@@ -159,7 +177,7 @@ struct LastLight {
     drag: Option<SelectionBox>,
     order_marker: Option<(Vec2, f32)>,
     relays: Vec<Relay>,
-    reactor_position: Vec2,
+    reactor_position: Option<Vec2>,
     fabricator_position: Vec2,
     field_beacons: Vec<FieldBeacon>,
     placing_beacon: bool,
@@ -171,12 +189,34 @@ struct LastLight {
     save_store: SaveStore,
     save_data: SaveData,
     victory_saved: bool,
+    mission_select: bool,
+    mission_cursor: usize,
+    /// Set the first time `on_fixed_update` handles input each rendered
+    /// frame, cleared once per frame in `on_update`. The fixed-step
+    /// catch-up loop can run `on_fixed_update` several times in one
+    /// rendered frame after a hitch, but `key_pressed`/`mouse_pressed` stay
+    /// true for the whole frame — without this, a single click or keypress
+    /// could fire twice (e.g. queuing two units off one click, or cascading
+    /// through mission-select *and* straight out of the briefing). All
+    /// edge-triggered input handling below is gated on this being false;
+    /// continuous simulation (movement, combat, economy) still runs every
+    /// fixed step regardless.
+    input_handled_this_frame: bool,
     briefing: bool,
     paused: bool,
     victory: bool,
     defeat: bool,
     enemy_think: f32,
     mission_time: f32,
+    mission: MissionDef,
+    escort_unit: Option<UnitId>,
+    enemy_ai: SimpleAggroAi,
+    nav: NavGrid,
+    selected_structure: Option<StructureKind>,
+    /// Remaining waypoints for units routed around an obstacle by
+    /// `handle_pointer`'s move command. Advanced in `advance_player_paths`.
+    player_paths: HashMap<UnitId, VecDeque<Vec2>>,
+    canticle_reinforced: bool,
 }
 
 impl LastLight {
@@ -184,24 +224,16 @@ impl LastLight {
         let save_store = SaveStore::new("last-light-campaign");
         let save_data = save_store.load().ok().flatten().unwrap_or_default();
         let starting_salvage = 150_u32.saturating_add(save_data.campaign.currency.min(100) as u32);
-        let mut power = PowerGrid::default();
-        power.add_node(PowerNode {
-            id: FABRICATOR_NODE,
-            supply: 1,
-            demand: 1,
-            online: true,
-        });
-        for index in 0..3 {
-            let relay = PowerNodeId(index + 1);
-            power.add_node(PowerNode {
-                id: relay,
-                supply: 1,
-                demand: 0,
-                online: false,
-            });
-            power.link(FABRICATOR_NODE, relay);
-        }
-        let mut game = Self {
+        let unlocked_tier = save_data.campaign.unlocked_mission;
+        let mission_cursor = missions::all()
+            .iter()
+            .enumerate()
+            .filter(|(_, mission)| unlocked_tier >= mission.required_tier)
+            .map(|(index, _)| index)
+            .next_back()
+            .unwrap_or(0);
+
+        Self {
             tex_environment: TextureHandle::default(),
             tex_units: TextureHandle::default(),
             tex_warden_move: TextureHandle::default(),
@@ -279,93 +311,131 @@ impl LastLight {
             fog: FogOfWar::new(26, 15, -MAP_SIZE * 0.5, 100.0),
             drag: None,
             order_marker: None,
-            relays: vec![
-                Relay {
-                    position: Vec2::new(-790.0, 320.0),
-                    progress: 0.0,
-                    active: false,
-                },
-                Relay {
-                    position: Vec2::new(30.0, -430.0),
-                    progress: 0.0,
-                    active: false,
-                },
-                Relay {
-                    position: Vec2::new(830.0, 250.0),
-                    progress: 0.0,
-                    active: false,
-                },
-            ],
-            reactor_position: Vec2::new(520.0, -40.0),
-            fabricator_position: Vec2::new(-1_020.0, -120.0),
+            relays: Vec::new(),
+            reactor_position: None,
+            fabricator_position: Vec2::ZERO,
             field_beacons: Vec::new(),
             placing_beacon: false,
             resources: ResourceBank::new(starting_salvage),
             resource_tick: 0.0,
             production: ProductionQueue::new(5),
-            power,
-            status: Some(("FABRICATOR READY — Q/E/F TO BUILD".to_owned(), 7.0)),
+            power: PowerGrid::default(),
+            status: None,
             save_store,
             save_data,
             victory_saved: false,
-            briefing: true,
+            mission_select: true,
+            mission_cursor,
+            input_handled_this_frame: false,
+            briefing: false,
             paused: false,
             victory: false,
             defeat: false,
             enemy_think: 0.0,
             mission_time: 0.0,
-        };
-        game.populate_mission();
-        game
+            mission: missions::reclaim_the_reactor(),
+            escort_unit: None,
+            enemy_ai: SimpleAggroAi::new(),
+            nav: NavGrid::new(1, 1, Vec2::ZERO, NAV_CELL_SIZE),
+            selected_structure: None,
+            player_paths: HashMap::new(),
+            canticle_reinforced: false,
+        }
+    }
+
+    /// Resets all mission-scoped state (world, economy, power, nav) and
+    /// spawns `mission`'s roster. Campaign-wide state (`save_data`, loaded
+    /// textures/atlases) is left untouched.
+    fn start_mission(&mut self, mission: MissionDef) {
+        self.mission = mission;
+        self.world = RtsWorld::default();
+        self.kinds.clear();
+        self.animation_players.clear();
+        self.attack_flash.clear();
+        self.damage_flash.clear();
+        self.down_units.clear();
+        self.fog = FogOfWar::new(26, 15, -MAP_SIZE * 0.5, 100.0);
+        self.drag = None;
+        self.order_marker = None;
+        self.relays = self
+            .mission
+            .relays
+            .iter()
+            .map(|&position| Relay {
+                position,
+                progress: 0.0,
+                active: false,
+            })
+            .collect();
+        self.reactor_position = self.mission.reactor_position;
+        self.fabricator_position = self.mission.fabricator_position;
+        self.field_beacons.clear();
+        self.placing_beacon = false;
+        self.resource_tick = 0.0;
+        self.production = ProductionQueue::new(5);
+        self.escort_unit = None;
+        self.enemy_ai = SimpleAggroAi::new();
+        self.selected_structure = None;
+        self.player_paths.clear();
+        self.canticle_reinforced = false;
+
+        let mut power = PowerGrid::default();
+        power.add_node(PowerNode {
+            id: FABRICATOR_NODE,
+            supply: 1,
+            demand: 1,
+            online: true,
+        });
+        for index in 0..self.mission.relays.len() {
+            let relay = PowerNodeId(index as u16 + 1);
+            power.add_node(PowerNode {
+                id: relay,
+                supply: 1,
+                demand: 0,
+                online: false,
+            });
+            power.link(FABRICATOR_NODE, relay);
+        }
+        self.power = power;
+
+        let mut nav = NavGrid::new(
+            (MAP_SIZE.x / NAV_CELL_SIZE).ceil() as usize,
+            (MAP_SIZE.y / NAV_CELL_SIZE).ceil() as usize,
+            -MAP_SIZE * 0.5,
+            NAV_CELL_SIZE,
+        );
+        mark_obstacles(&mut nav, &self.mission.obstacles);
+        self.nav = nav;
+
+        self.victory_saved = false;
+        self.briefing = true;
+        self.paused = false;
+        self.victory = false;
+        self.defeat = false;
+        self.enemy_think = 0.0;
+        self.mission_time = 0.0;
+        self.status = Some(("FABRICATOR READY — Q/E/F TO BUILD".to_owned(), 7.0));
+
+        self.populate_mission();
     }
 
     fn populate_mission(&mut self) {
-        self.spawn(
-            UnitKind::Warden,
-            PLAYER,
-            Vec2::new(-880.0, -290.0),
-            155.0,
-            175.0,
-        );
-        self.spawn(
-            UnitKind::Engineer,
-            PLAYER,
-            Vec2::new(-790.0, -350.0),
-            115.0,
-            150.0,
-        );
-        self.spawn(
-            UnitKind::Surveyor,
-            PLAYER,
-            Vec2::new(-900.0, -410.0),
-            90.0,
-            215.0,
-        );
-
-        for (kind, position) in [
-            (UnitKind::Needle, Vec2::new(-480.0, 250.0)),
-            (UnitKind::BellMine, Vec2::new(-120.0, -330.0)),
-            (UnitKind::Needle, Vec2::new(290.0, 290.0)),
-            (UnitKind::BellMine, Vec2::new(650.0, -310.0)),
-            (UnitKind::Needle, Vec2::new(930.0, 390.0)),
-            (UnitKind::Canticle, Vec2::new(520.0, 40.0)),
-        ] {
-            let health = if kind == UnitKind::Canticle {
-                340.0
-            } else {
-                90.0
-            };
-            self.spawn(
-                kind,
-                CHOIR,
-                position,
-                health,
-                if kind == UnitKind::BellMine {
-                    75.0
-                } else {
-                    125.0
-                },
+        let player_spawns = self.mission.player_spawns.clone();
+        for spawn in player_spawns {
+            let id = self.spawn(
+                spawn.kind,
+                PLAYER,
+                spawn.position,
+                spawn.health,
+                spawn.speed,
             );
+            if spawn.escort {
+                self.escort_unit = Some(id);
+            }
+        }
+        let enemy_spawns = self.mission.enemy_spawns.clone();
+        for spawn in enemy_spawns {
+            self.spawn(spawn.kind, CHOIR, spawn.position, spawn.health, spawn.speed);
         }
     }
 
@@ -505,50 +575,224 @@ impl LastLight {
         self.cycle_specialist(faction, first, second, label);
     }
 
-    fn handle_briefing_upgrades(&mut self, ctx: &FrameCtx<'_>) {
-        if ctx.input.key_pressed(KeyCode::KeyZ) {
-            self.purchase_upgrade(UPGRADE_OPTICS, "FIELD OPTICS", 60);
+    fn unlocked_mission_indices(&self) -> Vec<usize> {
+        missions::all()
+            .iter()
+            .enumerate()
+            .filter(|(_, mission)| {
+                self.save_data.campaign.unlocked_mission >= mission.required_tier
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn handle_mission_select(&mut self, ctx: &mut FrameCtx<'_>) {
+        let unlocked = self.unlocked_mission_indices();
+        if unlocked.is_empty() {
+            return;
         }
-        if ctx.input.key_pressed(KeyCode::KeyX) {
-            self.purchase_upgrade(UPGRADE_PLATING, "REACTIVE PLATING", 80);
+        let cursor_slot = unlocked
+            .iter()
+            .position(|&index| index == self.mission_cursor)
+            .unwrap_or(0);
+        if ctx.input.key_pressed(KeyCode::ArrowUp) || ctx.input.key_pressed(KeyCode::ArrowLeft) {
+            let previous = (cursor_slot + unlocked.len() - 1) % unlocked.len();
+            self.mission_cursor = unlocked[previous];
         }
-        if ctx.input.key_pressed(KeyCode::KeyC) {
-            self.purchase_upgrade(UPGRADE_OVERCLOCK, "FABRICATOR OVERCLOCK", 100);
+        if ctx.input.key_pressed(KeyCode::ArrowDown) || ctx.input.key_pressed(KeyCode::ArrowRight) {
+            let next = (cursor_slot + 1) % unlocked.len();
+            self.mission_cursor = unlocked[next];
         }
-        if ctx.input.key_pressed(KeyCode::KeyV) {
-            self.cycle_specialist(IVO, IVO_RIGGER, IVO_SMITH, "IVO");
+        let mut confirmed =
+            ctx.input.key_pressed(KeyCode::Space) || ctx.input.key_pressed(KeyCode::Enter);
+        if ctx.input.mouse_pressed(MouseButton::Left) {
+            let mouse_world = ctx
+                .renderer
+                .camera
+                .screen_to_world(ctx.input.mouse_position);
+            for &index in &unlocked {
+                if Self::mission_entry_rect(ctx.renderer.camera.position, index)
+                    .contains_point(mouse_world)
+                {
+                    self.mission_cursor = index;
+                    confirmed = true;
+                    break;
+                }
+            }
         }
-        if ctx.input.key_pressed(KeyCode::KeyN) {
-            self.cycle_specialist(SENA, SENA_DEEP_SCAN, SENA_GHOST_MARK, "SENA");
+        if confirmed {
+            if let Some(chosen) = missions::all().into_iter().nth(self.mission_cursor) {
+                self.mission_select = false;
+                self.start_mission(chosen);
+                ctx.audio.start();
+            }
         }
-        if ctx.input.key_pressed(KeyCode::KeyM) {
-            self.cycle_specialist(MARA, MARA_RESCUE, MARA_RAPID, "MARA");
-        }
-        if ctx.input.key_pressed(KeyCode::KeyO) {
-            self.cycle_specialist(OLAN, OLAN_LATTICE, OLAN_DECODER, "OLAN");
-        }
-        if ctx.input.key_pressed(KeyCode::KeyL) {
-            self.cycle_lumen_protocol();
-        }
-        if ctx.input.key_pressed(KeyCode::KeyP) {
-            self.cycle_relationship(
+    }
+
+    const BRIEFING_ROW_KEYS: [KeyCode; 10] = [
+        KeyCode::KeyZ,
+        KeyCode::KeyX,
+        KeyCode::KeyC,
+        KeyCode::KeyV,
+        KeyCode::KeyN,
+        KeyCode::KeyM,
+        KeyCode::KeyO,
+        KeyCode::KeyL,
+        KeyCode::KeyP,
+        KeyCode::KeyG,
+    ];
+
+    fn apply_briefing_action(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::KeyZ => self.purchase_upgrade(UPGRADE_OPTICS, "FIELD OPTICS", 60),
+            KeyCode::KeyX => self.purchase_upgrade(UPGRADE_PLATING, "REACTIVE PLATING", 80),
+            KeyCode::KeyC => self.purchase_upgrade(UPGRADE_OVERCLOCK, "FABRICATOR OVERCLOCK", 100),
+            KeyCode::KeyV => self.cycle_specialist(IVO, IVO_RIGGER, IVO_SMITH, "IVO"),
+            KeyCode::KeyN => self.cycle_specialist(SENA, SENA_DEEP_SCAN, SENA_GHOST_MARK, "SENA"),
+            KeyCode::KeyM => self.cycle_specialist(MARA, MARA_RESCUE, MARA_RAPID, "MARA"),
+            KeyCode::KeyO => self.cycle_specialist(OLAN, OLAN_LATTICE, OLAN_DECODER, "OLAN"),
+            KeyCode::KeyL => self.cycle_lumen_protocol(),
+            KeyCode::KeyP => self.cycle_relationship(
                 MERIDIAN_ALLIED,
                 MERIDIAN,
                 MERIDIAN_BASTION,
                 MERIDIAN_CHARTER,
                 "MERIDIAN",
                 "MERIDIAN ACCORD LOCKED — COMPLETE TERMS OF SALVAGE",
-            );
-        }
-        if ctx.input.key_pressed(KeyCode::KeyG) {
-            self.cycle_relationship(
+            ),
+            KeyCode::KeyG => self.cycle_relationship(
                 VERDANT_CULTIVATED,
                 VERDANT,
                 VERDANT_BLOOM,
                 VERDANT_BRIAR,
                 "VERDANT",
                 "VERDANT COVENANT LOCKED — COMPLETE THE GARDEN BELOW",
-            );
+            ),
+            _ => {}
+        }
+    }
+
+    /// One row per briefing action: the key that triggers it, its label,
+    /// and the accent color drawn in `on_update`. A single source of truth
+    /// for both rendering and click hit-testing, so they can't drift apart.
+    fn briefing_rows(&self) -> Vec<(KeyCode, String, Color)> {
+        let owned = |id: &str| {
+            if self.save_data.campaign.has_upgrade(id) {
+                "INSTALLED"
+            } else {
+                "AVAILABLE"
+            }
+        };
+        let lumen_protocol = self
+            .lumen_protocol()
+            .map(str::to_uppercase)
+            .unwrap_or_else(|| "LOCKED — COMPLETE REACTOR".to_owned());
+        let meridian_accord = self
+            .meridian_accord()
+            .map(str::to_uppercase)
+            .unwrap_or_else(|| "LOCKED — TERMS OF SALVAGE".to_owned());
+        let verdant_covenant = self
+            .verdant_covenant()
+            .map(str::to_uppercase)
+            .unwrap_or_else(|| "LOCKED — GARDEN BELOW".to_owned());
+        vec![
+            (
+                KeyCode::KeyZ,
+                format!("Z  FIELD OPTICS — 60 LUMEN ({})", owned(UPGRADE_OPTICS)),
+                Color::rgba(0.55, 0.82, 0.88, 0.98),
+            ),
+            (
+                KeyCode::KeyX,
+                format!(
+                    "X  REACTIVE PLATING — 80 LUMEN ({})",
+                    owned(UPGRADE_PLATING)
+                ),
+                Color::rgba(0.55, 0.82, 0.88, 0.98),
+            ),
+            (
+                KeyCode::KeyC,
+                format!(
+                    "C  FABRICATOR OVERCLOCK — 100 LUMEN ({})",
+                    owned(UPGRADE_OVERCLOCK)
+                ),
+                Color::rgba(0.55, 0.82, 0.88, 0.98),
+            ),
+            (
+                KeyCode::KeyV,
+                format!(
+                    "V  IVO — {}",
+                    self.specialist_module(IVO, IVO_RIGGER).to_uppercase()
+                ),
+                Color::rgba(0.82, 0.68, 0.36, 0.98),
+            ),
+            (
+                KeyCode::KeyN,
+                format!(
+                    "N  SENA — {}",
+                    self.specialist_module(SENA, SENA_DEEP_SCAN).to_uppercase()
+                ),
+                Color::rgba(0.82, 0.68, 0.36, 0.98),
+            ),
+            (
+                KeyCode::KeyM,
+                format!(
+                    "M  MARA — {}",
+                    self.specialist_module(MARA, MARA_RESCUE).to_uppercase()
+                ),
+                Color::rgba(0.7, 0.62, 0.9, 0.98),
+            ),
+            (
+                KeyCode::KeyO,
+                format!(
+                    "O  OLAN — {}",
+                    self.specialist_module(OLAN, OLAN_LATTICE).to_uppercase()
+                ),
+                Color::rgba(0.7, 0.62, 0.9, 0.98),
+            ),
+            (
+                KeyCode::KeyL,
+                format!("L  LUMEN — {lumen_protocol}"),
+                Color::rgba(0.38, 0.9, 1.0, 0.98),
+            ),
+            (
+                KeyCode::KeyP,
+                format!("P  MERIDIAN — {meridian_accord}"),
+                Color::rgba(0.9, 0.82, 0.72, 0.98),
+            ),
+            (
+                KeyCode::KeyG,
+                format!("G  VERDANT — {verdant_covenant}"),
+                Color::rgba(0.48, 1.15, 0.5, 0.98),
+            ),
+        ]
+    }
+
+    fn briefing_row_rect(camera_position: Vec2, index: usize) -> Aabb {
+        let center = camera_position + Vec2::new(-360.0, 60.0 - index as f32 * 34.0);
+        Aabb::from_center_size(center, Vec2::new(600.0, 30.0))
+    }
+
+    fn handle_briefing_upgrades(&mut self, ctx: &mut FrameCtx<'_>) {
+        for key in Self::BRIEFING_ROW_KEYS {
+            if ctx.input.key_pressed(key) {
+                self.apply_briefing_action(key);
+            }
+        }
+        if ctx.input.mouse_pressed(MouseButton::Left) {
+            let mouse_world = ctx
+                .renderer
+                .camera
+                .screen_to_world(ctx.input.mouse_position);
+            let row_count = self.briefing_rows().len();
+            for index in 0..row_count {
+                if Self::briefing_row_rect(ctx.renderer.camera.position, index)
+                    .contains_point(mouse_world)
+                {
+                    let key = self.briefing_rows()[index].0;
+                    self.apply_briefing_action(key);
+                    break;
+                }
+            }
         }
     }
 
@@ -561,10 +805,10 @@ impl LastLight {
                 .map(|relay| relay.position),
         );
         power_sources.extend(self.field_beacons.iter().map(|beacon| beacon.position));
-        let mut obstructions = vec![
-            (self.fabricator_position, 105.0),
-            (self.reactor_position, 135.0),
-        ];
+        let mut obstructions = vec![(self.fabricator_position, 105.0)];
+        if let Some(reactor_position) = self.reactor_position {
+            obstructions.push((reactor_position, 135.0));
+        }
         obstructions.extend(self.relays.iter().map(|relay| (relay.position, 85.0)));
         obstructions.extend(
             self.field_beacons
@@ -628,60 +872,145 @@ impl LastLight {
         }
     }
 
-    fn handle_command_keys(&mut self, ctx: &mut FrameCtx<'_>) {
-        for (key, kind) in [
-            (KeyCode::KeyQ, UnitKind::Warden),
-            (KeyCode::KeyE, UnitKind::Engineer),
-            (KeyCode::KeyF, UnitKind::Surveyor),
-        ] {
-            if ctx.input.key_pressed(key) {
-                self.queue_unit(kind);
+    /// One row per command-card action. A single source of truth for both
+    /// the on-screen card text and its click hit-boxes, mirroring
+    /// `briefing_rows`/`briefing_row_rect`.
+    fn command_card_rows(&self) -> Vec<(KeyCode, String)> {
+        vec![
+            (KeyCode::KeyQ, "Q  BUILD WARDEN — 90".to_owned()),
+            (KeyCode::KeyE, "E  BUILD ENGINEER — 70".to_owned()),
+            (KeyCode::KeyF, "F  BUILD SURVEYOR — 60".to_owned()),
+            (KeyCode::KeyH, "H  HOLD SELECTED".to_owned()),
+            (
+                KeyCode::KeyB,
+                format!(
+                    "B  {} BEACON — {}",
+                    if self.placing_beacon {
+                        "CANCEL"
+                    } else {
+                        "PLACE"
+                    },
+                    self.beacon_cost()
+                ),
+            ),
+        ]
+    }
+
+    fn command_card_row_rect(card_text: Vec2, index: usize) -> Aabb {
+        let center = card_text + Vec2::new(150.0, -38.0 - index as f32 * 30.0);
+        Aabb::from_center_size(center, Vec2::new(420.0, 26.0))
+    }
+
+    fn apply_command_action(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::KeyQ => self.queue_unit(UnitKind::Warden),
+            KeyCode::KeyE => self.queue_unit(UnitKind::Engineer),
+            KeyCode::KeyF => self.queue_unit(UnitKind::Surveyor),
+            KeyCode::KeyH => {
+                self.world.issue_hold();
+                self.status = Some(("SQUAD HOLDING POSITION".to_owned(), 2.0));
             }
+            KeyCode::KeyB => {
+                self.placing_beacon = !self.placing_beacon;
+                self.status = Some((
+                    if self.placing_beacon {
+                        "BEACON PLACEMENT — LEFT CLICK / ESC CANCEL"
+                    } else {
+                        "BEACON PLACEMENT CANCELLED"
+                    }
+                    .to_owned(),
+                    3.0,
+                ));
+            }
+            _ => {}
         }
-        if ctx.input.key_pressed(KeyCode::KeyH) {
-            self.world.issue_hold();
-            self.status = Some(("SQUAD HOLDING POSITION".to_owned(), 2.0));
+    }
+
+    fn control_group_action(&mut self, slot: usize, assign: bool, ctx: &mut FrameCtx<'_>) {
+        if assign {
+            self.world.assign_control_group(slot);
+            self.status = Some((format!("CONTROL GROUP {slot} ASSIGNED"), 2.0));
+        } else if self.world.recall_control_group(slot, PLAYER) {
+            let (sum, count) = self
+                .world
+                .selection()
+                .ids()
+                .iter()
+                .filter_map(|id| self.world.unit(*id))
+                .fold((Vec2::ZERO, 0_u32), |(sum, count), unit| {
+                    (sum + unit.position, count + 1)
+                });
+            if count > 0 {
+                ctx.renderer.camera.position = sum / count as f32;
+            }
+            self.status = Some((format!("CONTROL GROUP {slot}"), 1.5));
         }
-        if ctx.input.key_pressed(KeyCode::KeyB) {
-            self.placing_beacon = !self.placing_beacon;
-            self.status = Some((
-                if self.placing_beacon {
-                    "BEACON PLACEMENT — LEFT CLICK / ESC CANCEL"
-                } else {
-                    "BEACON PLACEMENT CANCELLED"
-                }
-                .to_owned(),
-                3.0,
-            ));
+    }
+
+    fn control_group_chip_rect(panel: Aabb, slot: usize) -> Aabb {
+        const SPACING: f32 = 46.0;
+        let start_x = panel.center().x - SPACING * 2.0;
+        let x = start_x + (slot - 1) as f32 * SPACING;
+        let y = panel.max.y + 26.0;
+        Aabb::from_center_size(Vec2::new(x, y), Vec2::splat(38.0))
+    }
+
+    fn pause_icon_rect(renderer: &Renderer) -> Aabb {
+        let top_right = renderer
+            .camera
+            .world_from_viewport_fraction(Vec2::new(1.0, 1.0));
+        Aabb::from_center_size(top_right + Vec2::new(-44.0, -44.0), Vec2::splat(48.0))
+    }
+
+    /// World-space anchor for the command card's text/rows. The single
+    /// source of truth for both rendering (`on_update`) and click
+    /// hit-testing (`handle_command_keys`) so they can't drift apart.
+    fn command_card_text_origin(renderer: &Renderer) -> Vec2 {
+        let bottom_right = renderer
+            .camera
+            .world_from_viewport_fraction(Vec2::new(1.0, 0.0));
+        bottom_right + Vec2::new(-525.0, 233.0)
+    }
+
+    fn handle_command_keys(&mut self, ctx: &mut FrameCtx<'_>) {
+        let rows = self.command_card_rows();
+        for (key, _) in &rows {
+            if ctx.input.key_pressed(*key) {
+                self.apply_command_action(*key);
+            }
         }
 
-        for (slot, key) in [
-            (1, KeyCode::Digit1),
-            (2, KeyCode::Digit2),
-            (3, KeyCode::Digit3),
-            (4, KeyCode::Digit4),
-            (5, KeyCode::Digit5),
-        ] {
-            if !ctx.input.key_pressed(key) {
-                continue;
+        for slot in 1..=5 {
+            let key = match slot {
+                1 => KeyCode::Digit1,
+                2 => KeyCode::Digit2,
+                3 => KeyCode::Digit3,
+                4 => KeyCode::Digit4,
+                _ => KeyCode::Digit5,
+            };
+            if ctx.input.key_pressed(key) {
+                self.control_group_action(slot, ctx.input.control_down(), ctx);
             }
-            if ctx.input.control_down() {
-                self.world.assign_control_group(slot);
-                self.status = Some((format!("CONTROL GROUP {slot} ASSIGNED"), 2.0));
-            } else if self.world.recall_control_group(slot, PLAYER) {
-                let (sum, count) = self
-                    .world
-                    .selection()
-                    .ids()
-                    .iter()
-                    .filter_map(|id| self.world.unit(*id))
-                    .fold((Vec2::ZERO, 0_u32), |(sum, count), unit| {
-                        (sum + unit.position, count + 1)
-                    });
-                if count > 0 {
-                    ctx.renderer.camera.position = sum / count as f32;
+        }
+
+        if ctx.input.mouse_pressed(MouseButton::Left) {
+            let mouse_world = ctx
+                .renderer
+                .camera
+                .screen_to_world(ctx.input.mouse_position);
+            let card_text = Self::command_card_text_origin(ctx.renderer);
+            for (index, (key, _)) in rows.iter().enumerate() {
+                if Self::command_card_row_rect(card_text, index).contains_point(mouse_world) {
+                    self.apply_command_action(*key);
+                    return;
                 }
-                self.status = Some((format!("CONTROL GROUP {slot}"), 1.5));
+            }
+            let panel = self.minimap_transform(ctx.renderer).panel;
+            for slot in 1..=5 {
+                if Self::control_group_chip_rect(panel, slot).contains_point(mouse_world) {
+                    self.control_group_action(slot, ctx.input.control_down(), ctx);
+                    return;
+                }
             }
         }
     }
@@ -731,17 +1060,56 @@ impl LastLight {
             return;
         }
         self.save_data.runs_completed = self.save_data.runs_completed.saturating_add(1);
-        self.save_data
-            .campaign
-            .complete_mission("reclaim-the-reactor", 3, 80);
-        self.save_data
-            .campaign
-            .record_decision("lumen-contact-established");
+        self.save_data.campaign.complete_mission(
+            self.mission.id,
+            self.mission.unlock_next,
+            self.mission.reward_lumen,
+        );
+        if let Some(decision) = self.mission.unlock_decision {
+            self.save_data.campaign.record_decision(decision);
+        }
+        let unlock_next = self.mission.unlock_next;
         self.status = Some(match self.save_store.save(&self.save_data) {
-            Ok(()) => ("CAMPAIGN SAVED — MISSION 3 UNLOCKED".to_owned(), 8.0),
+            Ok(()) => (
+                format!("CAMPAIGN SAVED — MISSION {unlock_next} UNLOCKED"),
+                8.0,
+            ),
             Err(error) => (format!("SAVE FAILED: {error}"), 8.0),
         });
         self.victory_saved = true;
+    }
+
+    /// Recomputes `self.victory`/`self.defeat` from live world state and the
+    /// active mission's [`VictoryCondition`]. Pure aside from those two
+    /// fields (no `FrameCtx` needed), so it can run in tests without a GPU.
+    fn evaluate_mission_state(&mut self) {
+        let friendlies_alive = self
+            .world
+            .units()
+            .iter()
+            .any(|unit| unit.faction == PLAYER && unit.alive());
+        let escort_failed = matches!(
+            self.mission.victory,
+            VictoryCondition::EscortToExtraction { .. }
+        ) && !self
+            .escort_unit
+            .and_then(|id| self.world.unit(id))
+            .is_some_and(|unit| unit.alive());
+        self.defeat = !friendlies_alive || escort_failed;
+        self.victory = match self.mission.victory {
+            VictoryCondition::RestoreRelaysAndDefeatBoss { boss_kind } => {
+                let boss_alive = self.world.units().iter().any(|unit| {
+                    unit.faction == CHOIR
+                        && unit.alive()
+                        && self.kinds.get(&unit.id) == Some(&boss_kind)
+                });
+                self.relays.iter().all(|relay| relay.active) && !boss_alive
+            }
+            VictoryCondition::EscortToExtraction { point, radius } => self
+                .escort_unit
+                .and_then(|id| self.world.unit(id))
+                .is_some_and(|unit| unit.alive() && unit.position.distance(point) <= radius),
+        };
     }
 
     fn selected_engineer_near(&self, position: Vec2) -> bool {
@@ -766,6 +1134,52 @@ impl LastLight {
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(id, _)| id)
+    }
+
+    fn structure_at(&self, point: Vec2) -> Option<StructureKind> {
+        if let Some(reactor_position) = self.reactor_position {
+            if reactor_position.distance(point) <= StructureKind::REACTOR_RADIUS {
+                return Some(StructureKind::Reactor);
+            }
+        }
+        if self.fabricator_position.distance(point) <= StructureKind::FABRICATOR_RADIUS {
+            return Some(StructureKind::Fabricator);
+        }
+        self.relays
+            .iter()
+            .position(|relay| relay.position.distance(point) <= StructureKind::RELAY_RADIUS)
+            .map(StructureKind::Relay)
+    }
+
+    fn structure_position(&self, structure: StructureKind) -> Option<Vec2> {
+        match structure {
+            StructureKind::Relay(index) => self.relays.get(index).map(|relay| relay.position),
+            StructureKind::Fabricator => Some(self.fabricator_position),
+            StructureKind::Reactor => self.reactor_position,
+        }
+    }
+
+    fn structure_status_line(&self, structure: StructureKind) -> String {
+        match structure {
+            StructureKind::Relay(index) => match self.relays.get(index) {
+                Some(relay) if relay.active => "RELAY — ONLINE".to_owned(),
+                Some(relay) => format!(
+                    "RELAY — CHARGING {:.0}%  (ENGINEER NEARBY TO RESTORE)",
+                    (relay.progress / 3.0 * 100.0).clamp(0.0, 100.0)
+                ),
+                None => "RELAY".to_owned(),
+            },
+            StructureKind::Fabricator => format!(
+                "LANTERN FABRICATOR — {}  QUEUE {}/5",
+                if self.power.is_powered(FABRICATOR_NODE) {
+                    "POWERED"
+                } else {
+                    "OFFLINE"
+                },
+                self.production.items().len()
+            ),
+            StructureKind::Reactor => "AUXILIARY REACTOR — AWAITING FULL POWER LATTICE".to_owned(),
+        }
     }
 
     fn handle_pointer(&mut self, ctx: &mut FrameCtx<'_>) {
@@ -817,22 +1231,94 @@ impl LastLight {
         if ctx.input.mouse_released(MouseButton::Left) {
             if let Some(drag) = self.drag.take() {
                 if drag.start.distance(drag.current) < 18.0 {
-                    self.world
-                        .select_point(mouse_world, PLAYER, ctx.input.shift_down());
+                    if let Some(structure) = self.structure_at(mouse_world) {
+                        self.selected_structure = Some(structure);
+                    } else {
+                        self.selected_structure = None;
+                        self.world
+                            .select_point(mouse_world, PLAYER, ctx.input.shift_down());
+                    }
                 } else {
+                    self.selected_structure = None;
                     self.world
                         .select_bounds(drag.bounds(), PLAYER, ctx.input.shift_down());
                 }
             }
         }
         if ctx.input.mouse_pressed(MouseButton::Right) && !self.world.selection().ids().is_empty() {
+            let selected_ids = self.world.selection().ids().to_vec();
             if let Some(enemy) = self.closest_enemy_at(mouse_world) {
                 self.world.issue_attack(enemy);
+                for id in &selected_ids {
+                    self.player_paths.remove(id);
+                }
             } else {
                 self.world.issue_move(mouse_world, 74.0);
+                self.route_around_obstacles(&selected_ids);
             }
             self.order_marker = Some((mouse_world, 0.65));
             ctx.audio.collect();
+        }
+    }
+
+    /// After `RtsWorld::issue_move` sets each unit's formation destination,
+    /// replace any destination whose straight line crosses a mission
+    /// obstacle with a route through `self.nav`, queuing the remaining
+    /// waypoints for `advance_player_paths` to walk through. No-op on
+    /// missions with no obstacles (`self.nav` has nothing blocked).
+    fn route_around_obstacles(&mut self, selected_ids: &[UnitId]) {
+        for &id in selected_ids {
+            let Some(unit) = self.world.unit(id) else {
+                continue;
+            };
+            let UnitOrder::Move(destination) = unit.order else {
+                continue;
+            };
+            if self.nav.segment_blocked(unit.position, destination) {
+                let mut path: VecDeque<Vec2> =
+                    self.nav.find_path(unit.position, destination).into();
+                if let Some(first) = path.pop_front() {
+                    if let Some(unit) = self.world.unit_mut(id) {
+                        unit.order = UnitOrder::Move(first);
+                    }
+                    self.player_paths.insert(id, path);
+                    continue;
+                }
+            }
+            self.player_paths.remove(&id);
+        }
+    }
+
+    /// Advances any unit whose queued route (see `route_around_obstacles`)
+    /// has more waypoints once it arrives (`RtsWorld::update` sets a
+    /// completed `Move` order to `Idle`).
+    fn advance_player_paths(&mut self) {
+        if self.player_paths.is_empty() {
+            return;
+        }
+        let ids: Vec<UnitId> = self.player_paths.keys().copied().collect();
+        for id in ids {
+            let Some(unit) = self.world.unit(id) else {
+                self.player_paths.remove(&id);
+                continue;
+            };
+            if !matches!(unit.order, UnitOrder::Idle) {
+                continue;
+            }
+            let done = match self.player_paths.get_mut(&id) {
+                Some(queue) => {
+                    if let Some(next) = queue.pop_front() {
+                        if let Some(unit) = self.world.unit_mut(id) {
+                            unit.order = UnitOrder::Move(next);
+                        }
+                    }
+                    queue.is_empty()
+                }
+                None => true,
+            };
+            if done {
+                self.player_paths.remove(&id);
+            }
         }
     }
 
@@ -877,35 +1363,14 @@ impl LastLight {
         if self.mission_time < 8.0 {
             return;
         }
-        let friendlies: Vec<(UnitId, Vec2)> = self
-            .world
-            .units()
-            .iter()
-            .filter(|unit| unit.faction == PLAYER && unit.alive())
-            .map(|unit| (unit.id, unit.position))
-            .collect();
-        let enemies: Vec<(UnitId, Vec2)> = self
-            .world
-            .units()
-            .iter()
-            .filter(|unit| unit.faction == CHOIR && unit.alive())
-            .map(|unit| (unit.id, unit.position))
-            .collect();
-        for (enemy, position) in enemies {
-            let target = friendlies
-                .iter()
-                .filter(|(_, friendly_position)| {
-                    friendly_position.distance_squared(position) <= 520.0_f32.powi(2)
-                })
-                .min_by(|a, b| {
-                    a.1.distance_squared(position)
-                        .total_cmp(&b.1.distance_squared(position))
-                })
-                .map(|(id, _)| *id);
-            if let (Some(target), Some(unit)) = (target, self.world.unit_mut(enemy)) {
-                unit.order = UnitOrder::Attack(target);
-            }
-        }
+        self.enemy_ai.think(
+            &mut self.world,
+            CHOIR,
+            PLAYER,
+            self.mission_time,
+            &AiParams::default(),
+            Some(&self.nav),
+        );
     }
 
     fn unit_engaged(&self, id: UnitId, range: f32) -> bool {
@@ -952,6 +1417,35 @@ impl LastLight {
                 unit.health = (unit.health + dt.max(0.0) * healing).min(unit.max_health);
             }
         }
+    }
+
+    /// Gives the Canticle boss a one-time "call reinforcements" beat: the
+    /// first time it drops to half health, it spawns two extra Needles at
+    /// its position. Purely additive to the shared combat/AI systems (no
+    /// unique per-boss code paths elsewhere), so it stays cheap to check
+    /// every tick and self-disarms via `canticle_reinforced`.
+    /// Returns `true` the one time it triggers, so the caller can play a cue
+    /// without this needing a `FrameCtx` (keeps it directly unit-testable).
+    fn update_boss_phase(&mut self) -> bool {
+        if self.canticle_reinforced {
+            return false;
+        }
+        let low_health_canticle = self.world.units().iter().find_map(|unit| {
+            let is_canticle = unit.faction == CHOIR
+                && unit.alive()
+                && self.kinds.get(&unit.id) == Some(&UnitKind::Canticle);
+            let low_health = unit.health / unit.max_health.max(1.0) <= 0.5;
+            (is_canticle && low_health).then_some(unit.position)
+        });
+        let Some(position) = low_health_canticle else {
+            return false;
+        };
+        self.canticle_reinforced = true;
+        for offset in [Vec2::new(-90.0, 40.0), Vec2::new(90.0, -40.0)] {
+            self.spawn(UnitKind::Needle, CHOIR, position + offset, 90.0, 125.0);
+        }
+        self.status = Some(("CANTICLE CALLS REINFORCEMENTS".to_owned(), 4.0));
+        true
     }
 
     fn update_combat(&mut self, dt: f32) {
@@ -1092,6 +1586,151 @@ impl LastLight {
                     .with_color(color)
                     .with_z(z),
             );
+        }
+    }
+
+    /// Draws the same glyphs twice (a dark offset pass, then the real
+    /// color on top) so text reads cleanly against busy backdrop art at the
+    /// larger sizes a full-screen menu needs — no font asset required.
+    fn draw_text_shadowed(
+        &self,
+        renderer: &mut Renderer,
+        text: &str,
+        origin: Vec2,
+        pixel: f32,
+        color: Color,
+        z: f32,
+    ) {
+        self.draw_text(
+            renderer,
+            text,
+            origin + Vec2::new(pixel * 0.9, -pixel * 0.9),
+            pixel,
+            Color::rgba(0.0, 0.0, 0.0, 0.75),
+            z,
+        );
+        self.draw_text(renderer, text, origin, pixel, color, z + 0.01);
+    }
+
+    /// Fills the whole visible viewport with a dimmed copy of the reactor
+    /// sector art (already loaded for gameplay) behind a menu, instead of a
+    /// small centered card — reuses `tex_environment`, no new assets.
+    fn draw_full_screen_backdrop(&self, ctx: &mut FrameCtx<'_>, tint: Color) {
+        let center = ctx.renderer.camera.position;
+        let view = ctx.renderer.camera.visible_world_size();
+        // Oversize slightly so panning/aspect changes never show a seam.
+        let cover = view * 1.05;
+        ctx.renderer.draw_sprite(
+            self.tex_environment,
+            Sprite::new(center, cover)
+                .with_color(Color::rgba(0.5, 0.5, 0.55, 1.0))
+                .with_z(9.0),
+        );
+        ctx.renderer.draw_sprite(
+            self.tex_ui,
+            Sprite::new(center, cover).with_color(tint).with_z(9.5),
+        );
+    }
+
+    fn mission_entry_rect(camera_position: Vec2, index: usize) -> Aabb {
+        let center = camera_position + Vec2::new(0.0, 140.0 - index as f32 * 74.0);
+        Aabb::from_center_size(center, Vec2::new(780.0, 62.0))
+    }
+
+    fn draw_mission_select(&self, ctx: &mut FrameCtx<'_>) {
+        self.draw_full_screen_backdrop(ctx, Color::rgba(0.01, 0.02, 0.045, 0.82));
+        let center = ctx.renderer.camera.position;
+        self.draw_text_shadowed(
+            ctx.renderer,
+            "AURORA: LAST LIGHT",
+            center + Vec2::new(-320.0, 330.0),
+            7.5,
+            Color::rgb(0.32, 1.55, 1.35),
+            11.0,
+        );
+        self.draw_text_shadowed(
+            ctx.renderer,
+            "SELECT MISSION",
+            center + Vec2::new(-320.0, 210.0),
+            3.4,
+            Color::rgba(0.7, 0.85, 0.9, 0.95),
+            11.0,
+        );
+        for (index, mission) in missions::all().iter().enumerate() {
+            let unlocked = self.save_data.campaign.unlocked_mission >= mission.required_tier;
+            let rect = Self::mission_entry_rect(center, index);
+            let hovered = index == self.mission_cursor;
+            if unlocked {
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(rect.center(), rect.size())
+                        .with_color(if hovered {
+                            Color::rgba(0.16, 0.55, 0.6, 0.55)
+                        } else {
+                            Color::rgba(0.05, 0.09, 0.14, 0.55)
+                        })
+                        .with_z(10.0),
+                );
+            }
+            let color = if !unlocked {
+                Color::rgba(0.4, 0.42, 0.46, 0.6)
+            } else if hovered {
+                Color::rgb(1.3, 0.95, 0.35)
+            } else {
+                Color::rgb(0.8, 0.9, 0.92)
+            };
+            let marker = if hovered { ">" } else { " " };
+            let label = if unlocked { mission.title } else { "LOCKED" };
+            self.draw_text_shadowed(
+                ctx.renderer,
+                &format!("{marker} {label}"),
+                rect.min + Vec2::new(24.0, 22.0),
+                3.4,
+                color,
+                11.0,
+            );
+        }
+        self.draw_text_shadowed(
+            ctx.renderer,
+            "CLICK A MISSION   OR  UP/DOWN + SPACE/ENTER",
+            center + Vec2::new(-320.0, -270.0),
+            2.4,
+            Color::rgb(0.6, 0.7, 0.78),
+            11.0,
+        );
+    }
+
+    /// Draws the mission's static obstacles (corridor walls in Mission 3)
+    /// as solid panels with a bright edge outline — procedural, matching
+    /// the metal/cyan palette already used for structures, no new assets.
+    /// These are the same `Aabb`s that block `self.nav`, so what's drawn
+    /// here always matches what the Choir AI (and now the player, via
+    /// `route_around_obstacles`) actually treats as solid.
+    fn draw_mission_obstacles(&self, renderer: &mut Renderer) {
+        for obstacle in &self.mission.obstacles {
+            let center = obstacle.center();
+            let size = obstacle.size();
+            renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(center, size)
+                    .with_color(Color::rgba(0.09, 0.12, 0.16, 0.96))
+                    .with_z(-8.0),
+            );
+            let edge_color = Color::rgba(0.25, 0.55, 0.65, 0.85);
+            let half = size * 0.5;
+            for (offset, dimensions) in [
+                (Vec2::new(0.0, half.y), Vec2::new(size.x, 3.0)),
+                (Vec2::new(0.0, -half.y), Vec2::new(size.x, 3.0)),
+                (Vec2::new(half.x, 0.0), Vec2::new(3.0, size.y)),
+                (Vec2::new(-half.x, 0.0), Vec2::new(3.0, size.y)),
+            ] {
+                renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(center + offset, dimensions)
+                        .with_color(edge_color)
+                        .with_z(-7.9),
+                );
+            }
         }
     }
 
@@ -1250,19 +1889,46 @@ impl Game for LastLight {
     fn on_fixed_update(&mut self, ctx: &mut FrameCtx<'_>) {
         let dt = ctx.time.fixed_dt;
         self.update_camera(ctx, dt);
-        if self.briefing {
-            self.handle_briefing_upgrades(ctx);
-            if ctx.input.key_pressed(KeyCode::Space) || ctx.input.key_pressed(KeyCode::Enter) {
-                self.briefing = false;
-                ctx.audio.start();
+        // Only the first fixed-step of this rendered frame should react to
+        // edge-triggered input (see field doc on `input_handled_this_frame`).
+        // Continuous simulation below still runs every fixed step so the
+        // catch-up loop can still catch up after a hitch.
+        let handle_input = !self.input_handled_this_frame;
+        self.input_handled_this_frame = true;
+
+        if self.mission_select {
+            if handle_input {
+                self.handle_mission_select(ctx);
             }
             return;
         }
-        if ctx.input.key_pressed(KeyCode::Escape) {
-            if self.placing_beacon {
-                self.placing_beacon = false;
-                self.status = Some(("BEACON PLACEMENT CANCELLED".to_owned(), 2.0));
-            } else {
+        if self.briefing {
+            if handle_input {
+                self.handle_briefing_upgrades(ctx);
+                if ctx.input.key_pressed(KeyCode::Space) || ctx.input.key_pressed(KeyCode::Enter) {
+                    self.briefing = false;
+                    ctx.audio.start();
+                }
+            }
+            return;
+        }
+        if handle_input {
+            if ctx.input.key_pressed(KeyCode::Escape) {
+                if self.placing_beacon {
+                    self.placing_beacon = false;
+                    self.status = Some(("BEACON PLACEMENT CANCELLED".to_owned(), 2.0));
+                } else {
+                    self.paused = !self.paused;
+                }
+            }
+            if ctx.input.mouse_pressed(MouseButton::Left)
+                && !self.placing_beacon
+                && Self::pause_icon_rect(ctx.renderer).contains_point(
+                    ctx.renderer
+                        .camera
+                        .screen_to_world(ctx.input.mouse_position),
+                )
+            {
                 self.paused = !self.paused;
             }
         }
@@ -1270,10 +1936,13 @@ impl Game for LastLight {
             return;
         }
 
-        self.handle_command_keys(ctx);
-        self.handle_pointer(ctx);
+        if handle_input {
+            self.handle_command_keys(ctx);
+            self.handle_pointer(ctx);
+        }
         self.update_enemy_ai(dt);
         self.world.update(dt);
+        self.advance_player_paths();
         for unit in self.world.units() {
             let kind = self.kinds.get(&unit.id).copied();
             let engaged = unit.alive()
@@ -1330,6 +1999,9 @@ impl Game for LastLight {
             }
         }
         self.update_combat(dt);
+        if self.update_boss_phase() {
+            ctx.audio.hurt();
+        }
         self.update_specialist_doctrines(dt);
         self.update_fog();
         self.update_economy(dt);
@@ -1362,29 +2034,39 @@ impl Game for LastLight {
             }
         }
 
-        let friendlies_alive = self
-            .world
-            .units()
-            .iter()
-            .any(|unit| unit.faction == PLAYER && unit.alive());
-        let cantor_alive = self.world.units().iter().any(|unit| {
-            unit.faction == CHOIR
-                && unit.alive()
-                && self.kinds.get(&unit.id) == Some(&UnitKind::Canticle)
-        });
-        self.defeat = !friendlies_alive;
-        self.victory = self.relays.iter().all(|relay| relay.active) && !cantor_alive;
+        if let Some(console) = self.mission.lumen_console {
+            if !self.save_data.campaign.has_decision(LUMEN_AWAKENED)
+                && ctx.input.key_pressed(KeyCode::KeyK)
+                && self.selected_engineer_near(console)
+            {
+                self.save_data.campaign.record_decision(LUMEN_AWAKENED);
+                let _ = self.save_store.save(&self.save_data);
+                self.status = Some(("LUMEN CONSOLE AWAKENED".to_owned(), 4.0));
+            }
+        }
+
+        self.evaluate_mission_state();
         if self.victory {
             self.persist_victory();
         }
     }
 
     fn on_update(&mut self, ctx: &mut FrameCtx<'_>) {
+        // on_update runs exactly once per rendered frame (unlike
+        // on_fixed_update, which can run several times after a hitch), so
+        // this is the correct place to end the suppression window opened by
+        // a menu transition earlier in this same frame.
+        self.input_handled_this_frame = false;
         let t = ctx.time.elapsed;
+        if self.mission_select {
+            self.draw_mission_select(ctx);
+            return;
+        }
         ctx.renderer.draw_sprite(
             self.tex_environment,
             Sprite::new(Vec2::ZERO, MAP_SIZE).with_z(-10.0),
         );
+        self.draw_mission_obstacles(ctx.renderer);
 
         for y in 0..15 {
             for x in 0..26 {
@@ -1404,18 +2086,20 @@ impl Game for LastLight {
             }
         }
 
-        let reactor_pulse = 0.55 + 0.12 * (t * 2.1).sin();
-        let mut reactor = self
-            .structure_atlas
-            .sprite(self.reactor_position, Vec2::splat(330.0), 2);
-        reactor.z = -1.0;
-        ctx.renderer.draw_sprite(self.tex_structures, reactor);
-        ctx.renderer.draw_light(PointLight::new(
-            self.reactor_position,
-            Color::rgb(0.16, 0.58, 0.8),
-            260.0,
-            reactor_pulse * 0.26,
-        ));
+        if let Some(reactor_position) = self.reactor_position {
+            let reactor_pulse = 0.55 + 0.12 * (t * 2.1).sin();
+            let mut reactor = self
+                .structure_atlas
+                .sprite(reactor_position, Vec2::splat(330.0), 2);
+            reactor.z = -1.0;
+            ctx.renderer.draw_sprite(self.tex_structures, reactor);
+            ctx.renderer.draw_light(PointLight::new(
+                reactor_position,
+                Color::rgb(0.16, 0.58, 0.8),
+                260.0,
+                reactor_pulse * 0.26,
+            ));
+        }
 
         for (index, relay) in self.relays.iter().enumerate() {
             if !relay.active || !self.power.is_powered(PowerNodeId(index as u16 + 1)) {
@@ -1645,6 +2329,19 @@ impl Game for LastLight {
             );
         }
 
+        if let Some(structure) = self.selected_structure {
+            if let Some(position) = self.structure_position(structure) {
+                let radius = match structure {
+                    StructureKind::Relay(_) => StructureKind::RELAY_RADIUS,
+                    StructureKind::Fabricator => StructureKind::FABRICATOR_RADIUS,
+                    StructureKind::Reactor => StructureKind::REACTOR_RADIUS,
+                };
+                self.draw_selection_brackets(ctx.renderer, position, radius);
+            } else {
+                self.selected_structure = None;
+            }
+        }
+
         if let Some(drag) = self.drag {
             let bounds = drag.bounds();
             let center = bounds.center();
@@ -1733,6 +2430,57 @@ impl Game for LastLight {
                         .with_z(8.2),
                 );
             }
+
+            let mouse_world = ctx
+                .renderer
+                .camera
+                .screen_to_world(ctx.input.mouse_position);
+            for slot in 1..=5 {
+                let rect = Self::control_group_chip_rect(minimap.panel, slot);
+                let count = self.world.control_group(slot).len();
+                let hovered = rect.contains_point(mouse_world);
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(rect.center(), rect.size())
+                        .with_color(if count > 0 {
+                            if hovered {
+                                Color::rgba(0.2, 0.6, 0.65, 0.95)
+                            } else {
+                                Color::rgba(0.05, 0.35, 0.4, 0.9)
+                            }
+                        } else {
+                            Color::rgba(0.05, 0.08, 0.12, 0.7)
+                        })
+                        .with_z(8.3),
+                );
+                self.draw_text(
+                    ctx.renderer,
+                    &format!("{slot}:{count}"),
+                    rect.min + Vec2::new(4.0, 8.0),
+                    1.6,
+                    Color::rgb(0.85, 0.95, 0.95),
+                    8.4,
+                );
+            }
+        }
+
+        {
+            let rect = Self::pause_icon_rect(ctx.renderer);
+            ctx.renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(rect.center(), rect.size())
+                    .with_color(Color::rgba(0.04, 0.08, 0.12, 0.75))
+                    .with_z(9.0),
+            );
+            let bar_size = Vec2::new(6.0, 22.0);
+            for offset in [Vec2::new(-7.0, 0.0), Vec2::new(7.0, 0.0)] {
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(rect.center() + offset, bar_size)
+                        .with_color(Color::rgb(0.85, 0.9, 0.95))
+                        .with_z(9.1),
+                );
+            }
         }
 
         let top_left = ctx
@@ -1741,9 +2489,30 @@ impl Game for LastLight {
             .world_from_viewport_fraction(Vec2::new(0.0, 1.0))
             + Vec2::new(30.0, -34.0);
         let active_relays = self.relays.iter().filter(|relay| relay.active).count();
+        let objective_line = match self.mission.victory {
+            VictoryCondition::RestoreRelaysAndDefeatBoss { .. } => format!(
+                "{}  RELAYS {active_relays}/{}",
+                self.mission.title,
+                self.relays.len()
+            ),
+            VictoryCondition::EscortToExtraction { point, .. } => {
+                let escort_status = self
+                    .escort_unit
+                    .and_then(|id| self.world.unit(id))
+                    .map(|unit| {
+                        if unit.alive() {
+                            format!("{:.0}M TO EXTRACTION", unit.position.distance(point))
+                        } else {
+                            "ESCORT LOST".to_owned()
+                        }
+                    })
+                    .unwrap_or_else(|| "ESCORT LOST".to_owned());
+                format!("{}  {escort_status}", self.mission.title)
+            }
+        };
         self.draw_text(
             ctx.renderer,
-            &format!("RECLAIM REACTOR  RELAYS {active_relays}/3"),
+            &objective_line,
             top_left,
             4.0,
             Color::rgb(0.73, 1.15, 1.08),
@@ -1761,9 +2530,10 @@ impl Game for LastLight {
         self.draw_text(
             ctx.renderer,
             &format!(
-                "SALVAGE {}  +{income}/S  POWER {}/4  UNITS {}/12",
+                "SALVAGE {}  +{income}/S  POWER {}/{}  UNITS {}/12",
                 self.resources.amount(),
                 active_relays + 1,
+                self.relays.len() + 1,
                 self.friendly_count()
             ),
             top_left + Vec2::new(0.0, -50.0),
@@ -1780,6 +2550,15 @@ impl Game for LastLight {
                 Color::rgb(0.96, 0.72, 0.28),
                 8.0,
             );
+        } else if let Some(structure) = self.selected_structure {
+            self.draw_text(
+                ctx.renderer,
+                &self.structure_status_line(structure),
+                top_left + Vec2::new(0.0, -75.0),
+                2.6,
+                Color::rgb(0.4, 0.95, 1.0),
+                8.0,
+            );
         }
         if let Some((message, _)) = &self.status {
             self.draw_text(
@@ -1793,18 +2572,14 @@ impl Game for LastLight {
         }
 
         if !self.briefing && !self.paused && !self.victory && !self.defeat {
-            let bottom_right = ctx
-                .renderer
-                .camera
-                .world_from_viewport_fraction(Vec2::new(1.0, 0.0));
-            let card_center = bottom_right + Vec2::new(-285.0, 120.0);
+            let card_text = Self::command_card_text_origin(ctx.renderer);
+            let card_center = card_text + Vec2::new(240.0, -104.5);
             ctx.renderer.draw_sprite(
                 self.tex_ui,
-                Sprite::new(card_center, Vec2::new(530.0, 210.0))
+                Sprite::new(card_center, Vec2::new(530.0, 300.0))
                     .with_color(Color::rgba(0.01, 0.025, 0.05, 0.88))
                     .with_z(7.5),
             );
-            let card_text = bottom_right + Vec2::new(-525.0, 205.0);
             self.draw_text(
                 ctx.renderer,
                 "LANTERN FABRICATOR",
@@ -1813,30 +2588,41 @@ impl Game for LastLight {
                 Color::rgb(0.3, 1.4, 1.2),
                 8.0,
             );
+            let mouse_world = ctx
+                .renderer
+                .camera
+                .screen_to_world(ctx.input.mouse_position);
+            for (index, (_, label)) in self.command_card_rows().iter().enumerate() {
+                let rect = Self::command_card_row_rect(card_text, index);
+                let hovered = rect.contains_point(mouse_world);
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(rect.center(), rect.size())
+                        .with_color(if hovered {
+                            Color::rgba(0.16, 0.55, 0.6, 0.35)
+                        } else {
+                            Color::rgba(0.04, 0.08, 0.12, 0.3)
+                        })
+                        .with_z(7.6),
+                );
+                self.draw_text(
+                    ctx.renderer,
+                    label,
+                    rect.min + Vec2::new(8.0, 8.0),
+                    1.9,
+                    Color::rgb(0.88, 0.92, 0.92),
+                    8.0,
+                );
+            }
             self.draw_text(
                 ctx.renderer,
-                "Q WARDEN 90   E ENGINEER 70",
-                card_text + Vec2::new(0.0, -38.0),
-                2.0,
-                Color::rgb(0.88, 0.92, 0.92),
-                8.0,
-            );
-            self.draw_text(
-                ctx.renderer,
-                &format!("F SURVEYOR 60   H HOLD   B BEACON {}", self.beacon_cost()),
-                card_text + Vec2::new(0.0, -70.0),
-                2.0,
-                Color::rgb(0.88, 0.92, 0.92),
-                8.0,
-            );
-            self.draw_text(
-                ctx.renderer,
-                "CMD/CTRL+1-5 ASSIGN   1-5 RECALL",
-                card_text + Vec2::new(0.0, -102.0),
-                1.7,
+                "CMD/CTRL+1-5 OR CHIPS ASSIGN   1-5 OR CLICK RECALL",
+                card_text + Vec2::new(0.0, -184.0),
+                1.6,
                 Color::rgba(0.55, 0.7, 0.78, 0.9),
                 8.0,
             );
+            let front_progress = self.production.items().front().map(|item| item.progress());
             let queue_label = self
                 .production
                 .items()
@@ -1855,181 +2641,130 @@ impl Game for LastLight {
             self.draw_text(
                 ctx.renderer,
                 &queue_label,
-                card_text + Vec2::new(0.0, -138.0),
+                card_text + Vec2::new(0.0, -206.0),
                 2.0,
                 Color::rgb(1.15, 0.7, 0.25),
                 8.0,
             );
+            if let Some(progress) = front_progress {
+                let bar_origin = card_text + Vec2::new(0.0, -226.0);
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(bar_origin + Vec2::new(150.0, 0.0), Vec2::new(300.0, 8.0))
+                        .with_color(Color::rgba(0.1, 0.1, 0.12, 0.9))
+                        .with_z(8.0),
+                );
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(
+                        bar_origin + Vec2::new(300.0 * progress * 0.5, 0.0),
+                        Vec2::new(300.0 * progress, 8.0),
+                    )
+                    .with_color(Color::rgb(1.15, 0.7, 0.25))
+                    .with_z(8.1),
+                );
+            }
         }
 
-        let center = ctx.renderer.camera.position;
         let view = ctx.renderer.camera.visible_world_size();
-        let overlay = if self.briefing {
+        let overlay: Option<(&str, &str, String, Color)> = if self.briefing {
             Some((
-                "RECLAIM THE REACTOR",
-                "MARA VEY: FIND IVO. RESTORE THREE RELAYS. SILENCE THE CHOIR.",
-                "SPACE TO DEPLOY",
+                self.mission.title,
+                self.mission.briefing_story,
+                "SPACE / CLICK A ROW TO DEPLOY".to_owned(),
+                Color::rgb(0.32, 1.55, 1.35),
             ))
         } else if self.paused {
-            Some(("TACTICAL PAUSE", "ORDERS SUSPENDED", "ESC TO RESUME"))
-        } else if self.victory {
             Some((
-                "REACTOR ONLINE",
-                "LUMEN: I CAN SEE YOU NOW, COMMANDER.",
-                "CAMPAIGN SAVED — MISSION 3 UNLOCKED",
+                "TACTICAL PAUSE",
+                "ORDERS SUSPENDED",
+                "ESC TO RESUME".to_owned(),
+                Color::rgb(0.85, 0.85, 0.9),
+            ))
+        } else if self.victory {
+            let prompt = self
+                .status
+                .as_ref()
+                .map(|(message, _)| message.clone())
+                .unwrap_or_else(|| "MISSION COMPLETE".to_owned());
+            Some((
+                self.mission.victory_title,
+                self.mission.victory_story,
+                prompt,
+                Color::rgb(0.3, 1.5, 1.0),
             ))
         } else if self.defeat {
             Some((
-                "LANTERN LOST",
-                "THE DARK CLOSES OVER CONDUIT TWELVE.",
-                "RESTART THE GAME TO RETRY",
+                self.mission.defeat_title,
+                self.mission.defeat_story,
+                "RESTART THE GAME TO RETRY".to_owned(),
+                Color::rgb(1.4, 0.4, 0.35),
             ))
         } else {
             None
         };
-        if let Some((title, story, prompt)) = overlay {
-            let compact_briefing = self.briefing && view.x < 1050.0;
-            ctx.renderer.draw_sprite(
-                self.tex_ui,
-                Sprite::new(
-                    center,
-                    Vec2::new(
-                        (view.x * 0.78).min(900.0),
-                        if self.briefing {
-                            if compact_briefing {
-                                520.0
-                            } else {
-                                550.0
-                            }
-                        } else {
-                            300.0
-                        },
-                    ),
-                )
-                .with_color(Color::rgba(0.012, 0.025, 0.055, 0.92))
-                .with_z(10.0),
-            );
-            self.draw_text(
+        if let Some((title, story, prompt, title_color)) = overlay {
+            self.draw_full_screen_backdrop(ctx, Color::rgba(0.01, 0.02, 0.045, 0.8));
+            let center = ctx.renderer.camera.position;
+            self.draw_text_shadowed(
                 ctx.renderer,
                 title,
-                center
-                    + if compact_briefing {
-                        Vec2::new(-225.0, 75.0)
-                    } else {
-                        Vec2::new(-300.0, 75.0)
-                    },
-                if compact_briefing { 5.2 } else { 7.0 },
-                Color::rgb(0.28, 1.5, 1.3),
+                center + Vec2::new(-view.x * 0.42, view.y * 0.36),
+                6.5,
+                title_color,
                 11.0,
             );
-            self.draw_text(
+            self.draw_text_shadowed(
                 ctx.renderer,
                 story,
-                center
-                    + if compact_briefing {
-                        Vec2::new(-290.0, 5.0)
-                    } else {
-                        Vec2::new(-330.0, 5.0)
-                    },
-                if compact_briefing { 1.65 } else { 2.0 },
-                Color::rgb(0.78, 0.88, 0.9),
+                center + Vec2::new(-view.x * 0.42, view.y * 0.36 - 55.0),
+                2.1,
+                Color::rgb(0.8, 0.88, 0.9),
                 11.0,
             );
-            self.draw_text(
+            self.draw_text_shadowed(
                 ctx.renderer,
-                prompt,
-                center + Vec2::new(-150.0, -72.0),
-                3.5,
-                Color::rgb(1.25, 0.74, 0.24),
+                &prompt,
+                center + Vec2::new(-view.x * 0.42, -view.y * 0.4),
+                3.2,
+                Color::rgb(1.25, 0.78, 0.28),
                 11.0,
             );
             if self.briefing {
-                let owned = |id| {
-                    if self.save_data.campaign.has_upgrade(id) {
-                        "INSTALLED"
-                    } else {
-                        "AVAILABLE"
-                    }
-                };
-                self.draw_text(
+                self.draw_text_shadowed(
                     ctx.renderer,
-                    &format!(
-                        "LUMEN {}  Z OPTICS 60 {}  X PLATING 80 {}  C OVERCLOCK 100 {}",
-                        self.save_data.campaign.currency,
-                        owned(UPGRADE_OPTICS),
-                        owned(UPGRADE_PLATING),
-                        owned(UPGRADE_OVERCLOCK)
-                    ),
-                    center
-                        + if compact_briefing {
-                            Vec2::new(-335.0, -112.0)
-                        } else {
-                            Vec2::new(-410.0, -122.0)
-                        },
-                    if compact_briefing { 1.3 } else { 1.65 },
-                    Color::rgba(0.55, 0.82, 0.88, 0.94),
+                    &format!("LUMEN AVAILABLE: {}", self.save_data.campaign.currency),
+                    center + Vec2::new(-360.0, 110.0),
+                    2.2,
+                    Color::rgba(0.75, 0.9, 0.95, 0.95),
                     11.0,
                 );
-                self.draw_text(
-                    ctx.renderer,
-                    &format!(
-                        "V IVO {}  N SENA {}",
-                        self.specialist_module(IVO, IVO_RIGGER).to_uppercase(),
-                        self.specialist_module(SENA, SENA_DEEP_SCAN).to_uppercase()
-                    ),
-                    center + Vec2::new(-245.0, if compact_briefing { -140.0 } else { -154.0 }),
-                    1.8,
-                    Color::rgba(0.82, 0.68, 0.36, 0.98),
-                    11.0,
-                );
-                self.draw_text(
-                    ctx.renderer,
-                    &format!(
-                        "M MARA {}  O OLAN {}",
-                        self.specialist_module(MARA, MARA_RESCUE).to_uppercase(),
-                        self.specialist_module(OLAN, OLAN_LATTICE).to_uppercase()
-                    ),
-                    center + Vec2::new(-265.0, if compact_briefing { -168.0 } else { -184.0 }),
-                    1.8,
-                    Color::rgba(0.7, 0.62, 0.9, 0.98),
-                    11.0,
-                );
-                let lumen_protocol = self
-                    .lumen_protocol()
-                    .map(str::to_uppercase)
-                    .unwrap_or_else(|| "LOCKED — COMPLETE REACTOR".to_owned());
-                self.draw_text(
-                    ctx.renderer,
-                    &format!("L LUMEN {lumen_protocol}"),
-                    center + Vec2::new(-245.0, if compact_briefing { -196.0 } else { -214.0 }),
-                    1.8,
-                    Color::rgba(0.38, 0.9, 1.0, 0.98),
-                    11.0,
-                );
-                let meridian_accord = self
-                    .meridian_accord()
-                    .map(str::to_uppercase)
-                    .unwrap_or_else(|| "LOCKED — TERMS OF SALVAGE".to_owned());
-                self.draw_text(
-                    ctx.renderer,
-                    &format!("P MERIDIAN {meridian_accord}"),
-                    center + Vec2::new(-245.0, if compact_briefing { -224.0 } else { -244.0 }),
-                    1.65,
-                    Color::rgba(0.9, 0.82, 0.72, 0.98),
-                    11.0,
-                );
-                let verdant_covenant = self
-                    .verdant_covenant()
-                    .map(str::to_uppercase)
-                    .unwrap_or_else(|| "LOCKED — GARDEN BELOW".to_owned());
-                self.draw_text(
-                    ctx.renderer,
-                    &format!("G VERDANT {verdant_covenant}"),
-                    center + Vec2::new(-245.0, if compact_briefing { -252.0 } else { -274.0 }),
-                    1.65,
-                    Color::rgba(0.48, 1.15, 0.5, 0.98),
-                    11.0,
-                );
+                let mouse_world = ctx
+                    .renderer
+                    .camera
+                    .screen_to_world(ctx.input.mouse_position);
+                for (index, (_, label, color)) in self.briefing_rows().iter().enumerate() {
+                    let rect = Self::briefing_row_rect(center, index);
+                    let hovered = rect.contains_point(mouse_world);
+                    ctx.renderer.draw_sprite(
+                        self.tex_ui,
+                        Sprite::new(rect.center(), rect.size())
+                            .with_color(if hovered {
+                                Color::rgba(0.16, 0.55, 0.6, 0.4)
+                            } else {
+                                Color::rgba(0.04, 0.08, 0.12, 0.4)
+                            })
+                            .with_z(10.0),
+                    );
+                    self.draw_text_shadowed(
+                        ctx.renderer,
+                        label,
+                        rect.min + Vec2::new(14.0, 10.0),
+                        1.8,
+                        *color,
+                        11.0,
+                    );
+                }
             }
         }
     }
@@ -2077,5 +2812,173 @@ mod tests {
         game.save_data.campaign.equip_specialist(IVO, IVO_SMITH);
         assert_eq!(game.beacon_cost(), 30);
         assert_eq!(game.relay_income(), 5);
+    }
+
+    #[test]
+    fn mission_select_hides_locked_missions_until_unlocked() {
+        let mut game = LastLight::new();
+        assert_eq!(game.unlocked_mission_indices(), vec![0]);
+        game.save_data.campaign.unlocked_mission = 3;
+        assert_eq!(game.unlocked_mission_indices(), vec![0, 1]);
+    }
+
+    #[test]
+    fn starting_reclaim_the_reactor_populates_relays_and_roster() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        assert_eq!(game.relays.len(), 3);
+        assert!(game.reactor_position.is_some());
+        assert_eq!(game.friendly_count(), 3);
+        assert_eq!(
+            game.world
+                .units()
+                .iter()
+                .filter(|unit| unit.faction == CHOIR)
+                .count(),
+            6
+        );
+    }
+
+    #[test]
+    fn reclaim_the_reactor_victory_requires_relays_and_boss_dead() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        game.evaluate_mission_state();
+        assert!(!game.victory);
+
+        for relay in &mut game.relays {
+            relay.active = true;
+        }
+        game.evaluate_mission_state();
+        assert!(!game.victory, "boss is still alive");
+
+        let canticle_ids: Vec<_> = game
+            .kinds
+            .iter()
+            .filter(|(_, kind)| **kind == UnitKind::Canticle)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in canticle_ids {
+            if let Some(unit) = game.world.unit_mut(id) {
+                unit.health = 0.0;
+            }
+        }
+        game.evaluate_mission_state();
+        assert!(game.victory);
+    }
+
+    #[test]
+    fn voice_in_conduit_twelve_tracks_escort_survival_and_extraction() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::voice_in_conduit_twelve());
+        let escort = game.escort_unit.expect("mission defines an escort spawn");
+        game.evaluate_mission_state();
+        assert!(!game.victory);
+        assert!(!game.defeat);
+
+        let VictoryCondition::EscortToExtraction { point, .. } = game.mission.victory else {
+            panic!("expected an escort victory condition");
+        };
+        game.world.unit_mut(escort).unwrap().position = point;
+        game.evaluate_mission_state();
+        assert!(game.victory);
+
+        game.world.unit_mut(escort).unwrap().health = 0.0;
+        game.evaluate_mission_state();
+        assert!(game.defeat);
+    }
+
+    #[test]
+    fn enemy_ai_routes_around_conduit_obstacles() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::voice_in_conduit_twelve());
+        // The mission's obstacles should mark at least one nav cell blocked.
+        let blocked = game.nav.is_blocked_at(Vec2::new(-500.0, 480.0));
+        assert!(blocked, "corridor wall should block its own center cell");
+    }
+
+    #[test]
+    fn canticle_calls_reinforcements_once_at_half_health() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        let canticle_id = game
+            .kinds
+            .iter()
+            .find(|(_, kind)| **kind == UnitKind::Canticle)
+            .map(|(id, _)| *id)
+            .expect("mission spawns a Canticle");
+        let choir_before = game
+            .world
+            .units()
+            .iter()
+            .filter(|unit| unit.faction == CHOIR)
+            .count();
+
+        // Still above half health: no trigger yet.
+        assert!(!game.update_boss_phase());
+        assert_eq!(
+            game.world
+                .units()
+                .iter()
+                .filter(|unit| unit.faction == CHOIR)
+                .count(),
+            choir_before
+        );
+
+        let canticle = game.world.unit_mut(canticle_id).unwrap();
+        canticle.health = canticle.max_health * 0.5;
+        assert!(game.update_boss_phase());
+        assert_eq!(
+            game.world
+                .units()
+                .iter()
+                .filter(|unit| unit.faction == CHOIR)
+                .count(),
+            choir_before + 2
+        );
+
+        // Fires only once even if health stays low on later ticks.
+        assert!(!game.update_boss_phase());
+    }
+
+    #[test]
+    fn player_move_routes_around_conduit_obstacles() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::voice_in_conduit_twelve());
+        let unit_id = game.world.units()[0].id;
+        let start = game.world.units()[0].position;
+        game.world.select_point(start, PLAYER, false);
+        assert!(game.world.selection().contains(unit_id));
+
+        let destination = Vec2::new(start.x, -200.0);
+        assert!(
+            game.nav.segment_blocked(start, destination),
+            "test destination should cross a corridor wall"
+        );
+
+        game.world.issue_move(destination, 74.0);
+        game.route_around_obstacles(&[unit_id]);
+
+        let UnitOrder::Move(first_waypoint) = game.world.unit(unit_id).unwrap().order else {
+            panic!("expected a Move order toward the first routed waypoint");
+        };
+        assert_ne!(
+            first_waypoint, destination,
+            "a blocked destination should route via an intermediate waypoint, not go straight there"
+        );
+        assert!(game.player_paths.contains_key(&unit_id));
+
+        // Simulate arrival at the first waypoint and confirm the route continues.
+        {
+            let unit = game.world.unit_mut(unit_id).unwrap();
+            unit.position = first_waypoint;
+            unit.order = UnitOrder::Idle;
+        }
+        game.advance_player_paths();
+        let order_after = game.world.unit(unit_id).unwrap().order;
+        assert!(
+            matches!(order_after, UnitOrder::Move(_)),
+            "should advance to the next queued waypoint after arriving at the first"
+        );
     }
 }

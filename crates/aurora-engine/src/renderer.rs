@@ -2,11 +2,17 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "3d")]
+use glam::Vec3;
 use glam::{Mat4, Vec2};
 use winit::window::Window;
 
 use crate::camera::Camera2D;
+#[cfg(feature = "3d")]
+use crate::camera3d::Camera3D;
 use crate::color::Color;
+#[cfg(feature = "3d")]
+use crate::mesh3d::{GpuMesh, Material3D, Mesh3D};
 use crate::post::{PostFxSettings, PostPipeline, PostUniforms, ScreenLight, MAX_POINT_LIGHTS};
 use crate::sprite::{
     camera_uniform, CameraUniform, QueuedSprite, Sprite, SpriteBatch, SpriteVertex,
@@ -74,6 +80,87 @@ impl RenderQuality {
     }
 }
 
+/// Stable handle to a mesh uploaded with [`Renderer::upload_mesh3d`].
+#[cfg(feature = "3d")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Mesh3DHandle(pub(crate) usize);
+
+#[cfg(feature = "3d")]
+struct QueuedMesh3D {
+    mesh: Mesh3DHandle,
+    transform: Mat4,
+    material: Material3D,
+}
+
+/// Camera + single directional light state written to the scene uniform
+/// each frame. Kept CPU-side so games can call the setters in any order.
+#[cfg(feature = "3d")]
+#[derive(Debug, Clone, Copy)]
+struct Scene3DState {
+    view_proj: Mat4,
+    camera_pos: Vec3,
+    light_dir: Vec3,
+    light_color: Color,
+    light_intensity: f32,
+}
+
+#[cfg(feature = "3d")]
+impl Default for Scene3DState {
+    fn default() -> Self {
+        Self {
+            view_proj: Mat4::IDENTITY,
+            camera_pos: Vec3::ZERO,
+            light_dir: Vec3::new(-0.4, -1.0, -0.3).normalize(),
+            light_color: Color::WHITE,
+            light_intensity: 1.0,
+        }
+    }
+}
+
+#[cfg(feature = "3d")]
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Scene3DUniform {
+    view_proj: [[f32; 4]; 4],
+    camera_pos: [f32; 4],
+    light_dir: [f32; 4],
+    light_color: [f32; 4],
+}
+
+#[cfg(feature = "3d")]
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Object3DUniform {
+    model: [[f32; 4]; 4],
+    base_color: [f32; 4],
+    emissive: [f32; 4],
+    metallic_roughness: [f32; 4],
+}
+
+#[cfg(feature = "3d")]
+fn create_depth_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Mesh3D Depth"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 /// Shared GPU objects games use to create textures.
 pub struct GpuContext<'a> {
     /// Logical device.
@@ -94,6 +181,10 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     clear_color: Color,
+    /// Queued (not just latest-wins) so a screenshot requested during a
+    /// transient render hiccup isn't silently dropped by a later request.
+    #[cfg(not(target_arch = "wasm32"))]
+    pending_captures: Vec<std::path::PathBuf>,
 
     // Sprite pipeline
     sprite_pipeline: wgpu::RenderPipeline,
@@ -122,6 +213,31 @@ pub struct Renderer {
     stats: RenderStats,
     #[allow(dead_code)]
     window: Arc<Window>,
+
+    // Mesh3D pipeline (depth-tested, single directional light PBR)
+    #[cfg(feature = "3d")]
+    #[allow(dead_code)]
+    depth_texture: wgpu::Texture,
+    #[cfg(feature = "3d")]
+    depth_view: wgpu::TextureView,
+    #[cfg(feature = "3d")]
+    mesh3d_pipeline: wgpu::RenderPipeline,
+    #[cfg(feature = "3d")]
+    mesh3d_scene_buffer: wgpu::Buffer,
+    #[cfg(feature = "3d")]
+    mesh3d_scene_bind_group: wgpu::BindGroup,
+    #[cfg(feature = "3d")]
+    mesh3d_object_bgl: wgpu::BindGroupLayout,
+    #[cfg(feature = "3d")]
+    mesh3d_object_buffers: Vec<wgpu::Buffer>,
+    #[cfg(feature = "3d")]
+    mesh3d_object_bind_groups: Vec<wgpu::BindGroup>,
+    #[cfg(feature = "3d")]
+    meshes3d: Vec<GpuMesh>,
+    #[cfg(feature = "3d")]
+    mesh3d_queue: Vec<QueuedMesh3D>,
+    #[cfg(feature = "3d")]
+    mesh3d_scene: Scene3DState,
 }
 
 impl Renderer {
@@ -181,8 +297,17 @@ impl Renderer {
             .find(|mode| *mode == wgpu::PresentMode::Fifo)
             .unwrap_or(surface_caps.present_modes[0]);
 
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let mut surface_usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        // Only needed natively for `request_screenshot`'s buffer readback;
+        // some WebGPU implementations reject COPY_SRC on the swapchain.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            surface_usage |= wgpu::TextureUsages::COPY_SRC;
+        }
+
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: surface_usage,
             format: surface_format,
             width,
             height,
@@ -418,6 +543,123 @@ impl Renderer {
         let camera = Camera2D::new(width as f32, height as f32);
         let post = PostPipeline::new(&device, width, height, surface_format);
 
+        #[cfg(feature = "3d")]
+        let (
+            depth_texture,
+            depth_view,
+            mesh3d_pipeline,
+            mesh3d_scene_buffer,
+            mesh3d_scene_bind_group,
+            mesh3d_object_bgl,
+        ) = {
+            let (depth_texture, depth_view) = create_depth_target(&device, width, height);
+
+            let mesh3d_scene_bgl =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Mesh3D Scene BGL"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                });
+            let mesh3d_scene_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Mesh3D Scene UB"),
+                size: std::mem::size_of::<Scene3DUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let mesh3d_scene_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Mesh3D Scene BG"),
+                layout: &mesh3d_scene_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: mesh3d_scene_buffer.as_entire_binding(),
+                }],
+            });
+
+            let mesh3d_object_bgl =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Mesh3D Object BGL"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                });
+
+            let mesh3d_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Mesh3D Shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/mesh3d.wgsl").into()),
+            });
+            let mesh3d_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Mesh3D PL"),
+                bind_group_layouts: &[&mesh3d_scene_bgl, &mesh3d_object_bgl],
+                push_constant_ranges: &[],
+            });
+            let mesh3d_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Mesh3D Pipeline"),
+                layout: Some(&mesh3d_layout),
+                vertex: wgpu::VertexState {
+                    module: &mesh3d_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[GpuMesh::layout()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &mesh3d_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: scene_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    // Double-sided: keeps the core pipeline robust to winding
+                    // order across arbitrary future mesh sources; depth testing
+                    // still resolves occlusion for closed solids correctly.
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
+            (
+                depth_texture,
+                depth_view,
+                mesh3d_pipeline,
+                mesh3d_scene_buffer,
+                mesh3d_scene_bind_group,
+                mesh3d_object_bgl,
+            )
+        };
+
         log::info!(
             "Aurora renderer ready — adapter: {:?}, format: {:?}",
             adapter.get_info().name,
@@ -431,6 +673,8 @@ impl Renderer {
             config,
             size: winit::dpi::PhysicalSize::new(width, height),
             clear_color: Color::AURORA_NIGHT,
+            #[cfg(not(target_arch = "wasm32"))]
+            pending_captures: Vec::new(),
             sprite_pipeline,
             camera_buffer,
             camera_bind_group,
@@ -451,6 +695,29 @@ impl Renderer {
             camera,
             stats: RenderStats::default(),
             window,
+
+            #[cfg(feature = "3d")]
+            depth_texture,
+            #[cfg(feature = "3d")]
+            depth_view,
+            #[cfg(feature = "3d")]
+            mesh3d_pipeline,
+            #[cfg(feature = "3d")]
+            mesh3d_scene_buffer,
+            #[cfg(feature = "3d")]
+            mesh3d_scene_bind_group,
+            #[cfg(feature = "3d")]
+            mesh3d_object_bgl,
+            #[cfg(feature = "3d")]
+            mesh3d_object_buffers: Vec::new(),
+            #[cfg(feature = "3d")]
+            mesh3d_object_bind_groups: Vec::new(),
+            #[cfg(feature = "3d")]
+            meshes3d: Vec::new(),
+            #[cfg(feature = "3d")]
+            mesh3d_queue: Vec::new(),
+            #[cfg(feature = "3d")]
+            mesh3d_scene: Scene3DState::default(),
         }
     }
 
@@ -470,6 +737,16 @@ impl Renderer {
 
     pub fn set_clear_color(&mut self, color: Color) {
         self.clear_color = color;
+    }
+
+    /// Queues a screenshot: a future `render()` call (one per frame, in
+    /// request order) writes the presented frame to `path` as a PNG.
+    /// Native only — a debug/dev-tools facility (see
+    /// `AURORA_SCREENSHOT_PATH` in `app.rs`), not part of the normal game
+    /// loop.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn request_screenshot(&mut self, path: impl Into<std::path::PathBuf>) {
+        self.pending_captures.push(path.into());
     }
 
     pub fn set_debug_triangle(&mut self, enabled: bool) {
@@ -523,6 +800,65 @@ impl Renderer {
         self.stats
     }
 
+    /// Uploads a mesh to the GPU and returns a stable handle to draw it with.
+    /// Call once per unique mesh (typically from `Game::on_start`).
+    #[cfg(feature = "3d")]
+    pub fn upload_mesh3d(&mut self, mesh: &Mesh3D) -> Mesh3DHandle {
+        let gpu_mesh = GpuMesh::upload(&self.gpu(), mesh);
+        let idx = self.meshes3d.len();
+        self.meshes3d.push(gpu_mesh);
+        Mesh3DHandle(idx)
+    }
+
+    /// Sets the camera used by the mesh pipeline for the next `render` call.
+    #[cfg(feature = "3d")]
+    pub fn set_camera3d(&mut self, camera: &Camera3D) {
+        self.mesh3d_scene.view_proj = camera.view_projection();
+        self.mesh3d_scene.camera_pos = camera.position;
+    }
+
+    /// Sets the single directional light used by the mesh pipeline.
+    #[cfg(feature = "3d")]
+    pub fn set_directional_light(&mut self, direction: Vec3, color: Color, intensity: f32) {
+        self.mesh3d_scene.light_dir = direction.normalize_or_zero();
+        self.mesh3d_scene.light_color = color;
+        self.mesh3d_scene.light_intensity = intensity;
+    }
+
+    /// Queues a mesh instance for the next frame (call during `on_update`).
+    #[cfg(feature = "3d")]
+    pub fn queue_mesh3d(&mut self, mesh: Mesh3DHandle, transform: Mat4, material: Material3D) {
+        if mesh.0 < self.meshes3d.len() {
+            self.mesh3d_queue.push(QueuedMesh3D {
+                mesh,
+                transform,
+                material: material.sanitized(),
+            });
+        }
+    }
+
+    #[cfg(feature = "3d")]
+    fn ensure_mesh3d_object_capacity(&mut self, needed: usize) {
+        while self.mesh3d_object_buffers.len() < needed {
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Mesh3D Object UB"),
+                size: std::mem::size_of::<Object3DUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Mesh3D Object BG"),
+                layout: &self.mesh3d_object_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                }],
+            });
+            self.mesh3d_object_buffers.push(buffer);
+            self.mesh3d_object_bind_groups.push(bind_group);
+        }
+    }
+
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
@@ -533,6 +869,13 @@ impl Renderer {
                 .set_viewport(new_size.width as f32, new_size.height as f32);
             self.post
                 .resize(&self.device, new_size.width, new_size.height);
+            #[cfg(feature = "3d")]
+            {
+                let (depth_texture, depth_view) =
+                    create_depth_target(&self.device, new_size.width, new_size.height);
+                self.depth_texture = depth_texture;
+                self.depth_view = depth_view;
+            }
         }
     }
 
@@ -544,6 +887,59 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&camera_uniform(vp)),
         );
+
+        #[cfg(feature = "3d")]
+        let mesh3d_queue = std::mem::take(&mut self.mesh3d_queue);
+        #[cfg(feature = "3d")]
+        {
+            let scene = &self.mesh3d_scene;
+            let scene_uniform = Scene3DUniform {
+                view_proj: scene.view_proj.to_cols_array_2d(),
+                camera_pos: [
+                    scene.camera_pos.x,
+                    scene.camera_pos.y,
+                    scene.camera_pos.z,
+                    0.0,
+                ],
+                light_dir: [scene.light_dir.x, scene.light_dir.y, scene.light_dir.z, 0.0],
+                light_color: [
+                    scene.light_color.r,
+                    scene.light_color.g,
+                    scene.light_color.b,
+                    scene.light_intensity,
+                ],
+            };
+            self.queue.write_buffer(
+                &self.mesh3d_scene_buffer,
+                0,
+                bytemuck::bytes_of(&scene_uniform),
+            );
+
+            self.ensure_mesh3d_object_capacity(mesh3d_queue.len());
+            for (i, item) in mesh3d_queue.iter().enumerate() {
+                let object_uniform = Object3DUniform {
+                    model: item.transform.to_cols_array_2d(),
+                    base_color: [
+                        item.material.base_color.r,
+                        item.material.base_color.g,
+                        item.material.base_color.b,
+                        item.material.base_color.a,
+                    ],
+                    emissive: [
+                        item.material.emissive.r,
+                        item.material.emissive.g,
+                        item.material.emissive.b,
+                        0.0,
+                    ],
+                    metallic_roughness: [item.material.metallic, item.material.roughness, 0.0, 0.0],
+                };
+                self.queue.write_buffer(
+                    &self.mesh3d_object_buffers[i],
+                    0,
+                    bytemuck::bytes_of(&object_uniform),
+                );
+            }
+        }
 
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -652,6 +1048,55 @@ impl Renderer {
                 label: Some("Render Encoder"),
             });
 
+        // Pass 0 (3d feature only): opaque, depth-tested mesh scene → offscreen
+        #[cfg(feature = "3d")]
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Mesh3D Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.post.scene_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.clear_color.to_wgpu()),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+
+            if !mesh3d_queue.is_empty() {
+                pass.set_pipeline(&self.mesh3d_pipeline);
+                pass.set_bind_group(0, &self.mesh3d_scene_bind_group, &[]);
+                for (i, item) in mesh3d_queue.iter().enumerate() {
+                    let Some(mesh) = self.meshes3d.get(item.mesh.0) else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, &self.mesh3d_object_bind_groups[i], &[]);
+                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
+            }
+        }
+
+        // A mesh pass already cleared+drew the offscreen target when the `3d`
+        // feature is enabled, so the sprite scene pass loads instead of
+        // clearing — 2D sprites (HUD/UI) composite on top of the 3D scene.
+        let scene_color_load = if cfg!(feature = "3d") {
+            wgpu::LoadOp::Load
+        } else {
+            wgpu::LoadOp::Clear(self.clear_color.to_wgpu())
+        };
+
         // Pass 1: scene → offscreen
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -660,7 +1105,7 @@ impl Renderer {
                     view: &self.post.scene_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear_color.to_wgpu()),
+                        load: scene_color_load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -718,13 +1163,113 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let capture = (!self.pending_captures.is_empty())
+            .then(|| self.pending_captures.remove(0))
+            .map(|path| {
+                let bytes_per_pixel = 4u32;
+                let unpadded_bytes_per_row = self.config.width * bytes_per_pixel;
+                let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+                let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+                let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Screenshot Buffer"),
+                    size: (padded_bytes_per_row * self.config.height) as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                encoder.copy_texture_to_buffer(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &output.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(padded_bytes_per_row),
+                            rows_per_image: Some(self.config.height),
+                        },
+                    },
+                    wgpu::Extent3d {
+                        width: self.config.width,
+                        height: self.config.height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                (path, buffer, padded_bytes_per_row, unpadded_bytes_per_row)
+            });
+
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((path, buffer, padded_bytes_per_row, unpadded_bytes_per_row)) = capture {
+            self.write_capture_png(
+                path,
+                buffer,
+                padded_bytes_per_row,
+                unpadded_bytes_per_row,
+                self.config.format,
+            );
+        }
+
         self.stats.cpu_frame_ms = InstantCompat::now()
             .duration_since(frame_started)
             .as_secs_f32()
             * 1_000.0;
         Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn write_capture_png(
+        &self,
+        path: std::path::PathBuf,
+        buffer: wgpu::Buffer,
+        padded_bytes_per_row: u32,
+        unpadded_bytes_per_row: u32,
+        format: wgpu::TextureFormat,
+    ) {
+        let width = self.config.width;
+        let height = self.config.height;
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        let _ = self.device.poll(wgpu::Maintain::Wait);
+        let Ok(Ok(())) = rx.recv() else {
+            log::warn!("screenshot buffer map failed");
+            return;
+        };
+        let mut pixels = vec![0u8; (unpadded_bytes_per_row * height) as usize];
+        {
+            let data = slice.get_mapped_range();
+            for row in 0..height {
+                let src_start = (row * padded_bytes_per_row) as usize;
+                let dst_start = (row * unpadded_bytes_per_row) as usize;
+                let row_len = unpadded_bytes_per_row as usize;
+                pixels[dst_start..dst_start + row_len]
+                    .copy_from_slice(&data[src_start..src_start + row_len]);
+            }
+        }
+        buffer.unmap();
+        if matches!(
+            format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        ) {
+            for chunk in pixels.chunks_exact_mut(4) {
+                chunk.swap(0, 2);
+            }
+        }
+        match image::RgbaImage::from_raw(width, height, pixels) {
+            Some(image) => match image.save(&path) {
+                Ok(()) => log::info!("screenshot saved to {}", path.display()),
+                Err(error) => log::warn!("screenshot save failed: {error}"),
+            },
+            None => log::warn!("screenshot buffer had the wrong size for {width}x{height}"),
+        }
     }
 
     fn screen_light(&self, light: PointLight) -> ScreenLight {

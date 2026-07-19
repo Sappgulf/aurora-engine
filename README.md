@@ -29,6 +29,12 @@ cargo run -p last_light
 | **Minimap click** | Move the tactical camera |
 | **Esc** | Tactical pause |
 
+On launch, `Up/Down` (or `Left/Right`) pick a mission from the mission-select
+screen and `Space/Enter` deploy — mission 3, "A Voice in Conduit Twelve,"
+unlocks after completing "Reclaim the Reactor." During mission 3, `K` near
+the extraction console (while an Engineer is selected and in range) wakes
+Lumen.
+
 During the mission briefing, `Z`, `X`, and `C` purchase permanent Field Optics,
 Reactive Plating, and Fabricator Overclock upgrades with campaign Lumen. `V`
 cycles Ivo's field module and `N` cycles Sena's sensor module; both loadouts save
@@ -52,6 +58,8 @@ the sector, defeat the Choir Canticle, and bring the auxiliary reactor online.
 cargo run -p playground      # free-roam particles / camera
 cargo run -p aurora_run      # earlier arcade vertical slice
 cargo run -p triangle_demo   # M0 NDC triangle
+cargo run -p mesh_demo       # M4 core 3D pipeline: lit, depth-tested cube + sphere
+cargo run -p skirmish        # free-play two-base RTS skirmish vs. the engine's SimpleAggroAi
 ```
 
 ## Features
@@ -73,7 +81,7 @@ cargo run -p triangle_demo   # M0 NDC triangle
 | Save/settings + audio mixer contracts | ✅ |
 | Tile collisions/triggers + camera rig | ✅ |
 | Diagnostics + asset loading queue | ✅ foundation |
-| Feature-gated 3D mesh/material contract | ✅ foundation |
+| Feature-gated 3D mesh pipeline (depth-tested, single-light PBR) | ✅ core |
 | RTS selection, formations, orders, navigation, fog | ✅ |
 | RTS economy, production queues, power graphs, control groups | ✅ |
 | Placement validation, tactical minimap, per-unit clip players | ✅ |
@@ -83,7 +91,10 @@ cargo run -p triangle_demo   # M0 NDC triangle
 | Relationship-gated Lumen Guardian/Witness protocols | ✅ |
 | Meridian and Verdant alliance doctrine foundations | ✅ |
 | Versioned campaign progress with v1 save migration | ✅ |
-| Last Light point-and-click campaign mission | ✅ vertical slice |
+| Data-driven mission definitions + in-game mission select | ✅ 2-mission campaign |
+| Generic `SimpleAggroAi` (target scoring, retreat, focus-fire, `NavGrid` pathing) | ✅ |
+| Skirmish free-play mode (reuses RTS core, no campaign/art dependency) | ✅ |
+| Last Light point-and-click campaign missions | ✅ 2-mission vertical slice |
 
 ## Library sketch
 

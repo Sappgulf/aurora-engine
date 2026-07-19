@@ -9,6 +9,8 @@ use winit::window::{Window, WindowId};
 
 use crate::audio::Audio;
 use crate::color::Color;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::devtools::DebugHarness;
 use crate::input::Input;
 use crate::renderer::Renderer;
 use crate::time::Time;
@@ -77,6 +79,8 @@ pub fn run<G: Game>(game: G) {
         audio: Audio::new(),
         proxy,
         init_started: false,
+        #[cfg(not(target_arch = "wasm32"))]
+        devtools: DebugHarness::from_env(),
     };
 
     cfg_if::cfg_if! {
@@ -138,6 +142,8 @@ struct EngineApp<G: Game> {
     audio: Audio,
     proxy: EventLoopProxy<UserEvent>,
     init_started: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    devtools: Option<DebugHarness>,
 }
 
 impl<G: Game> EngineApp<G> {
@@ -309,6 +315,20 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                 };
 
                 self.time.tick();
+
+                // Scripted input must land before any game logic runs this
+                // frame (on_fixed_update/on_update), or the edge-triggered
+                // key/mouse "pressed" state gets cleared by begin_frame()
+                // before any game code ever observes it.
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(devtools) = self.devtools.as_mut() {
+                    devtools.tick(
+                        self.time.elapsed,
+                        self.time.delta,
+                        &mut self.input,
+                        renderer,
+                    );
+                }
 
                 // Fixed steps then variable frame update. A bounded catch-up
                 // policy preserves responsive input/rendering after a hitch.

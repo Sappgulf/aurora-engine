@@ -6,6 +6,8 @@ members = [
     "examples/playground",
     "examples/aurora_run",
     "examples/last_light",
+    "examples/mesh_demo",
+    "examples/skirmish",
 ]
 default-members = ["examples/last_light"]
 

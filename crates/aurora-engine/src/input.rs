@@ -125,6 +125,50 @@ impl Input {
         }
     }
 
+    /// Synthesizes a key event as if it came from the window. Used by the
+    /// scripted-input debug harness (`AURORA_INPUT_SCRIPT`) to drive a game
+    /// without real OS input.
+    pub fn simulate_key(&mut self, code: KeyCode, pressed: bool) {
+        if pressed {
+            if !self.keys_down.contains(&code) {
+                self.keys_pressed.insert(code);
+            }
+            self.keys_down.insert(code);
+        } else {
+            self.keys_down.remove(&code);
+            self.keys_released.insert(code);
+        }
+    }
+
+    /// Synthesizes a mouse button event. See [`Input::simulate_key`].
+    pub fn simulate_mouse_button(&mut self, button: MouseButton, pressed: bool) {
+        if pressed {
+            if !self.mouse_buttons_down.contains(&button) {
+                self.mouse_buttons_pressed.insert(button);
+            }
+            self.mouse_buttons_down.insert(button);
+        } else {
+            self.mouse_buttons_down.remove(&button);
+            self.mouse_buttons_released.insert(button);
+        }
+    }
+
+    /// Synthesizes a cursor move to an absolute window position. See
+    /// [`Input::simulate_key`].
+    pub fn simulate_mouse_position(&mut self, position: Vec2) {
+        if self.mouse_initialized {
+            self.mouse_delta += position - self.prev_mouse;
+        }
+        self.prev_mouse = position;
+        self.mouse_position = position;
+        self.mouse_initialized = true;
+    }
+
+    /// Synthesizes a scroll delta. See [`Input::simulate_key`].
+    pub fn simulate_scroll(&mut self, delta: f32) {
+        self.scroll += delta;
+    }
+
     pub fn key_down(&self, key: KeyCode) -> bool {
         self.keys_down.contains(&key)
     }

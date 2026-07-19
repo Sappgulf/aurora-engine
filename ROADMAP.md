@@ -103,25 +103,36 @@ systems it uses can be adopted by a second 2D game without copying demo code.
 - [x] Persistent Olan analysis and Mara command doctrines
 - [x] Lumen-contact-gated Guardian and Witness ability choices
 - [x] Meridian and Verdant alliance-specific late-campaign abilities
+- [x] Data-driven `MissionDef`/`VictoryCondition` + in-game mission select
+- [x] Mission 3 "A Voice in Conduit Twelve" (escort objective, corridor `NavGrid`
+      obstacles, Lumen-wake choice)
+- [x] Generic `SimpleAggroAi` (target scoring, retreat, focus-fire spread,
+      `NavGrid`-routed approach) shared by the campaign and skirmish mode
+- [x] Skirmish free-play mode (`examples/skirmish`) reusing RTS core systems
+      without campaign save or authored art
 
 **Exit criteria:** select and command a Lantern squad, reveal the sector, restore
 three relays, defeat a Choir command unit, and complete the mission on native
 and web builds.
 
-**Test:** `cargo run -p last_light`
+**Test:** `cargo run -p last_light` (mission select → Reclaim the Reactor →
+A Voice in Conduit Twelve), `cargo run -p skirmish`
 
 ---
 
 ## Milestone 4 — 3D path (feature-gated)
 
 - [x] Perspective camera conventions + projection contract (`3d` feature)
-- [ ] Depth buffer + mesh pipeline
+- [x] Depth buffer + mesh pipeline
 - [ ] glTF mesh loader
-- [ ] PBR materials (base color, metal, roughness)
-- [ ] Directional light + shadow map
+- [x] PBR materials (base color, metal, roughness)
+- [x] Directional light (no shadow map yet)
 - [ ] Sky / IBL (simple)
 
 **Exit criteria:** One glTF model lit and orbit-controlled, web + native.
+
+**Test:** `cargo run -p mesh_demo` (procedural cube + sphere, orbiting camera,
+single-light PBR, depth-tested against `feature = "3d"`).
 
 ---
 

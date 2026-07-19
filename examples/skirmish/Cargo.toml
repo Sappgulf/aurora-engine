@@ -1,0 +1,20 @@
+[package]
+name = "skirmish"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+aurora-engine = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+winit = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = { workspace = true }
+console_log = { workspace = true }
+wasm-bindgen = { workspace = true }
