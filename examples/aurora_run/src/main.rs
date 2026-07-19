@@ -13,7 +13,7 @@ const PLAYER_MAX_SPEED: f32 = 430.0;
 const PLAYER_ACCEL_RESPONSE: f32 = 13.0;
 const PLAYER_BRAKE_RESPONSE: f32 = 8.5;
 const PLAYER_SIZE: f32 = 40.0;
-const COMBAT_ATLAS_SIZE: Vec2 = Vec2::new(1774.0, 887.0);
+const UNIT_ATLAS_SIZE: Vec2 = Vec2::splat(1254.0);
 
 /// Painted-in set dressing that gives the otherwise procedural arena a few
 /// intentional landmarks. It is deliberately data-only: gameplay collision
@@ -37,6 +37,7 @@ enum HazardPattern {
     Bounce,
     Orbit,
     Hunter,
+    Sentinel,
 }
 
 struct Hazard {
@@ -45,6 +46,7 @@ struct Hazard {
     size: f32,
     pattern: HazardPattern,
     phase: f32,
+    health: u8,
 }
 
 struct AuroraRun {
@@ -53,6 +55,8 @@ struct AuroraRun {
     tex_crystal: TextureHandle,
     tex_hazard: TextureHandle,
     tex_floor: TextureHandle,
+    tex_backdrop: TextureHandle,
+    tex_units: TextureHandle,
     tex_decal: TextureHandle,
     tex_ui: TextureHandle,
     player_atlas: TextureAtlas,
@@ -93,11 +97,13 @@ impl AuroraRun {
             tex_crystal: TextureHandle::default(),
             tex_hazard: TextureHandle::default(),
             tex_floor: TextureHandle::default(),
+            tex_backdrop: TextureHandle::default(),
+            tex_units: TextureHandle::default(),
             tex_decal: TextureHandle::default(),
             tex_ui: TextureHandle::default(),
-            player_atlas: TextureAtlas::new(TextureHandle::default(), 4, 2, COMBAT_ATLAS_SIZE),
-            drone_atlas: TextureAtlas::new(TextureHandle::default(), 4, 2, COMBAT_ATLAS_SIZE),
-            player_anim: Animation::new([0, 1, 2, 3, 2, 1], 10.0),
+            player_atlas: TextureAtlas::new(TextureHandle::default(), 2, 2, UNIT_ATLAS_SIZE),
+            drone_atlas: TextureAtlas::new(TextureHandle::default(), 2, 2, UNIT_ATLAS_SIZE),
+            player_anim: Animation::new([0], 1.0),
             player: Vec2::ZERO,
             player_velocity: Vec2::ZERO,
             collectibles: Vec::new(),
@@ -122,32 +128,7 @@ impl AuroraRun {
             save: SaveData::default(),
             save_store: SaveStore::new("aurora-run"),
             run_recorded: false,
-            arena_props: vec![
-                ArenaProp {
-                    pos: Vec2::new(-438.0, 208.0),
-                    size: Vec2::new(174.0, 66.0),
-                    accent: Color::rgba(0.12, 0.95, 1.3, 0.9),
-                    rotation: -0.08,
-                },
-                ArenaProp {
-                    pos: Vec2::new(438.0, -208.0),
-                    size: Vec2::new(174.0, 66.0),
-                    accent: Color::rgba(1.1, 0.24, 0.62, 0.9),
-                    rotation: -0.08,
-                },
-                ArenaProp {
-                    pos: Vec2::new(-472.0, -136.0),
-                    size: Vec2::new(76.0, 150.0),
-                    accent: Color::rgba(0.3, 0.55, 1.4, 0.85),
-                    rotation: 0.04,
-                },
-                ArenaProp {
-                    pos: Vec2::new(472.0, 136.0),
-                    size: Vec2::new(76.0, 150.0),
-                    accent: Color::rgba(0.95, 0.28, 0.9, 0.85),
-                    rotation: 0.04,
-                },
-            ],
+            arena_props: Vec::new(),
         }
     }
 
@@ -178,6 +159,17 @@ impl AuroraRun {
                     _ => HazardPattern::Hunter,
                 },
                 phase: a,
+                health: 1,
+            });
+        }
+        if self.wave == 6 {
+            self.hazards.push(Hazard {
+                pos: Vec2::new(0.0, 190.0),
+                vel: Vec2::ZERO,
+                size: 84.0,
+                pattern: HazardPattern::Sentinel,
+                phase: 0.0,
+                health: 12,
             });
         }
     }
@@ -492,15 +484,21 @@ impl Game for AuroraRun {
     }
 
     fn on_start(&mut self, renderer: &mut Renderer) {
-        let (player_tex, orb, crystal, floor, decal, ui) = {
+        let (units, backdrop, orb, crystal, floor, decal, ui) = {
             let gpu = renderer.gpu();
             (
                 Texture::from_bytes(
                     &gpu,
-                    include_bytes!("../assets/aurora-combat-atlas.png"),
-                    "Aurora combat atlas",
+                    include_bytes!("../assets/salvage-units-atlas.png"),
+                    "Salvage unit atlas",
                 )
-                .expect("generated combat atlas must decode"),
+                .expect("salvage unit atlas must decode"),
+                Texture::from_bytes(
+                    &gpu,
+                    include_bytes!("../assets/salvage-bay-bg.png"),
+                    "Salvage bay environment",
+                )
+                .expect("salvage bay background must decode"),
                 Texture::soft_circle(&gpu, 48, Color::rgb(0.95, 0.85, 0.3)),
                 Texture::crystal(&gpu, 64, Color::rgb(1.0, 0.72, 0.16)),
                 Texture::arena_floor(&gpu, 512),
@@ -508,15 +506,17 @@ impl Game for AuroraRun {
                 Texture::solid(&gpu, Color::WHITE),
             )
         };
-        self.tex_player = renderer.add_texture(player_tex);
+        self.tex_units = renderer.add_texture(units);
+        self.tex_backdrop = renderer.add_texture(backdrop);
+        self.tex_player = self.tex_units;
         self.tex_orb = renderer.add_texture(orb);
         self.tex_crystal = renderer.add_texture(crystal);
-        self.tex_hazard = self.tex_player;
+        self.tex_hazard = self.tex_units;
         self.tex_floor = renderer.add_texture(floor);
         self.tex_decal = renderer.add_texture(decal);
         self.tex_ui = renderer.add_texture(ui);
-        self.player_atlas = TextureAtlas::new(self.tex_player, 4, 2, COMBAT_ATLAS_SIZE);
-        self.drone_atlas = TextureAtlas::new(self.tex_player, 4, 2, COMBAT_ATLAS_SIZE);
+        self.player_atlas = TextureAtlas::new(self.tex_units, 2, 2, UNIT_ATLAS_SIZE);
+        self.drone_atlas = TextureAtlas::new(self.tex_units, 2, 2, UNIT_ATLAS_SIZE);
 
         match self.save_store.load() {
             Ok(Some(save)) => self.save = save,
@@ -638,6 +638,13 @@ impl Game for AuroraRun {
                         * (80.0 + self.wave as f32 * 10.0);
                     h.vel = h.vel.lerp(seek, 1.0 - (-dt * 1.45).exp());
                 }
+                HazardPattern::Sentinel => {
+                    let target = self.player + Vec2::new((h.phase * 0.7).sin() * 130.0, 175.0);
+                    h.vel = h.vel.lerp(
+                        (target - h.pos).normalize_or_zero() * 78.0,
+                        1.0 - (-dt * 1.2).exp(),
+                    );
+                }
             }
             h.pos += h.vel * dt;
             if h.pos.x < -bound.x || h.pos.x > bound.x {
@@ -652,6 +659,38 @@ impl Game for AuroraRun {
 
         // Collect
         let p_box = self.player_aabb();
+        let mut defeated_sentinel = false;
+        if self.dash_timer > 0.0 {
+            for h in &mut self.hazards {
+                if matches!(h.pattern, HazardPattern::Sentinel)
+                    && p_box.intersects(Aabb::from_center_size(h.pos, Vec2::splat(h.size * 1.35)))
+                {
+                    h.health = h.health.saturating_sub(1);
+                    self.dash_timer = 0.0;
+                    self.dash_cooldown = 0.75;
+                    self.player_velocity = (self.player - h.pos).normalize_or_zero() * 620.0;
+                    self.shake = 0.22;
+                    ctx.audio.hurt();
+                    self.particles.emit_burst(
+                        h.pos,
+                        36,
+                        300.0,
+                        0.65,
+                        18.0,
+                        Color::rgb(1.0, 0.45, 0.1),
+                        &mut self.rng,
+                    );
+                    defeated_sentinel = h.health == 0;
+                    break;
+                }
+            }
+        }
+        if defeated_sentinel {
+            self.hazards
+                .retain(|h| !matches!(h.pattern, HazardPattern::Sentinel));
+            self.score += 20;
+            ctx.audio.win_note();
+        }
         for c in &mut self.collectibles {
             if !c.alive {
                 continue;
@@ -688,7 +727,12 @@ impl Game for AuroraRun {
             }
         }
 
-        if self.collectibles.iter().all(|c| !c.alive) {
+        if self.collectibles.iter().all(|c| !c.alive)
+            && !self
+                .hazards
+                .iter()
+                .any(|h| matches!(h.pattern, HazardPattern::Sentinel))
+        {
             self.wave += 1;
             self.dash_charges = (self.dash_charges + 1).min(3);
             self.combo_timer = 3.0;
@@ -759,6 +803,7 @@ impl Game for AuroraRun {
                     HazardPattern::Hunter
                 },
                 phase: a,
+                health: 1,
             });
         }
 
@@ -815,8 +860,14 @@ impl Game for AuroraRun {
 
         // Floor
         ctx.renderer.draw_sprite(
+            self.tex_backdrop,
+            Sprite::new(arena_center, arena_size).with_z(-7.0),
+        );
+        ctx.renderer.draw_sprite(
             self.tex_floor,
-            Sprite::new(arena_center, arena_size).with_z(-5.0),
+            Sprite::new(arena_center, arena_size)
+                .with_color(Color::rgba(0.18, 0.32, 0.58, 0.22))
+                .with_z(-5.0),
         );
         self.draw_arena_architecture(ctx, t);
 
@@ -922,64 +973,43 @@ impl Game for AuroraRun {
                     .with_color(Color::rgba(2.4, 0.08, 0.18, 0.10))
                     .with_z(-2.0),
             );
-            let mut drone = self.drone_atlas.sprite(
-                h.pos,
-                Vec2::splat(h.size * 2.9),
-                4 + ((t * 3.0 + h.pos.x * 0.01).abs() as u32 % 4),
-            );
-            drone.rotation = rot * 0.12;
-            drone.color = match h.pattern {
-                HazardPattern::Bounce => Color::rgba(1.3, 0.42, 0.42, 1.0),
-                HazardPattern::Orbit => Color::rgba(1.15, 0.35, 0.9, 1.0),
-                HazardPattern::Hunter => Color::rgba(1.65, 0.22, 0.25, 1.0),
+            let (frame, scale) = match h.pattern {
+                HazardPattern::Hunter => (1, 3.25),
+                HazardPattern::Orbit => (2, 2.85),
+                HazardPattern::Bounce => (3, 2.7),
+                HazardPattern::Sentinel => (3, 3.35),
             };
+            let mut drone = self
+                .drone_atlas
+                .sprite(h.pos, Vec2::splat(h.size * scale), frame);
+            drone.rotation = match h.pattern {
+                HazardPattern::Orbit | HazardPattern::Sentinel => rot * 0.16,
+                _ => heading_rotation - std::f32::consts::FRAC_PI_2,
+            };
+            drone.color = Color::WHITE;
             drone.z = 0.2;
             ctx.renderer.draw_sprite(self.tex_hazard, drone);
 
-            // The old hazard glow was intentionally abstract; these sharp
-            // accents give each behavior a silhouette that can be read while
-            // moving quickly. They are visual-only, so collision stays tied
-            // to the same reliable AABB used by the engine demo.
-            let accent = match h.pattern {
-                HazardPattern::Bounce => Color::rgba(1.7, 0.46, 0.32, 0.9),
-                HazardPattern::Orbit => Color::rgba(1.18, 0.42, 1.5, 0.9),
-                HazardPattern::Hunter => Color::rgba(2.0, 0.16, 0.25, 0.96),
-            };
-            match h.pattern {
-                HazardPattern::Bounce => {
-                    for rotation in [0.0, std::f32::consts::FRAC_PI_2] {
-                        ctx.renderer.draw_sprite(
-                            self.tex_ui,
-                            Sprite::new(h.pos, Vec2::new(h.size * 3.1, h.size * 0.36))
-                                .with_rotation(rotation + t * 1.4)
-                                .with_color(accent)
-                                .with_z(0.27),
-                        );
-                    }
-                }
-                HazardPattern::Orbit => {
-                    for rotation in [0.0, std::f32::consts::FRAC_PI_2] {
-                        ctx.renderer.draw_sprite(
-                            self.tex_ui,
-                            Sprite::new(h.pos, Vec2::new(h.size * 3.35, h.size * 0.24))
-                                .with_rotation(rotation + h.phase * 0.8)
-                                .with_color(accent)
-                                .with_z(0.27),
-                        );
-                    }
-                }
-                HazardPattern::Hunter => {
-                    ctx.renderer.draw_sprite(
-                        self.tex_crystal,
-                        Sprite::new(
-                            h.pos + heading * h.size * 0.75,
-                            Vec2::new(h.size * 2.1, h.size * 1.15),
-                        )
-                        .with_rotation(heading_rotation - std::f32::consts::FRAC_PI_2)
-                        .with_color(accent)
-                        .with_z(0.28),
-                    );
-                }
+            if matches!(h.pattern, HazardPattern::Sentinel) {
+                let health = h.health as f32 / 12.0;
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(
+                        h.pos + Vec2::new(0.0, -h.size * 1.65),
+                        Vec2::new(128.0, 7.0),
+                    )
+                    .with_color(Color::rgba(0.03, 0.04, 0.07, 0.9))
+                    .with_z(0.34),
+                );
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(
+                        h.pos + Vec2::new(-64.0 + health * 64.0, -h.size * 1.65),
+                        Vec2::new(128.0 * health, 4.0),
+                    )
+                    .with_color(Color::rgba(2.0, 0.58, 0.1, 1.0))
+                    .with_z(0.35),
+                );
             }
         }
 
@@ -991,7 +1021,7 @@ impl Game for AuroraRun {
         }
 
         // Player (atlas animation)
-        let frame = self.player_anim.frame() % 4;
+        let frame = self.player_anim.frame();
         let flash = if self.hurt_cooldown > 0.0 && ((t * 20.0) as i32 % 2 == 0) {
             Color::rgba(1.0, 0.5, 0.5, 0.9)
         } else {
@@ -1021,7 +1051,7 @@ impl Game for AuroraRun {
         }
         let mut spr = self
             .player_atlas
-            .sprite(self.player, Vec2::splat(PLAYER_SIZE * 2.45), frame);
+            .sprite(self.player, Vec2::splat(PLAYER_SIZE * 2.9), frame);
         spr.color = flash;
         spr.rotation = -self.player_velocity.x * 0.00055;
         spr.z = 1.0;

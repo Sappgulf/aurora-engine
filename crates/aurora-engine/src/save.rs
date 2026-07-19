@@ -334,9 +334,14 @@ mod tests {
     fn store_round_trip_sanitizes_and_clears_a_named_slot() {
         let path = temporary_save_path("round-trip");
         let store = SaveStore::with_path("pilot one", &path);
-        let mut save = SaveData::default();
-        save.high_score = 128;
-        save.settings.music_volume = 2.0;
+        let save = SaveData {
+            high_score: 128,
+            settings: GameSettings {
+                music_volume: 2.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         store.save(&save).expect("save should persist");
         assert_eq!(store.slot(), "pilot-one");
