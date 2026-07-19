@@ -10,6 +10,7 @@ use winit::keyboard::KeyCode;
 const WORLD: Vec2 = Vec2::new(1180.0, 660.0);
 const PLAYER_SPEED: f32 = 340.0;
 const PLAYER_SIZE: f32 = 40.0;
+const COMBAT_ATLAS_SIZE: Vec2 = Vec2::new(1774.0, 887.0);
 
 struct Collectible {
     pos: Vec2,
@@ -25,9 +26,11 @@ struct Hazard {
 struct AuroraRun {
     tex_player: TextureHandle,
     tex_orb: TextureHandle,
+    tex_crystal: TextureHandle,
     tex_hazard: TextureHandle,
     tex_floor: TextureHandle,
     player_atlas: TextureAtlas,
+    drone_atlas: TextureAtlas,
     player_anim: Animation,
     player: Vec2,
     collectibles: Vec<Collectible>,
@@ -48,9 +51,11 @@ impl AuroraRun {
         Self {
             tex_player: TextureHandle::default(),
             tex_orb: TextureHandle::default(),
+            tex_crystal: TextureHandle::default(),
             tex_hazard: TextureHandle::default(),
             tex_floor: TextureHandle::default(),
-            player_atlas: TextureAtlas::new(TextureHandle::default(), 4, 1, Vec2::new(256.0, 64.0)),
+            player_atlas: TextureAtlas::new(TextureHandle::default(), 4, 2, COMBAT_ATLAS_SIZE),
+            drone_atlas: TextureAtlas::new(TextureHandle::default(), 4, 2, COMBAT_ATLAS_SIZE),
             player_anim: Animation::new([0, 1, 2, 3, 2, 1], 10.0),
             player: Vec2::ZERO,
             collectibles: Vec::new(),
@@ -111,25 +116,27 @@ impl Game for AuroraRun {
     }
 
     fn on_start(&mut self, renderer: &mut Renderer) {
-        let (player_tex, orb, hazard, floor) = {
+        let (player_tex, orb, crystal, floor) = {
             let gpu = renderer.gpu();
             (
-                Texture::orb_atlas_strip(&gpu, 64, 4, Color::AURORA_TEAL),
-                Texture::soft_circle(&gpu, 48, Color::rgb(0.95, 0.85, 0.3)),
-                Texture::soft_circle(&gpu, 48, Color::rgb(1.0, 0.25, 0.35)),
-                Texture::gradient_h(
+                Texture::from_bytes(
                     &gpu,
-                    256,
-                    Color::rgb(0.035, 0.075, 0.17),
-                    Color::rgb(0.10, 0.028, 0.20),
-                ),
+                    include_bytes!("../assets/aurora-combat-atlas.png"),
+                    "Aurora combat atlas",
+                )
+                .expect("generated combat atlas must decode"),
+                Texture::soft_circle(&gpu, 48, Color::rgb(0.95, 0.85, 0.3)),
+                Texture::crystal(&gpu, 64, Color::rgb(1.0, 0.72, 0.16)),
+                Texture::arena_floor(&gpu, 512),
             )
         };
         self.tex_player = renderer.add_texture(player_tex);
         self.tex_orb = renderer.add_texture(orb);
-        self.tex_hazard = renderer.add_texture(hazard);
+        self.tex_crystal = renderer.add_texture(crystal);
+        self.tex_hazard = self.tex_player;
         self.tex_floor = renderer.add_texture(floor);
-        self.player_atlas = TextureAtlas::new(self.tex_player, 4, 1, Vec2::new(256.0, 64.0));
+        self.player_atlas = TextureAtlas::new(self.tex_player, 4, 2, COMBAT_ATLAS_SIZE);
+        self.drone_atlas = TextureAtlas::new(self.tex_player, 4, 2, COMBAT_ATLAS_SIZE);
 
         renderer.post_fx.enabled = true;
         renderer.post_fx.bloom_intensity = 1.0;
@@ -349,9 +356,9 @@ impl Game for AuroraRun {
             }
             let pulse = 1.0 + 0.15 * (t * 4.0 + c.pos.x * 0.01).sin();
             ctx.renderer.draw_sprite(
-                self.tex_orb,
-                Sprite::new(c.pos, Vec2::splat(32.0 * pulse))
-                    .with_color(Color::rgba(2.1, 1.45, 0.22, 0.95))
+                self.tex_crystal,
+                Sprite::new(c.pos, Vec2::splat(38.0 * pulse))
+                    .with_color(Color::rgba(1.8, 1.25, 0.2, 1.0))
                     .with_z(0.0),
             );
         }
@@ -365,13 +372,15 @@ impl Game for AuroraRun {
                     .with_color(Color::rgba(2.4, 0.08, 0.18, 0.10))
                     .with_z(-2.0),
             );
-            ctx.renderer.draw_sprite(
-                self.tex_hazard,
-                Sprite::new(h.pos, Vec2::splat(h.size))
-                    .with_rotation(rot)
-                    .with_color(Color::rgba(1.7, 0.22, 0.32, 0.9))
-                    .with_z(0.2),
+            let mut drone = self.drone_atlas.sprite(
+                h.pos,
+                Vec2::splat(h.size * 2.9),
+                4 + ((t * 3.0 + h.pos.x * 0.01).abs() as u32 % 4),
             );
+            drone.rotation = rot * 0.12;
+            drone.color = Color::rgba(1.3, 0.42, 0.42, 1.0);
+            drone.z = 0.2;
+            ctx.renderer.draw_sprite(self.tex_hazard, drone);
         }
 
         // Particles
@@ -382,7 +391,7 @@ impl Game for AuroraRun {
         }
 
         // Player (atlas animation)
-        let frame = self.player_anim.frame();
+        let frame = self.player_anim.frame() % 4;
         let flash = if self.hurt_cooldown > 0.0 && ((t * 20.0) as i32 % 2 == 0) {
             Color::rgba(1.0, 0.5, 0.5, 0.9)
         } else {
@@ -390,7 +399,7 @@ impl Game for AuroraRun {
         };
         let mut spr = self
             .player_atlas
-            .sprite(self.player, Vec2::splat(PLAYER_SIZE), frame);
+            .sprite(self.player, Vec2::splat(PLAYER_SIZE * 2.45), frame);
         spr.color = flash;
         spr.z = 1.0;
         ctx.renderer.draw_sprite(self.tex_player, spr);
@@ -399,7 +408,7 @@ impl Game for AuroraRun {
         for i in 0..self.lives.max(0) {
             let p = ctx.renderer.camera.position + Vec2::new(-360.0 + i as f32 * 28.0, 240.0);
             ctx.renderer.draw_sprite(
-                self.tex_player,
+                self.tex_orb,
                 Sprite::new(p, Vec2::splat(18.0))
                     .with_color(Color::AURORA_TEAL)
                     .with_z(5.0),
