@@ -114,6 +114,13 @@ impl Input {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
             }
+            // Release events are lost while unfocused; drop held state so keys
+            // and buttons don't stay stuck after alt-tabbing away.
+            WindowEvent::Focused(false) => {
+                self.keys_down.clear();
+                self.mouse_buttons_down.clear();
+                self.modifiers = ModifiersState::empty();
+            }
             _ => {}
         }
     }
@@ -212,5 +219,15 @@ mod tests {
         input.keys_down.insert(KeyCode::ArrowUp);
         assert!(input.action_down(Action::MoveUp));
         assert_eq!(input.axis_wasd(), Vec2::Y);
+    }
+
+    #[test]
+    fn focus_loss_releases_held_keys_and_buttons() {
+        let mut input = Input::new();
+        input.keys_down.insert(KeyCode::KeyW);
+        input.mouse_buttons_down.insert(MouseButton::Left);
+        input.handle_event(&WindowEvent::Focused(false));
+        assert!(!input.key_down(KeyCode::KeyW));
+        assert!(!input.mouse_down(MouseButton::Left));
     }
 }
