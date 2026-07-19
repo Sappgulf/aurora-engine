@@ -146,10 +146,15 @@ horizontal mission choices, not permanent power purchases: `V` cycles Ivo and
 | Ivo Rook | Salvage Smith | Field beacons cost 40 instead of 50 salvage | Ivo improvises more territory from less material |
 | Sena Quill | Deep Scan | Surveyor vision increases from 440 to 540 | Sena listens farther into the station |
 | Sena Quill | Ghost Mark | Lantern damage rises 15% against engaged contacts | Sena converts Choir harmonics into targeting data |
+| Mara Vey | Rescue Screen | Lantern units regenerate 3 health/s near powered infrastructure | Mara makes every foothold a rescue perimeter |
+| Mara Vey | Rapid Command | Lantern movement speed rises 12% | Mara returns to her rescue-pilot tempo |
+| Olan Voss | Lattice Audit | Each restored relay produces 4 rather than 3 salvage/s | Olan exposes dormant reactor efficiencies |
+| Olan Voss | Choir Decoder | Lantern damage rises 10% against engaged contacts | Olan weaponizes forbidden Choir research |
 
-The default mission pairing is Relay Rigger plus Deep Scan. Later missions may
-gate Olan, Mara, and alliance-specific modules behind relationship decisions,
-but must preserve the one-equipped-module-per-specialist contract.
+The default mission posture is Relay Rigger, Deep Scan, Rescue Screen, and
+Lattice Audit. Later missions may gate alliance-specific modules behind
+relationship decisions, but must preserve the one-equipped-module-per-specialist
+contract.
 
 ## Campaign continuity data
 

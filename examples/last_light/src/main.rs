@@ -32,6 +32,12 @@ const IVO_RIGGER: &str = "relay-rigger";
 const IVO_SMITH: &str = "salvage-smith";
 const SENA_DEEP_SCAN: &str = "deep-scan";
 const SENA_GHOST_MARK: &str = "ghost-mark";
+const MARA: &str = "mara-vey";
+const MARA_RESCUE: &str = "rescue-screen";
+const MARA_RAPID: &str = "rapid-command";
+const OLAN: &str = "olan-voss";
+const OLAN_LATTICE: &str = "lattice-audit";
+const OLAN_DECODER: &str = "choir-decoder";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnitKind {
@@ -113,6 +119,8 @@ struct LastLight {
     tex_engineer_move: TextureHandle,
     tex_surveyor_scan: TextureHandle,
     tex_needle_attack: TextureHandle,
+    tex_canticle_command: TextureHandle,
+    tex_bell_mine_arm: TextureHandle,
     tex_structures: TextureHandle,
     tex_glow: TextureHandle,
     tex_ui: TextureHandle,
@@ -121,6 +129,8 @@ struct LastLight {
     engineer_move_atlas: TextureAtlas,
     surveyor_scan_atlas: TextureAtlas,
     needle_attack_atlas: TextureAtlas,
+    canticle_command_atlas: TextureAtlas,
+    bell_mine_arm_atlas: TextureAtlas,
     animation_players: HashMap<UnitId, AnimationPlayer>,
     structure_atlas: TextureAtlas,
     world: RtsWorld,
@@ -179,6 +189,8 @@ impl LastLight {
             tex_engineer_move: TextureHandle::default(),
             tex_surveyor_scan: TextureHandle::default(),
             tex_needle_attack: TextureHandle::default(),
+            tex_canticle_command: TextureHandle::default(),
+            tex_bell_mine_arm: TextureHandle::default(),
             tex_structures: TextureHandle::default(),
             tex_glow: TextureHandle::default(),
             tex_ui: TextureHandle::default(),
@@ -202,6 +214,18 @@ impl LastLight {
                 Vec2::new(1536.0, 256.0),
             ),
             needle_attack_atlas: TextureAtlas::new(
+                TextureHandle::default(),
+                6,
+                1,
+                Vec2::new(1536.0, 256.0),
+            ),
+            canticle_command_atlas: TextureAtlas::new(
+                TextureHandle::default(),
+                6,
+                1,
+                Vec2::new(1536.0, 256.0),
+            ),
+            bell_mine_arm_atlas: TextureAtlas::new(
                 TextureHandle::default(),
                 6,
                 1,
@@ -324,6 +348,12 @@ impl LastLight {
         } else {
             health
         };
+        let speed = if faction == PLAYER && self.specialist_module(MARA, MARA_RESCUE) == MARA_RAPID
+        {
+            speed * 1.12
+        } else {
+            speed
+        };
         if let Some(unit) = self.world.unit_mut(id) {
             unit.health = health;
             unit.max_health = health;
@@ -384,6 +414,14 @@ impl LastLight {
         }
     }
 
+    fn relay_income(&self) -> u32 {
+        if self.specialist_module(OLAN, OLAN_LATTICE) == OLAN_LATTICE {
+            4
+        } else {
+            3
+        }
+    }
+
     fn handle_briefing_upgrades(&mut self, ctx: &FrameCtx<'_>) {
         if ctx.input.key_pressed(KeyCode::KeyZ) {
             self.purchase_upgrade(UPGRADE_OPTICS, "FIELD OPTICS", 60);
@@ -399,6 +437,12 @@ impl LastLight {
         }
         if ctx.input.key_pressed(KeyCode::KeyN) {
             self.cycle_specialist(SENA, SENA_DEEP_SCAN, SENA_GHOST_MARK, "SENA");
+        }
+        if ctx.input.key_pressed(KeyCode::KeyM) {
+            self.cycle_specialist(MARA, MARA_RESCUE, MARA_RAPID, "MARA");
+        }
+        if ctx.input.key_pressed(KeyCode::KeyO) {
+            self.cycle_specialist(OLAN, OLAN_LATTICE, OLAN_DECODER, "OLAN");
         }
     }
 
@@ -538,7 +582,7 @@ impl LastLight {
 
     fn update_economy(&mut self, dt: f32) {
         let active_relays = self.relays.iter().filter(|relay| relay.active).count() as f32;
-        self.resource_tick += dt.max(0.0) * active_relays * 3.0;
+        self.resource_tick += dt.max(0.0) * active_relays * self.relay_income() as f32;
         let income = self.resource_tick.floor() as u32;
         if income > 0 {
             self.resources.credit(income);
@@ -758,6 +802,39 @@ impl LastLight {
         }
     }
 
+    fn unit_engaged(&self, id: UnitId, range: f32) -> bool {
+        let Some(unit) = self.world.unit(id) else {
+            return false;
+        };
+        let UnitOrder::Attack(target) = unit.order else {
+            return false;
+        };
+        self.world.unit(target).is_some_and(|target| {
+            target.alive() && unit.position.distance(target.position) <= range
+        })
+    }
+
+    fn update_specialist_doctrines(&mut self, dt: f32) {
+        if self.specialist_module(MARA, MARA_RESCUE) != MARA_RESCUE {
+            return;
+        }
+        let mut sustain_sources = vec![self.fabricator_position];
+        sustain_sources.extend(self.field_beacons.iter().map(|beacon| beacon.position));
+        for unit in self
+            .world
+            .units_mut()
+            .iter_mut()
+            .filter(|unit| unit.faction == PLAYER && unit.alive())
+        {
+            if sustain_sources
+                .iter()
+                .any(|source| source.distance(unit.position) <= 300.0)
+            {
+                unit.health = (unit.health + dt.max(0.0) * 3.0).min(unit.max_health);
+            }
+        }
+    }
+
     fn update_combat(&mut self, dt: f32) {
         let snapshot: HashMap<UnitId, (Vec2, bool)> = self
             .world
@@ -774,15 +851,21 @@ impl LastLight {
                 continue;
             };
             if unit.position.distance(target_position) < 125.0 {
-                let mut dps = if self.kinds.get(&unit.id) == Some(&UnitKind::Warden) {
-                    34.0
-                } else {
-                    18.0
+                let mut dps = match self.kinds.get(&unit.id) {
+                    Some(UnitKind::Warden) => 34.0,
+                    Some(UnitKind::Canticle) => 24.0,
+                    Some(UnitKind::BellMine) => 28.0,
+                    _ => 18.0,
                 };
                 if unit.faction == PLAYER
                     && self.specialist_module(SENA, SENA_DEEP_SCAN) == SENA_GHOST_MARK
                 {
                     dps *= 1.15;
+                }
+                if unit.faction == PLAYER
+                    && self.specialist_module(OLAN, OLAN_LATTICE) == OLAN_DECODER
+                {
+                    dps *= 1.1;
                 }
                 damage.push((target, dps * dt));
                 self.attack_flash.insert(unit.id, 0.08);
@@ -880,6 +963,8 @@ impl Game for LastLight {
             engineer_move,
             surveyor_scan,
             needle_attack,
+            canticle_command,
+            bell_mine_arm,
             structures,
             glow,
             ui,
@@ -924,6 +1009,18 @@ impl Game for LastLight {
                 .expect("Needle animation must decode"),
                 Texture::from_bytes(
                     &gpu,
+                    include_bytes!("../assets/canticle-command-strip-v001.png"),
+                    "Choir Canticle command animation",
+                )
+                .expect("Canticle animation must decode"),
+                Texture::from_bytes(
+                    &gpu,
+                    include_bytes!("../assets/bell-mine-arm-strip-v001.png"),
+                    "Choir Bell Mine arming animation",
+                )
+                .expect("Bell Mine animation must decode"),
+                Texture::from_bytes(
+                    &gpu,
                     include_bytes!("../assets/last-light-structures-atlas-v001.png"),
                     "Last Light structures",
                 )
@@ -938,6 +1035,8 @@ impl Game for LastLight {
         self.tex_engineer_move = renderer.add_texture(engineer_move);
         self.tex_surveyor_scan = renderer.add_texture(surveyor_scan);
         self.tex_needle_attack = renderer.add_texture(needle_attack);
+        self.tex_canticle_command = renderer.add_texture(canticle_command);
+        self.tex_bell_mine_arm = renderer.add_texture(bell_mine_arm);
         self.tex_structures = renderer.add_texture(structures);
         self.tex_glow = renderer.add_texture(glow);
         self.tex_ui = renderer.add_texture(ui);
@@ -950,6 +1049,10 @@ impl Game for LastLight {
             TextureAtlas::new(self.tex_surveyor_scan, 6, 1, Vec2::new(1536.0, 256.0));
         self.needle_attack_atlas =
             TextureAtlas::new(self.tex_needle_attack, 6, 1, Vec2::new(1536.0, 256.0));
+        self.canticle_command_atlas =
+            TextureAtlas::new(self.tex_canticle_command, 6, 1, Vec2::new(1536.0, 256.0));
+        self.bell_mine_arm_atlas =
+            TextureAtlas::new(self.tex_bell_mine_arm, 6, 1, Vec2::new(1536.0, 256.0));
         self.structure_atlas = TextureAtlas::new(self.tex_structures, 2, 2, STRUCTURE_ATLAS_SIZE);
         renderer.camera.position = Vec2::new(-700.0, -260.0);
         renderer.camera.zoom = 1.1;
@@ -989,10 +1092,16 @@ impl Game for LastLight {
         self.update_enemy_ai(dt);
         self.world.update(dt);
         for unit in self.world.units().iter().filter(|unit| unit.alive()) {
+            let kind = self.kinds.get(&unit.id).copied();
+            let engaged = match kind {
+                Some(UnitKind::Needle) => self.unit_engaged(unit.id, 155.0),
+                Some(UnitKind::Canticle) => self.unit_engaged(unit.id, 260.0),
+                Some(UnitKind::BellMine) => self.unit_engaged(unit.id, 220.0),
+                _ => false,
+            };
             let Some(player) = self.animation_players.get_mut(&unit.id) else {
                 continue;
             };
-            let kind = self.kinds.get(&unit.id).copied();
             let clip = match kind {
                 Some(UnitKind::Warden) if unit.velocity.length_squared() > 1.0 => {
                     Some(AnimationClip::looping("move", [0, 1, 2, 3, 4, 5], 10.0))
@@ -1003,8 +1112,14 @@ impl Game for LastLight {
                 Some(UnitKind::Surveyor) => {
                     Some(AnimationClip::looping("scan", [0, 1, 2, 3, 4, 5], 7.0))
                 }
-                Some(UnitKind::Needle) if self.attack_flash.contains_key(&unit.id) => {
+                Some(UnitKind::Needle) if engaged => {
                     Some(AnimationClip::looping("attack", [0, 1, 2, 3, 4, 5], 11.0))
+                }
+                Some(UnitKind::Canticle) if engaged => {
+                    Some(AnimationClip::looping("command", [0, 1, 2, 3, 4, 5], 7.5))
+                }
+                Some(UnitKind::BellMine) if engaged => {
+                    Some(AnimationClip::looping("arm", [0, 1, 2, 3, 4, 5], 8.5))
                 }
                 _ => None,
             };
@@ -1014,6 +1129,7 @@ impl Game for LastLight {
             }
         }
         self.update_combat(dt);
+        self.update_specialist_doctrines(dt);
         self.update_fog();
         self.update_economy(dt);
         self.mission_time += dt;
@@ -1236,6 +1352,12 @@ impl Game for LastLight {
                 .get(&unit.id)
                 .map(AnimationPlayer::frame)
                 .unwrap_or(0);
+            let engaged = match kind {
+                UnitKind::Needle => self.unit_engaged(unit.id, 155.0),
+                UnitKind::Canticle => self.unit_engaged(unit.id, 260.0),
+                UnitKind::BellMine => self.unit_engaged(unit.id, 220.0),
+                _ => false,
+            };
             let animated = match kind {
                 UnitKind::Warden if unit.velocity.length_squared() > 1.0 => {
                     Some((self.tex_warden_move, &self.warden_move_atlas))
@@ -1244,8 +1366,14 @@ impl Game for LastLight {
                     Some((self.tex_engineer_move, &self.engineer_move_atlas))
                 }
                 UnitKind::Surveyor => Some((self.tex_surveyor_scan, &self.surveyor_scan_atlas)),
-                UnitKind::Needle if self.attack_flash.contains_key(&unit.id) => {
+                UnitKind::Needle if engaged => {
                     Some((self.tex_needle_attack, &self.needle_attack_atlas))
+                }
+                UnitKind::Canticle if engaged => {
+                    Some((self.tex_canticle_command, &self.canticle_command_atlas))
+                }
+                UnitKind::BellMine if engaged => {
+                    Some((self.tex_bell_mine_arm, &self.bell_mine_arm_atlas))
                 }
                 _ => None,
             };
@@ -1411,7 +1539,7 @@ impl Game for LastLight {
             Color::rgba(0.58, 0.7, 0.78, 0.86),
             8.0,
         );
-        let income = active_relays * 3;
+        let income = active_relays * self.relay_income() as usize;
         self.draw_text(
             ctx.renderer,
             &format!(
@@ -1548,7 +1676,7 @@ impl Game for LastLight {
                     center,
                     Vec2::new(
                         (view.x * 0.78).min(900.0),
-                        if self.briefing { 360.0 } else { 300.0 },
+                        if self.briefing { 420.0 } else { 300.0 },
                     ),
                 )
                 .with_color(Color::rgba(0.012, 0.025, 0.055, 0.92))
@@ -1610,6 +1738,18 @@ impl Game for LastLight {
                     center + Vec2::new(-245.0, -154.0),
                     1.8,
                     Color::rgba(0.82, 0.68, 0.36, 0.98),
+                    11.0,
+                );
+                self.draw_text(
+                    ctx.renderer,
+                    &format!(
+                        "M MARA {}  O OLAN {}",
+                        self.specialist_module(MARA, MARA_RESCUE).to_uppercase(),
+                        self.specialist_module(OLAN, OLAN_LATTICE).to_uppercase()
+                    ),
+                    center + Vec2::new(-265.0, -184.0),
+                    1.8,
+                    Color::rgba(0.7, 0.62, 0.9, 0.98),
                     11.0,
                 );
             }

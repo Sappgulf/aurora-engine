@@ -220,6 +220,7 @@ def _playtest_payload() -> dict[str, object]:
             "camera": "WASD or screen edge pans; wheel zooms; minimap click navigates",
             "upgrades": "During briefing: Z Field Optics, X Reactive Plating, C Fabricator Overclock",
             "loadouts": "During briefing: V cycles Ivo; N cycles Sena; selections save immediately",
+            "doctrines": "During briefing: M cycles Mara; O cycles Olan; selections save immediately",
             "pause": "Esc",
         },
         "acceptance_checks": [
@@ -233,6 +234,8 @@ def _playtest_payload() -> dict[str, object]:
             "Campaign upgrades spend Lumen once and survive a native or browser reload.",
             "Engineer move, Surveyor scan, and Needle attack strips animate without checker backgrounds.",
             "Ivo and Sena loadout changes persist and alter relay, beacon, vision, or damage behavior.",
+            "Mara and Olan doctrines persist and alter sustain, speed, relay income, or Choir damage.",
+            "Canticle command and Bell Mine arming strips telegraph engagement before damage range.",
             "Victory persists mission completion and unlocks mission three without duplicate rewards.",
             "HUD remains anchored and the camera remains map-bounded after resize.",
         ],

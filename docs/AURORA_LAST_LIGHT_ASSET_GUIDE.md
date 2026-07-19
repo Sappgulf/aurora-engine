@@ -97,6 +97,8 @@ unrelated images.
 | `engineer-move-strip-v001.png` | 6×1 | Engineer manipulator locomotion |
 | `surveyor-scan-strip-v001.png` | 6×1 | Survey mast sweep and cyan scan fan |
 | `needle-attack-strip-v001.png` | 6×1 | Choir Needle charge, lance, and recoil |
+| `canticle-command-strip-v001.png` | 6×1 | Canticle charge, command rings, and release |
+| `bell-mine-arm-strip-v001.png` | 6×1 | Mine apertures, warning arcs, and armed recoil |
 | `last-light-structures-atlas-v001.png` | 2×2 | Relay, fabricator, reactor, Choir tower |
 | `reactor-sector-v001.png` | single | 2600×1460 authored mission floor |
 
@@ -170,10 +172,11 @@ python3 tools/normalize_generated_strip.py \
   --frames 6 --frame-size 256
 ```
 
-The tool flood-removes only neutral bright background connected to the slot
-edges, removes small detached islands, computes one scale from the largest frame,
-and writes a centered RGBA 1536×256 strip. Always inspect the final strip on a
-black background and confirm `(0, 255)` alpha extrema before integration.
+The tool samples the corners to detect a neutral bright checker or near-black
+matte, flood-removes only background connected to the slot edges, removes small
+detached islands, computes one scale from the largest frame, and writes a
+centered RGBA 1536×256 strip. Always inspect the final strip on a contrasting
+background and confirm `(0, 255)` alpha extrema before integration.
 
 ## Acceptance gates
 

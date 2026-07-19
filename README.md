@@ -32,7 +32,8 @@ cargo run -p last_light
 During the mission briefing, `Z`, `X`, and `C` purchase permanent Field Optics,
 Reactive Plating, and Fabricator Overclock upgrades with campaign Lumen. `V`
 cycles Ivo's field module and `N` cycles Sena's sensor module; both loadouts save
-immediately.
+immediately. `M` cycles Mara's command doctrine and `O` cycles Olan's analysis
+package.
 
 Select the Engineer and command it near each of the three power relays. Active
 relays generate salvage for the Lantern fabricator; build reinforcements, hold
@@ -75,6 +76,7 @@ cargo run -p triangle_demo   # M0 NDC triangle
 | RTS economy, production queues, power graphs, control groups | ✅ |
 | Placement validation, tactical minimap, per-unit clip players | ✅ |
 | Generated Engineer, Surveyor, and Choir action strips | ✅ |
+| Four persistent named-specialist doctrine/loadout pairs | ✅ |
 | Versioned campaign progress with v1 save migration | ✅ |
 | Last Light point-and-click campaign mission | ✅ vertical slice |
 

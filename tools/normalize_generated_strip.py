@@ -10,9 +10,11 @@ from pathlib import Path
 from PIL import Image
 
 
-def background_candidate(pixel: tuple[int, int, int]) -> bool:
+def background_candidate(pixel: tuple[int, int, int], dark_background: bool) -> bool:
     low = min(pixel)
     high = max(pixel)
+    if dark_background:
+        return high <= 28
     return low >= 220 and high - low <= 18
 
 
@@ -20,12 +22,19 @@ def extract_alpha(image: Image.Image) -> Image.Image:
     rgb = image.convert("RGB")
     width, height = rgb.size
     pixels = rgb.load()
+    corners = [
+        pixels[0, 0],
+        pixels[width - 1, 0],
+        pixels[0, height - 1],
+        pixels[width - 1, height - 1],
+    ]
+    dark_background = sum(sum(pixel) for pixel in corners) / 12 < 64
     visited = bytearray(width * height)
     frontier: deque[tuple[int, int]] = deque()
 
     def enqueue(x: int, y: int) -> None:
         index = y * width + x
-        if not visited[index] and background_candidate(pixels[x, y]):
+        if not visited[index] and background_candidate(pixels[x, y], dark_background):
             visited[index] = 1
             frontier.append((x, y))
 
