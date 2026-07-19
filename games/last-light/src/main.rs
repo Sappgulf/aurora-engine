@@ -20,8 +20,8 @@ use aurora_engine::{
 };
 use campaign::*;
 use glam::Vec2;
-use mission_state::{FieldBeacon, Relay, StructureKind};
-use missions::{MissionDef, VictoryCondition};
+use mission_state::{FieldBeacon, Relay, SalvageNode, StructureKind};
+use missions::{DialogueTrigger, MissionDef, VictoryCondition};
 use save::{CampaignStore, SaveData};
 use units::{UnitKind, CHOIR, PLAYER};
 use winit::{event::MouseButton, keyboard::KeyCode};
@@ -68,6 +68,7 @@ struct LastLight {
     drag: Option<SelectionBox>,
     order_marker: Option<(Vec2, f32)>,
     relays: Vec<Relay>,
+    salvage_nodes: Vec<SalvageNode>,
     reactor_position: Option<Vec2>,
     fabricator_position: Vec2,
     field_beacons: Vec<FieldBeacon>,
@@ -108,6 +109,8 @@ struct LastLight {
     /// `handle_pointer`'s move command. Advanced in `advance_player_paths`.
     player_paths: HashMap<UnitId, VecDeque<Vec2>>,
     canticle_reinforced: bool,
+    dialogue_cursor: usize,
+    radio_message: Option<(&'static str, &'static str, f32)>,
 }
 
 impl LastLight {
@@ -203,6 +206,7 @@ impl LastLight {
             drag: None,
             order_marker: None,
             relays: Vec::new(),
+            salvage_nodes: Vec::new(),
             reactor_position: None,
             fabricator_position: Vec2::ZERO,
             field_beacons: Vec::new(),
@@ -231,6 +235,8 @@ impl LastLight {
             selected_structure: None,
             player_paths: HashMap::new(),
             canticle_reinforced: false,
+            dialogue_cursor: 0,
+            radio_message: None,
         }
     }
 
@@ -258,6 +264,16 @@ impl LastLight {
                 active: false,
             })
             .collect();
+        self.salvage_nodes = self
+            .mission
+            .salvage_nodes
+            .iter()
+            .map(|&position| SalvageNode {
+                position,
+                remaining: 240,
+                harvest_buffer: 0.0,
+            })
+            .collect();
         self.reactor_position = self.mission.reactor_position;
         self.fabricator_position = self.mission.fabricator_position;
         self.field_beacons.clear();
@@ -269,6 +285,8 @@ impl LastLight {
         self.selected_structure = None;
         self.player_paths.clear();
         self.canticle_reinforced = false;
+        self.dialogue_cursor = 0;
+        self.radio_message = None;
 
         let mut power = PowerGrid::default();
         power.add_node(PowerNode {
@@ -673,9 +691,9 @@ impl LastLight {
         ]
     }
 
-    fn briefing_row_rect(camera_position: Vec2, index: usize) -> Aabb {
-        let center = camera_position + Vec2::new(-360.0, 60.0 - index as f32 * 34.0);
-        Aabb::from_center_size(center, Vec2::new(600.0, 30.0))
+    fn briefing_row_rect(camera_position: Vec2, index: usize, scale: f32) -> Aabb {
+        let center = camera_position + Vec2::new(-360.0, 60.0 - index as f32 * 34.0) * scale;
+        Aabb::from_center_size(center, Vec2::new(600.0, 30.0) * scale)
     }
 
     fn handle_briefing_upgrades(&mut self, ctx: &mut FrameCtx<'_>) {
@@ -690,8 +708,9 @@ impl LastLight {
                 .camera
                 .screen_to_world(ctx.input.mouse_position);
             let row_count = self.briefing_rows().len();
+            let scale = Self::hud_scale(ctx.renderer);
             for index in 0..row_count {
-                if Self::briefing_row_rect(ctx.renderer.camera.position, index)
+                if Self::briefing_row_rect(ctx.renderer.camera.position, index, scale)
                     .contains_point(mouse_world)
                 {
                     let key = self.briefing_rows()[index].0;
@@ -730,16 +749,21 @@ impl LastLight {
     }
 
     fn minimap_transform(&self, renderer: &Renderer) -> MinimapTransform {
+        let scale = Self::hud_scale(renderer);
         let bottom_left = renderer
             .camera
             .world_from_viewport_fraction(Vec2::new(0.0, 0.0));
         MinimapTransform {
             world: Aabb::from_center_size(Vec2::ZERO, MAP_SIZE),
             panel: Aabb::from_center_size(
-                bottom_left + Vec2::new(150.0, 92.0),
-                Vec2::new(260.0, 138.0),
+                bottom_left + Vec2::new(150.0, 92.0) * scale,
+                Vec2::new(260.0, 138.0) * scale,
             ),
         }
+    }
+
+    fn hud_scale(renderer: &Renderer) -> f32 {
+        renderer.camera.zoom.max(f32::EPSILON).recip()
     }
 
     fn friendly_count(&self) -> usize {
@@ -803,15 +827,15 @@ impl LastLight {
         ]
     }
 
-    fn command_card_row_rect(card_text: Vec2, index: usize) -> Aabb {
+    fn command_card_row_rect(card_text: Vec2, index: usize, scale: f32) -> Aabb {
         // Production occupies the left column; squad utilities occupy the
         // right. This keeps every command visible without making a compact
         // browser viewport sacrifice the queue feedback below it.
         let column = index / 3;
         let row = index % 3;
         let center =
-            card_text + Vec2::new(130.0 + column as f32 * 260.0, -38.0 - row as f32 * 30.0);
-        Aabb::from_center_size(center, Vec2::new(250.0, 26.0))
+            card_text + Vec2::new(130.0 + column as f32 * 260.0, -38.0 - row as f32 * 30.0) * scale;
+        Aabb::from_center_size(center, Vec2::new(250.0, 26.0) * scale)
     }
 
     fn apply_command_action(&mut self, key: KeyCode) {
@@ -865,29 +889,34 @@ impl LastLight {
         }
     }
 
-    fn control_group_chip_rect(panel: Aabb, slot: usize) -> Aabb {
-        const SPACING: f32 = 46.0;
-        let start_x = panel.center().x - SPACING * 2.0;
-        let x = start_x + (slot - 1) as f32 * SPACING;
-        let y = panel.max.y + 26.0;
-        Aabb::from_center_size(Vec2::new(x, y), Vec2::splat(38.0))
+    fn control_group_chip_rect(panel: Aabb, slot: usize, scale: f32) -> Aabb {
+        let spacing = 46.0 * scale;
+        let start_x = panel.center().x - spacing * 2.0;
+        let x = start_x + (slot - 1) as f32 * spacing;
+        let y = panel.max.y + 26.0 * scale;
+        Aabb::from_center_size(Vec2::new(x, y), Vec2::splat(38.0 * scale))
     }
 
     fn pause_icon_rect(renderer: &Renderer) -> Aabb {
+        let scale = Self::hud_scale(renderer);
         let top_right = renderer
             .camera
             .world_from_viewport_fraction(Vec2::new(1.0, 1.0));
-        Aabb::from_center_size(top_right + Vec2::new(-44.0, -44.0), Vec2::splat(48.0))
+        Aabb::from_center_size(
+            top_right + Vec2::new(-44.0, -44.0) * scale,
+            Vec2::splat(48.0 * scale),
+        )
     }
 
     /// World-space anchor for the command card's text/rows. The single
     /// source of truth for both rendering (`on_update`) and click
     /// hit-testing (`handle_command_keys`) so they can't drift apart.
     fn command_card_text_origin(renderer: &Renderer) -> Vec2 {
+        let scale = Self::hud_scale(renderer);
         let bottom_right = renderer
             .camera
             .world_from_viewport_fraction(Vec2::new(1.0, 0.0));
-        bottom_right + Vec2::new(-525.0, 233.0)
+        bottom_right + Vec2::new(-525.0, 233.0) * scale
     }
 
     fn handle_command_keys(&mut self, ctx: &mut FrameCtx<'_>) {
@@ -917,15 +946,17 @@ impl LastLight {
                 .camera
                 .screen_to_world(ctx.input.mouse_position);
             let card_text = Self::command_card_text_origin(ctx.renderer);
+            let scale = Self::hud_scale(ctx.renderer);
             for (index, (key, _)) in rows.iter().enumerate() {
-                if Self::command_card_row_rect(card_text, index).contains_point(mouse_world) {
+                if Self::command_card_row_rect(card_text, index, scale).contains_point(mouse_world)
+                {
                     self.apply_command_action(*key);
                     return;
                 }
             }
             let panel = self.minimap_transform(ctx.renderer).panel;
             for slot in 1..=5 {
-                if Self::control_group_chip_rect(panel, slot).contains_point(mouse_world) {
+                if Self::control_group_chip_rect(panel, slot, scale).contains_point(mouse_world) {
                     self.control_group_action(slot, ctx.input.control_down(), ctx);
                     return;
                 }
@@ -1337,6 +1368,107 @@ impl LastLight {
             &AiParams::default(),
             Some(&self.nav),
         );
+    }
+
+    /// Idle Lantern combat units acquire nearby visible threats on their own.
+    /// Explicit Move and Attack orders remain authoritative, so players can
+    /// still disengage or focus-fire without the automation fighting them.
+    fn update_auto_targeting(&mut self) {
+        let enemies: Vec<(UnitId, Vec2)> = self
+            .world
+            .units()
+            .iter()
+            .filter(|unit| unit.faction == CHOIR && unit.alive())
+            .filter(|unit| self.fog.state_at(unit.position) == FogState::Visible)
+            .map(|unit| (unit.id, unit.position))
+            .collect();
+        let orders: Vec<(UnitId, UnitId)> = self
+            .world
+            .units()
+            .iter()
+            .filter(|unit| {
+                unit.faction == PLAYER
+                    && unit.alive()
+                    && matches!(unit.order, UnitOrder::Idle | UnitOrder::Hold)
+                    && matches!(
+                        self.kinds.get(&unit.id),
+                        Some(UnitKind::Warden | UnitKind::Surveyor)
+                    )
+            })
+            .filter_map(|unit| {
+                let range = self.kinds.get(&unit.id)?.combat().range * 1.15;
+                enemies
+                    .iter()
+                    .filter_map(|(id, position)| {
+                        let distance = unit.position.distance(*position);
+                        (distance <= range).then_some((*id, distance))
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(target, _)| (unit.id, target))
+            })
+            .collect();
+        for (unit, target) in orders {
+            if let Some(unit) = self.world.unit_mut(unit) {
+                unit.order = UnitOrder::Attack(target);
+            }
+        }
+    }
+
+    fn update_harvesting(&mut self, dt: f32) -> u32 {
+        let surveyors: Vec<Vec2> = self
+            .world
+            .units()
+            .iter()
+            .filter(|unit| {
+                unit.faction == PLAYER
+                    && unit.alive()
+                    && self.kinds.get(&unit.id) == Some(&UnitKind::Surveyor)
+            })
+            .map(|unit| unit.position)
+            .collect();
+        let mut harvested = 0;
+        for node in &mut self.salvage_nodes {
+            if node.remaining == 0
+                || !surveyors
+                    .iter()
+                    .any(|position| position.distance(node.position) <= 145.0)
+            {
+                continue;
+            }
+            node.harvest_buffer += dt.max(0.0) * 18.0;
+            let payout = (node.harvest_buffer.floor() as u32).min(node.remaining);
+            if payout > 0 {
+                node.harvest_buffer -= payout as f32;
+                node.remaining -= payout;
+                harvested += payout;
+            }
+        }
+        if harvested > 0 {
+            self.resources.credit(harvested);
+        }
+        harvested
+    }
+
+    fn update_radio_dialogue(&mut self, dt: f32) {
+        if let Some((_, _, remaining)) = self.radio_message.as_mut() {
+            *remaining -= dt.max(0.0);
+            if *remaining > 0.0 {
+                return;
+            }
+            self.radio_message = None;
+        }
+        let Some(line) = self.mission.radio_lines.get(self.dialogue_cursor) else {
+            return;
+        };
+        let active_relays = self.relays.iter().filter(|relay| relay.active).count();
+        let ready = match line.trigger {
+            DialogueTrigger::Time(time) => self.mission_time >= time,
+            DialogueTrigger::RelaysOnline(count) => active_relays >= count,
+        };
+        if ready {
+            self.radio_message = Some((line.speaker, line.text, 6.0));
+            self.dialogue_cursor += 1;
+        }
     }
 
     fn unit_engaged(&self, id: UnitId) -> bool {
@@ -1854,16 +1986,12 @@ impl Game for LastLight {
             self.handle_pointer(ctx);
         }
         self.update_enemy_ai(dt);
+        self.update_auto_targeting();
         self.world.update(dt);
         self.advance_player_paths();
         for unit in self.world.units() {
             let kind = self.kinds.get(&unit.id).copied();
-            let engaged = unit.alive()
-                && matches!(
-                    kind,
-                    Some(UnitKind::Needle | UnitKind::Canticle | UnitKind::BellMine)
-                )
-                && self.unit_engaged(unit.id);
+            let engaged = unit.alive() && self.unit_engaged(unit.id);
             let Some(player) = self.animation_players.get_mut(&unit.id) else {
                 continue;
             };
@@ -1882,6 +2010,9 @@ impl Game for LastLight {
                 ))
             } else {
                 match kind {
+                    Some(UnitKind::Warden) if engaged => {
+                        Some(AnimationClip::looping("attack", [0, 1, 2, 3, 4, 5], 14.0))
+                    }
                     Some(UnitKind::Warden) if unit.velocity.length_squared() > 1.0 => {
                         Some(AnimationClip::looping("move", [0, 1, 2, 3, 4, 5], 10.0))
                     }
@@ -1917,7 +2048,11 @@ impl Game for LastLight {
         self.update_specialist_doctrines(dt);
         self.update_fog();
         self.update_economy(dt);
+        if self.update_harvesting(dt) > 0 {
+            self.status = Some(("SURVEYOR HARVESTING SALVAGE".to_owned(), 0.8));
+        }
         self.mission_time += dt;
+        self.update_radio_dialogue(dt);
         if let Some((_, time)) = self.order_marker.as_mut() {
             *time -= dt;
             if *time <= 0.0 {
@@ -2043,6 +2178,33 @@ impl Game for LastLight {
             0.22,
         ));
 
+        for node in &self.salvage_nodes {
+            let charge = node.remaining as f32 / 240.0;
+            if charge <= 0.0 {
+                continue;
+            }
+            let pulse = 0.82 + (t * 3.2 + node.position.x * 0.01).sin() * 0.12;
+            ctx.renderer.draw_sprite(
+                self.tex_glow,
+                Sprite::new(node.position, Vec2::splat(150.0 * charge.max(0.45)))
+                    .with_color(Color::rgba(0.08, 1.4, 1.35, 0.18 * pulse))
+                    .with_z(-0.25),
+            );
+            for rotation in [0.0_f32, 2.094, 4.188] {
+                let offset = Vec2::new(rotation.cos(), rotation.sin()) * 32.0;
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(
+                        node.position + offset,
+                        Vec2::new(34.0, 62.0 * charge.max(0.32)),
+                    )
+                    .with_rotation(rotation - std::f32::consts::FRAC_PI_2)
+                    .with_color(Color::rgba(0.15, 1.35, 1.4, 0.92))
+                    .with_z(-0.05),
+                );
+            }
+        }
+
         for relay in &self.relays {
             let progress = if relay.active {
                 1.0
@@ -2164,14 +2326,14 @@ impl Game for LastLight {
                     .with_color(glow_color)
                     .with_z(-0.2),
             );
-            let engaged = matches!(
-                kind,
-                UnitKind::Needle | UnitKind::Canticle | UnitKind::BellMine
-            ) && self.unit_engaged(unit.id);
+            let engaged = self.unit_engaged(unit.id);
             let animated = if self.damage_flash.contains_key(&unit.id) {
                 Some((self.tex_hit_reactions, &self.hit_reactions_atlas))
             } else {
                 match kind {
+                    UnitKind::Warden if engaged => {
+                        Some((self.tex_warden_move, &self.warden_move_atlas))
+                    }
                     UnitKind::Warden if unit.velocity.length_squared() > 1.0 => {
                         Some((self.tex_warden_move, &self.warden_move_atlas))
                     }
@@ -2215,6 +2377,35 @@ impl Game for LastLight {
             }
             sprite.z = 1.0;
             ctx.renderer.draw_sprite(texture, sprite);
+
+            if self.attack_flash.contains_key(&unit.id) {
+                if let UnitOrder::Attack(target_id) = unit.order {
+                    if let Some(target) = self.world.unit(target_id) {
+                        let delta = target.position - unit.position;
+                        let beam_color = if unit.faction == PLAYER {
+                            Color::rgba(0.18, 1.7, 1.35, 0.92)
+                        } else {
+                            Color::rgba(1.8, 0.12, 0.62, 0.92)
+                        };
+                        ctx.renderer.draw_sprite(
+                            self.tex_ui,
+                            Sprite::new(
+                                unit.position + delta * 0.5,
+                                Vec2::new(delta.length(), 4.0),
+                            )
+                            .with_color(beam_color)
+                            .with_rotation(delta.y.atan2(delta.x))
+                            .with_z(2.2),
+                        );
+                        ctx.renderer.draw_sprite(
+                            self.tex_glow,
+                            Sprite::new(target.position, Vec2::splat(42.0))
+                                .with_color(beam_color)
+                                .with_z(2.15),
+                        );
+                    }
+                }
+            }
 
             let health = (unit.health / unit.max_health).clamp(0.0, 1.0);
             ctx.renderer.draw_sprite(
@@ -2280,12 +2471,13 @@ impl Game for LastLight {
         }
 
         if !self.briefing && !self.paused && !self.victory && !self.defeat {
+            let hud_scale = Self::hud_scale(ctx.renderer);
             let minimap = self.minimap_transform(ctx.renderer);
             ctx.renderer.draw_sprite(
                 self.tex_ui,
                 Sprite::new(
                     minimap.panel.center(),
-                    minimap.panel.size() + Vec2::splat(12.0),
+                    minimap.panel.size() + Vec2::splat(12.0 * hud_scale),
                 )
                 .with_color(Color::rgba(0.04, 0.48, 0.56, 0.92))
                 .with_z(7.4),
@@ -2299,13 +2491,27 @@ impl Game for LastLight {
             for relay in &self.relays {
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
-                    Sprite::new(minimap.world_to_panel(relay.position), Vec2::splat(7.0))
-                        .with_color(if relay.active {
-                            Color::rgb(0.2, 1.5, 1.2)
-                        } else {
-                            Color::rgb(0.45, 0.5, 0.55)
-                        })
-                        .with_z(8.0),
+                    Sprite::new(
+                        minimap.world_to_panel(relay.position),
+                        Vec2::splat(7.0 * hud_scale),
+                    )
+                    .with_color(if relay.active {
+                        Color::rgb(0.2, 1.5, 1.2)
+                    } else {
+                        Color::rgb(0.45, 0.5, 0.55)
+                    })
+                    .with_z(8.0),
+                );
+            }
+            for node in self.salvage_nodes.iter().filter(|node| node.remaining > 0) {
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(
+                        minimap.world_to_panel(node.position),
+                        Vec2::splat(6.0 * hud_scale),
+                    )
+                    .with_color(Color::rgb(0.18, 1.35, 1.45))
+                    .with_z(8.0),
                 );
             }
             for unit in self.world.units().iter().filter(|unit| unit.alive()) {
@@ -2314,13 +2520,16 @@ impl Game for LastLight {
                 }
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
-                    Sprite::new(minimap.world_to_panel(unit.position), Vec2::splat(5.0))
-                        .with_color(if unit.faction == PLAYER {
-                            Color::rgb(0.18, 1.6, 1.25)
-                        } else {
-                            Color::rgb(1.65, 0.12, 0.48)
-                        })
-                        .with_z(8.1),
+                    Sprite::new(
+                        minimap.world_to_panel(unit.position),
+                        Vec2::splat(5.0 * hud_scale),
+                    )
+                    .with_color(if unit.faction == PLAYER {
+                        Color::rgb(0.18, 1.6, 1.25)
+                    } else {
+                        Color::rgb(1.65, 0.12, 0.48)
+                    })
+                    .with_z(8.1),
                 );
             }
             let visible = ctx.renderer.camera.visible_world_size();
@@ -2330,10 +2539,22 @@ impl Game for LastLight {
             let center = (map_min + map_max) * 0.5;
             let size = (map_max - map_min).abs();
             for (position, dimensions) in [
-                (Vec2::new(center.x, map_min.y), Vec2::new(size.x, 2.0)),
-                (Vec2::new(center.x, map_max.y), Vec2::new(size.x, 2.0)),
-                (Vec2::new(map_min.x, center.y), Vec2::new(2.0, size.y)),
-                (Vec2::new(map_max.x, center.y), Vec2::new(2.0, size.y)),
+                (
+                    Vec2::new(center.x, map_min.y),
+                    Vec2::new(size.x, 2.0 * hud_scale),
+                ),
+                (
+                    Vec2::new(center.x, map_max.y),
+                    Vec2::new(size.x, 2.0 * hud_scale),
+                ),
+                (
+                    Vec2::new(map_min.x, center.y),
+                    Vec2::new(2.0 * hud_scale, size.y),
+                ),
+                (
+                    Vec2::new(map_max.x, center.y),
+                    Vec2::new(2.0 * hud_scale, size.y),
+                ),
             ] {
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
@@ -2348,7 +2569,7 @@ impl Game for LastLight {
                 .camera
                 .screen_to_world(ctx.input.mouse_position);
             for slot in 1..=5 {
-                let rect = Self::control_group_chip_rect(minimap.panel, slot);
+                let rect = Self::control_group_chip_rect(minimap.panel, slot, hud_scale);
                 let count = self.world.control_group(slot).len();
                 let hovered = rect.contains_point(mouse_world);
                 ctx.renderer.draw_sprite(
@@ -2368,8 +2589,8 @@ impl Game for LastLight {
                 self.draw_text(
                     ctx.renderer,
                     &format!("{slot}:{count}"),
-                    rect.min + Vec2::new(4.0, 8.0),
-                    1.6,
+                    rect.min + Vec2::new(4.0, 8.0) * hud_scale,
+                    1.6 * hud_scale,
                     Color::rgb(0.85, 0.95, 0.95),
                     8.4,
                 );
@@ -2377,6 +2598,7 @@ impl Game for LastLight {
         }
 
         {
+            let hud_scale = Self::hud_scale(ctx.renderer);
             let rect = Self::pause_icon_rect(ctx.renderer);
             ctx.renderer.draw_sprite(
                 self.tex_ui,
@@ -2384,29 +2606,33 @@ impl Game for LastLight {
                     .with_color(Color::rgba(0.04, 0.08, 0.12, 0.75))
                     .with_z(9.0),
             );
-            let bar_size = Vec2::new(6.0, 22.0);
+            let bar_size = Vec2::new(6.0, 22.0) * hud_scale;
             for offset in [Vec2::new(-7.0, 0.0), Vec2::new(7.0, 0.0)] {
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
-                    Sprite::new(rect.center() + offset, bar_size)
+                    Sprite::new(rect.center() + offset * hud_scale, bar_size)
                         .with_color(Color::rgb(0.85, 0.9, 0.95))
                         .with_z(9.1),
                 );
             }
         }
 
+        let hud_scale = Self::hud_scale(ctx.renderer);
         let top_left = ctx
             .renderer
             .camera
             .world_from_viewport_fraction(Vec2::new(0.0, 1.0))
-            + Vec2::new(30.0, -34.0);
+            + Vec2::new(30.0, -34.0) * hud_scale;
         // Keep combat telemetry legible over the active world without turning
         // the entire top edge into permanent chrome.
         ctx.renderer.draw_sprite(
             self.tex_ui,
-            Sprite::new(top_left + Vec2::new(280.0, -58.0), Vec2::new(590.0, 146.0))
-                .with_color(Color::rgba(0.01, 0.025, 0.05, 0.68))
-                .with_z(7.5),
+            Sprite::new(
+                top_left + Vec2::new(280.0, -58.0) * hud_scale,
+                Vec2::new(590.0, 146.0) * hud_scale,
+            )
+            .with_color(Color::rgba(0.01, 0.025, 0.05, 0.68))
+            .with_z(7.5),
         );
         let active_relays = self.relays.iter().filter(|relay| relay.active).count();
         let objective_line = match self.mission.victory {
@@ -2434,7 +2660,7 @@ impl Game for LastLight {
             ctx.renderer,
             &objective_line,
             top_left,
-            3.35,
+            3.35 * hud_scale,
             Color::rgb(0.73, 1.15, 1.08),
             8.0,
         );
@@ -2446,8 +2672,8 @@ impl Game for LastLight {
         self.draw_text(
             ctx.renderer,
             control_hint,
-            top_left + Vec2::new(0.0, -25.0),
-            1.9,
+            top_left + Vec2::new(0.0, -25.0) * hud_scale,
+            1.9 * hud_scale,
             Color::rgba(0.58, 0.7, 0.78, 0.86),
             8.0,
         );
@@ -2461,8 +2687,8 @@ impl Game for LastLight {
                 self.relays.len() + 1,
                 self.friendly_count()
             ),
-            top_left + Vec2::new(0.0, -50.0),
-            2.8,
+            top_left + Vec2::new(0.0, -50.0) * hud_scale,
+            2.8 * hud_scale,
             Color::rgb(0.96, 0.72, 0.28),
             8.0,
         );
@@ -2471,8 +2697,8 @@ impl Game for LastLight {
             self.draw_text(
                 ctx.renderer,
                 &format!("{}  //  SQUAD {count}", self.kinds[selected].label()),
-                top_left + Vec2::new(0.0, -75.0),
-                2.7,
+                top_left + Vec2::new(0.0, -75.0) * hud_scale,
+                2.7 * hud_scale,
                 Color::rgb(0.96, 0.72, 0.28),
                 8.0,
             );
@@ -2480,8 +2706,8 @@ impl Game for LastLight {
             self.draw_text(
                 ctx.renderer,
                 &self.structure_status_line(structure),
-                top_left + Vec2::new(0.0, -75.0),
-                2.6,
+                top_left + Vec2::new(0.0, -75.0) * hud_scale,
+                2.6 * hud_scale,
                 Color::rgb(0.4, 0.95, 1.0),
                 8.0,
             );
@@ -2490,8 +2716,8 @@ impl Game for LastLight {
             self.draw_text(
                 ctx.renderer,
                 &message,
-                top_left + Vec2::new(0.0, -100.0),
-                2.2,
+                top_left + Vec2::new(0.0, -100.0) * hud_scale,
+                2.2 * hud_scale,
                 Color::rgb(0.3, 1.35, 1.18),
                 8.0,
             );
@@ -2499,19 +2725,52 @@ impl Game for LastLight {
             self.draw_text(
                 ctx.renderer,
                 message,
-                top_left + Vec2::new(0.0, -100.0),
-                2.5,
+                top_left + Vec2::new(0.0, -100.0) * hud_scale,
+                2.5 * hud_scale,
                 Color::rgb(0.65, 1.15, 1.05),
                 8.0,
             );
         }
 
-        if !self.briefing && !self.paused && !self.victory && !self.defeat {
-            let card_text = Self::command_card_text_origin(ctx.renderer);
-            let card_center = card_text + Vec2::new(240.0, -104.5);
+        if let Some((speaker, line, _)) = self.radio_message {
+            let top_right = ctx
+                .renderer
+                .camera
+                .world_from_viewport_fraction(Vec2::new(1.0, 1.0));
+            let origin = top_right + Vec2::new(-540.0, -42.0) * hud_scale;
             ctx.renderer.draw_sprite(
                 self.tex_ui,
-                Sprite::new(card_center, Vec2::new(530.0, 300.0))
+                Sprite::new(
+                    origin + Vec2::new(250.0, -34.0) * hud_scale,
+                    Vec2::new(520.0, 88.0) * hud_scale,
+                )
+                .with_color(Color::rgba(0.025, 0.055, 0.085, 0.9))
+                .with_z(8.6),
+            );
+            self.draw_text(
+                ctx.renderer,
+                &format!("COMMS // {speaker}"),
+                origin,
+                1.9 * hud_scale,
+                Color::rgb(0.3, 1.4, 1.2),
+                8.8,
+            );
+            self.draw_text(
+                ctx.renderer,
+                line,
+                origin + Vec2::new(0.0, -30.0) * hud_scale,
+                1.25 * hud_scale,
+                Color::rgb(0.88, 0.92, 0.92),
+                8.8,
+            );
+        }
+
+        if !self.briefing && !self.paused && !self.victory && !self.defeat {
+            let card_text = Self::command_card_text_origin(ctx.renderer);
+            let card_center = card_text + Vec2::new(240.0, -104.5) * hud_scale;
+            ctx.renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(card_center, Vec2::new(530.0, 300.0) * hud_scale)
                     .with_color(Color::rgba(0.01, 0.025, 0.05, 0.88))
                     .with_z(7.5),
             );
@@ -2519,7 +2778,7 @@ impl Game for LastLight {
                 ctx.renderer,
                 "LANTERN FABRICATOR",
                 card_text,
-                2.8,
+                2.8 * hud_scale,
                 Color::rgb(0.3, 1.4, 1.2),
                 8.0,
             );
@@ -2528,7 +2787,7 @@ impl Game for LastLight {
                 .camera
                 .screen_to_world(ctx.input.mouse_position);
             for (index, (_, label)) in self.command_card_rows().iter().enumerate() {
-                let rect = Self::command_card_row_rect(card_text, index);
+                let rect = Self::command_card_row_rect(card_text, index, hud_scale);
                 let hovered = rect.contains_point(mouse_world);
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
@@ -2543,8 +2802,8 @@ impl Game for LastLight {
                 self.draw_text(
                     ctx.renderer,
                     label,
-                    rect.min + Vec2::new(8.0, 8.0),
-                    1.9,
+                    rect.min + Vec2::new(8.0, 8.0) * hud_scale,
+                    1.9 * hud_scale,
                     Color::rgb(0.88, 0.92, 0.92),
                     8.0,
                 );
@@ -2552,8 +2811,8 @@ impl Game for LastLight {
             self.draw_text(
                 ctx.renderer,
                 "CMD/CTRL+1-5 ASSIGN   1-5 OR CLICK RECALL",
-                card_text + Vec2::new(0.0, -142.0),
-                1.6,
+                card_text + Vec2::new(0.0, -142.0) * hud_scale,
+                1.6 * hud_scale,
                 Color::rgba(0.55, 0.7, 0.78, 0.9),
                 8.0,
             );
@@ -2576,24 +2835,27 @@ impl Game for LastLight {
             self.draw_text(
                 ctx.renderer,
                 &queue_label,
-                card_text + Vec2::new(0.0, -166.0),
-                2.0,
+                card_text + Vec2::new(0.0, -166.0) * hud_scale,
+                2.0 * hud_scale,
                 Color::rgb(1.15, 0.7, 0.25),
                 8.0,
             );
             if let Some(progress) = front_progress {
-                let bar_origin = card_text + Vec2::new(0.0, -188.0);
+                let bar_origin = card_text + Vec2::new(0.0, -188.0) * hud_scale;
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
-                    Sprite::new(bar_origin + Vec2::new(150.0, 0.0), Vec2::new(300.0, 8.0))
-                        .with_color(Color::rgba(0.1, 0.1, 0.12, 0.9))
-                        .with_z(8.0),
+                    Sprite::new(
+                        bar_origin + Vec2::new(150.0, 0.0) * hud_scale,
+                        Vec2::new(300.0, 8.0) * hud_scale,
+                    )
+                    .with_color(Color::rgba(0.1, 0.1, 0.12, 0.9))
+                    .with_z(8.0),
                 );
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
                     Sprite::new(
-                        bar_origin + Vec2::new(300.0 * progress * 0.5, 0.0),
-                        Vec2::new(300.0 * progress, 8.0),
+                        bar_origin + Vec2::new(300.0 * progress * 0.5, 0.0) * hud_scale,
+                        Vec2::new(300.0 * progress, 8.0) * hud_scale,
                     )
                     .with_color(Color::rgb(1.15, 0.7, 0.25))
                     .with_z(8.1),
@@ -2639,21 +2901,24 @@ impl Game for LastLight {
             None
         };
         if let Some((title, story, prompt, title_color)) = overlay {
+            let overlay_scale = Self::hud_scale(ctx.renderer);
             self.draw_full_screen_backdrop(ctx, Color::rgba(0.01, 0.02, 0.045, 0.8));
             let center = ctx.renderer.camera.position;
             self.draw_text_shadowed(
                 ctx.renderer,
                 title,
                 center + Vec2::new(-view.x * 0.42, view.y * 0.36),
-                6.5,
+                6.5 * overlay_scale,
                 title_color,
                 11.0,
             );
             self.draw_text_shadowed(
                 ctx.renderer,
                 story,
-                center + Vec2::new(-view.x * 0.42, view.y * 0.36 - 55.0),
-                2.1,
+                center
+                    + Vec2::new(-view.x * 0.42, view.y * 0.36)
+                    + Vec2::new(0.0, -55.0) * overlay_scale,
+                2.1 * overlay_scale,
                 Color::rgb(0.8, 0.88, 0.9),
                 11.0,
             );
@@ -2661,7 +2926,7 @@ impl Game for LastLight {
                 ctx.renderer,
                 &prompt,
                 center + Vec2::new(-view.x * 0.42, -view.y * 0.4),
-                3.2,
+                3.2 * overlay_scale,
                 Color::rgb(1.25, 0.78, 0.28),
                 11.0,
             );
@@ -2669,8 +2934,8 @@ impl Game for LastLight {
                 self.draw_text_shadowed(
                     ctx.renderer,
                     &format!("LUMEN AVAILABLE: {}", self.save_data.campaign.currency),
-                    center + Vec2::new(-360.0, 110.0),
-                    2.2,
+                    center + Vec2::new(-360.0, 110.0) * overlay_scale,
+                    2.2 * overlay_scale,
                     Color::rgba(0.75, 0.9, 0.95, 0.95),
                     11.0,
                 );
@@ -2679,7 +2944,7 @@ impl Game for LastLight {
                     .camera
                     .screen_to_world(ctx.input.mouse_position);
                 for (index, (_, label, color)) in self.briefing_rows().iter().enumerate() {
-                    let rect = Self::briefing_row_rect(center, index);
+                    let rect = Self::briefing_row_rect(center, index, overlay_scale);
                     let hovered = rect.contains_point(mouse_world);
                     ctx.renderer.draw_sprite(
                         self.tex_ui,
@@ -2694,8 +2959,8 @@ impl Game for LastLight {
                     self.draw_text_shadowed(
                         ctx.renderer,
                         label,
-                        rect.min + Vec2::new(14.0, 10.0),
-                        1.8,
+                        rect.min + Vec2::new(14.0, 10.0) * overlay_scale,
+                        1.8 * overlay_scale,
                         *color,
                         11.0,
                     );
@@ -2762,6 +3027,7 @@ mod tests {
         let mut game = LastLight::new();
         game.start_mission(missions::reclaim_the_reactor());
         assert_eq!(game.relays.len(), 3);
+        assert_eq!(game.salvage_nodes.len(), 3);
         assert!(game.reactor_position.is_some());
         assert_eq!(game.friendly_count(), 3);
         assert_eq!(game.world.selection().ids().len(), 3);
@@ -2773,6 +3039,69 @@ mod tests {
                 .count(),
             6
         );
+    }
+
+    #[test]
+    fn idle_warden_acquires_a_visible_enemy() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        let warden = game
+            .kinds
+            .iter()
+            .find(|(_, kind)| **kind == UnitKind::Warden)
+            .map(|(id, _)| *id)
+            .unwrap();
+        let enemy = game
+            .world
+            .units()
+            .iter()
+            .find(|unit| unit.faction == CHOIR)
+            .map(|unit| unit.id)
+            .unwrap();
+        let warden_position = game.world.unit(warden).unwrap().position;
+        game.world.unit_mut(enemy).unwrap().position = warden_position + Vec2::new(100.0, 0.0);
+        game.update_fog();
+
+        game.update_auto_targeting();
+
+        assert_eq!(
+            game.world.unit(warden).unwrap().order,
+            UnitOrder::Attack(enemy)
+        );
+    }
+
+    #[test]
+    fn surveyor_harvests_finite_salvage_nodes() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        let surveyor = game
+            .kinds
+            .iter()
+            .find(|(_, kind)| **kind == UnitKind::Surveyor)
+            .map(|(id, _)| *id)
+            .unwrap();
+        let node_position = game.salvage_nodes[0].position;
+        game.world.unit_mut(surveyor).unwrap().position = node_position;
+        let salvage_before = game.resources.amount();
+
+        assert_eq!(game.update_harvesting(1.0), 18);
+        assert_eq!(game.resources.amount(), salvage_before + 18);
+        assert_eq!(game.salvage_nodes[0].remaining, 222);
+    }
+
+    #[test]
+    fn campaign_radio_lines_trigger_in_authored_order() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        game.mission_time = 2.0;
+
+        game.update_radio_dialogue(0.0);
+
+        assert_eq!(
+            game.radio_message.map(|(speaker, _, _)| speaker),
+            Some("MARA VEY")
+        );
+        assert_eq!(game.dialogue_cursor, 1);
     }
 
     #[test]

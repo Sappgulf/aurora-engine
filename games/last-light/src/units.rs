@@ -93,15 +93,15 @@ impl UnitKind {
             },
             Self::Needle => CombatProfile {
                 range: 170.0,
-                damage_per_second: 18.0,
+                damage_per_second: 11.0,
             },
             Self::Canticle => CombatProfile {
                 range: 250.0,
-                damage_per_second: 24.0,
+                damage_per_second: 16.0,
             },
             Self::BellMine => CombatProfile {
                 range: 105.0,
-                damage_per_second: 34.0,
+                damage_per_second: 24.0,
             },
         }
     }
@@ -120,7 +120,8 @@ mod tests {
 
         assert!(surveyor.range > warden.range);
         assert!(engineer.damage_per_second < warden.damage_per_second);
-        assert!(bell_mine.damage_per_second > warden.damage_per_second);
+        assert!(bell_mine.damage_per_second > surveyor.damage_per_second);
         assert!(bell_mine.range < warden.range);
+        assert!(warden.damage_per_second > UnitKind::Canticle.combat().damage_per_second);
     }
 }

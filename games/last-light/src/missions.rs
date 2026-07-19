@@ -64,6 +64,19 @@ pub enum VictoryCondition {
     EscortToExtraction { point: Vec2, radius: f32 },
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum DialogueTrigger {
+    Time(f32),
+    RelaysOnline(usize),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RadioLine {
+    pub speaker: &'static str,
+    pub text: &'static str,
+    pub trigger: DialogueTrigger,
+}
+
 #[derive(Debug, Clone)]
 pub struct MissionDef {
     pub id: &'static str,
@@ -74,6 +87,8 @@ pub struct MissionDef {
     pub defeat_title: &'static str,
     pub defeat_story: &'static str,
     pub relays: Vec<Vec2>,
+    pub salvage_nodes: Vec<Vec2>,
+    pub radio_lines: Vec<RadioLine>,
     pub reactor_position: Option<Vec2>,
     pub fabricator_position: Vec2,
     pub player_spawns: Vec<PlayerSpawn>,
@@ -112,6 +127,33 @@ pub fn reclaim_the_reactor() -> MissionDef {
             Vec2::new(-790.0, 320.0),
             Vec2::new(30.0, -430.0),
             Vec2::new(830.0, 250.0),
+        ],
+        salvage_nodes: vec![
+            Vec2::new(-610.0, -180.0),
+            Vec2::new(40.0, 260.0),
+            Vec2::new(720.0, -180.0),
+        ],
+        radio_lines: vec![
+            RadioLine {
+                speaker: "MARA VEY",
+                text: "LANTERN TEAM, STAY TOGETHER. THE CHOIR HEARS ISOLATION.",
+                trigger: DialogueTrigger::Time(2.0),
+            },
+            RadioLine {
+                speaker: "IVO RENN",
+                text: "SURVEYOR CAN SIP SALVAGE BLOOMS. KEEP IT CLOSE, KEEP IT FUNDED.",
+                trigger: DialogueTrigger::Time(9.0),
+            },
+            RadioLine {
+                speaker: "SENA QUILL",
+                text: "FIRST RELAY IS SINGING BACK. THE DARK JUST GOT SMALLER.",
+                trigger: DialogueTrigger::RelaysOnline(1),
+            },
+            RadioLine {
+                speaker: "LUMEN",
+                text: "THREE LIGHTS. ONE VOICE. COME FIND ME BENEATH THE REACTOR.",
+                trigger: DialogueTrigger::RelaysOnline(3),
+            },
         ],
         reactor_position: Some(Vec2::new(520.0, -40.0)),
         fabricator_position: Vec2::new(-1_020.0, -120.0),
@@ -152,6 +194,23 @@ pub fn voice_in_conduit_twelve() -> MissionDef {
         defeat_title: "SIGNAL LOST",
         defeat_story: "CONDUIT TWELVE GOES QUIET.",
         relays: Vec::new(),
+        salvage_nodes: vec![
+            Vec2::new(-640.0, 260.0),
+            Vec2::new(80.0, 20.0),
+            Vec2::new(720.0, 40.0),
+        ],
+        radio_lines: vec![
+            RadioLine {
+                speaker: "SENA QUILL",
+                text: "THE SIGNAL MOVES WHEN I MOVE. ESCORT ME THROUGH THE SPINE.",
+                trigger: DialogueTrigger::Time(2.0),
+            },
+            RadioLine {
+                speaker: "IVO RENN",
+                text: "BELL MINES AHEAD. WARDENS FIRST, SURVEYOR WIDE.",
+                trigger: DialogueTrigger::Time(10.0),
+            },
+        ],
         reactor_position: None,
         fabricator_position: Vec2::new(-1_100.0, 380.0),
         player_spawns: vec![

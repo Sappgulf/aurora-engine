@@ -11,6 +11,12 @@ pub struct FieldBeacon {
     pub position: Vec2,
 }
 
+pub struct SalvageNode {
+    pub position: Vec2,
+    pub remaining: u32,
+    pub harvest_buffer: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StructureKind {
     Relay(usize),

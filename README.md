@@ -48,8 +48,10 @@ Select the Engineer and command it near each of the three power relays. Active
 relays generate salvage for the Lantern fabricator; build reinforcements, hold
 the sector, defeat the Choir Canticle, and bring the auxiliary reactor online.
 
-**Combat roles:** Wardens are dependable front-line anchors; Surveyors trade
-damage for long-range fire; Engineers stay close to repair and operate
+**Combat roles:** Idle Wardens and Surveyors automatically acquire nearby visible
+enemies. Wardens are dependable front-line anchors; Surveyors trade damage for
+long-range fire and harvest finite cyan salvage blooms when moved within range;
+Engineers stay close to repair and operate
 objectives. Choir Needles skirmish, Canticles bombard from beyond Warden range,
 and Bell Mines are devastating only up close—focus them before they reach your
 line.
