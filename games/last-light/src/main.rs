@@ -56,6 +56,9 @@ const COMMAND_CARD_KEYS: [KeyCode; 6] = [
     KeyCode::KeyT,
     KeyCode::KeyB,
 ];
+/// Number of command rows shown at a time before paginating. A full command
+/// surface shows PAGE_SIZE rows per page and cycles with arrow keys when the
+/// surface has more than this many actions.
 const COMMAND_CARD_COMPACT_ROWS: usize = 3;
 const HUD_SCALE_MIN: f32 = 0.5;
 const HUD_SCALE_MAX: f32 = 0.95;
@@ -218,6 +221,7 @@ struct LastLight {
     follow_mode: bool,
     status: Option<(String, f32)>,
     command_card_compact: bool,
+    command_card_page: usize,
     minimal_hud: bool,
     save_store: CampaignStore,
     save_data: SaveData,
@@ -386,6 +390,7 @@ impl LastLight {
             follow_mode: false,
             status: None,
             command_card_compact: true,
+            command_card_page: 0,
             minimal_hud: false,
             save_store,
             save_data,
@@ -423,6 +428,7 @@ impl LastLight {
         let modifiers = self.simulation_modifiers();
         self.simulation = MissionSimulation::from_mission(&mission, modifiers);
         self.mission = mission;
+        self.command_card_page = 0;
         self.animation_players.clear();
         self.animation_players.extend(
             self.simulation
@@ -1126,12 +1132,35 @@ impl LastLight {
             .collect()
     }
 
+    fn command_card_page_count(&self) -> usize {
+        let rows = self.command_card_rows().len().max(1);
+        (rows + COMMAND_CARD_COMPACT_ROWS - 1) / COMMAND_CARD_COMPACT_ROWS
+    }
+
+    fn command_card_visible_page(&self) -> usize {
+        let max_page = self.command_card_page_count().saturating_sub(1);
+        self.command_card_page.min(max_page)
+    }
+
+    fn command_card_should_paginate(&self, renderer: &Renderer) -> bool {
+        self.command_card_visible()
+            && !self.command_card_compact
+            && !self.minimal_hud
+            && !Self::hud_dense_layout(renderer)
+            && self.command_card_rows().len() > COMMAND_CARD_COMPACT_ROWS
+    }
+
     /// Compact mode keeps the command card readable in browser zooms by
     /// restricting to the first few actionable rows.
+    #[allow(dead_code)]
     fn visible_command_card_rows(&self) -> Vec<usize> {
         let rows = self.command_card_rows();
         if !self.command_card_compact && !self.minimal_hud {
-            rows
+            let start = self.command_card_visible_page() * COMMAND_CARD_COMPACT_ROWS;
+            rows.into_iter()
+                .skip(start)
+                .take(COMMAND_CARD_COMPACT_ROWS)
+                .collect()
         } else {
             rows.into_iter().take(COMMAND_CARD_COMPACT_ROWS).collect()
         }
@@ -1142,16 +1171,60 @@ impl LastLight {
         if self.command_card_compact || self.minimal_hud || Self::hud_dense_layout(renderer) {
             rows.into_iter().take(COMMAND_CARD_COMPACT_ROWS).collect()
         } else {
-            rows
+            let start = self.command_card_visible_page() * COMMAND_CARD_COMPACT_ROWS;
+            rows.into_iter()
+                .skip(start)
+                .take(COMMAND_CARD_COMPACT_ROWS)
+                .collect()
         }
     }
 
-    fn command_card_has_more_rows_for_display(&self, renderer: &Renderer) -> bool {
-        self.command_card_rows().len() > self.visible_command_card_rows_for_display(renderer).len()
-    }
-
+    #[allow(dead_code)]
     fn command_card_has_more_rows(&self) -> bool {
         self.command_card_rows().len() > COMMAND_CARD_COMPACT_ROWS
+    }
+
+    fn clamp_command_card_page_to_context(&mut self) {
+        let max_page = self.command_card_page_count().saturating_sub(1);
+        if self.command_card_page > max_page {
+            self.command_card_page = max_page;
+        }
+    }
+
+    fn reset_command_card_page(&mut self) {
+        self.command_card_page = 0;
+    }
+
+    fn next_command_card_page(&mut self, renderer: &Renderer) {
+        if !self.command_card_should_paginate(renderer) {
+            return;
+        }
+        self.command_card_page = (self.command_card_visible_page() + 1) % self.command_card_page_count();
+        self.status = Some((
+            format!(
+                "CMD PAGE {} / {}",
+                self.command_card_visible_page() + 1,
+                self.command_card_page_count()
+            ),
+            1.4,
+        ));
+    }
+
+    fn prev_command_card_page(&mut self, renderer: &Renderer) {
+        if !self.command_card_should_paginate(renderer) {
+            return;
+        }
+        let page_count = self.command_card_page_count();
+        let page = self.command_card_visible_page();
+        self.command_card_page = if page == 0 { page_count - 1 } else { page - 1 };
+        self.status = Some((
+            format!(
+                "CMD PAGE {} / {}",
+                self.command_card_visible_page() + 1,
+                page_count
+            ),
+            1.4,
+        ));
     }
 
     /// Structure and resource-node cards are mutually exclusive contexts.
@@ -1455,6 +1528,7 @@ impl LastLight {
     fn command_card_key_at(
         &self,
         index: usize,
+        slot: usize,
         point: Vec2,
         card_text: Vec2,
         scale: f32,
@@ -1463,7 +1537,7 @@ impl LastLight {
             && index == 5
             && !self.placing_beacon
         {
-            let rect = Self::command_card_row_rect(card_text, index, scale);
+            let rect = Self::command_card_row_rect(card_text, slot, scale);
             return Some(if point.x >= rect.center().x {
                 KeyCode::KeyD
             } else {
@@ -1607,6 +1681,7 @@ impl LastLight {
         };
         self.selected_structure = None;
         self.selected_resource_node = None;
+        self.reset_command_card_page();
         self.simulation.world.select_point(position, PLAYER, false);
         ctx.renderer.camera.position = position;
         ctx.renderer
@@ -1748,14 +1823,11 @@ impl LastLight {
         }
     }
 
-    fn command_card_row_rect(card_text: Vec2, index: usize, scale: f32) -> Aabb {
-        // Production occupies the left column; squad utilities occupy the
-        // right. This keeps every command visible without making a compact
-        // browser viewport sacrifice the queue feedback below it.
-        let column = index / 3;
-        let row = index % 3;
-        let center =
-            card_text + Vec2::new(130.0 + column as f32 * 260.0, -38.0 - row as f32 * 30.0) * scale;
+    fn command_card_row_rect(card_text: Vec2, slot: usize, scale: f32) -> Aabb {
+        // One compact column keeps page transitions obvious and avoids moving
+        // the anchor point when additional pages are shown.
+        let row = slot % COMMAND_CARD_COMPACT_ROWS;
+        let center = card_text + Vec2::new(130.0, -38.0 - row as f32 * 30.0) * scale;
         Aabb::from_center_size(center, Vec2::new(250.0, 26.0) * scale)
     }
 
@@ -1935,6 +2007,7 @@ impl LastLight {
         }
         if ctx.input.key_pressed(KeyCode::KeyM) {
             self.command_card_compact = !self.command_card_compact;
+            self.reset_command_card_page();
             self.status = Some((
                 format!(
                     "CMD CARD {} // KEY M TO TOGGLE",
@@ -1962,6 +2035,16 @@ impl LastLight {
         if ctx.input.key_pressed(KeyCode::Space) {
             self.focus_last_transmission(ctx);
         }
+        if self.command_card_should_paginate(ctx.renderer)
+            && ctx.input.key_pressed(KeyCode::ArrowUp)
+        {
+            self.prev_command_card_page(ctx.renderer);
+        }
+        if self.command_card_should_paginate(ctx.renderer)
+            && ctx.input.key_pressed(KeyCode::ArrowDown)
+        {
+            self.next_command_card_page(ctx.renderer);
+        }
         for key in [
             KeyCode::KeyA,
             KeyCode::KeyP,
@@ -1979,12 +2062,19 @@ impl LastLight {
             KeyCode::KeyX,
         ] {
             if ctx.input.key_pressed(key) {
-                self.apply_command_action(key);
+                if let Some(row) = self.command_row_for_key(key) {
+                    let visible_rows = self.visible_command_card_rows_for_display(ctx.renderer);
+                    if visible_rows.contains(&row) {
+                        self.apply_command_action(key);
+                    }
+                }
             }
         }
         if ctx.input.key_pressed(KeyCode::KeyD)
-            && self.command_row_for_key(KeyCode::KeyD).is_none()
             && matches!(self.selected_structure, Some(StructureKind::Fabricator))
+            && self
+                .visible_command_card_rows_for_display(ctx.renderer)
+                .contains(&5)
         {
             self.upgrade_supply_module();
         }
@@ -2010,18 +2100,16 @@ impl LastLight {
             let scale = Self::hud_scale(ctx.renderer);
             if self.command_card_visible() {
                 let card_text = Self::command_card_text_origin(ctx.renderer);
-                for &index in self
-                    .visible_command_card_rows_for_display(ctx.renderer)
-                    .iter()
-                {
-                    if Self::command_card_row_rect(card_text, index, scale)
+                let visible_rows = self.visible_command_card_rows_for_display(ctx.renderer);
+                for (slot, &index) in visible_rows.iter().enumerate() {
+                    if Self::command_card_row_rect(card_text, slot, scale)
                         .contains_point(mouse_world)
                     {
                         if !self.command_card_available(index) {
                             return;
                         }
                         if let Some(key) =
-                            self.command_card_key_at(index, mouse_world, card_text, scale)
+                            self.command_card_key_at(index, slot, mouse_world, card_text, scale)
                         {
                             if key == KeyCode::KeyD
                                 && matches!(
@@ -2062,6 +2150,7 @@ impl LastLight {
                     };
                     self.selected_structure = None;
                     self.simulation.world.select_point(position, PLAYER, false);
+                    self.reset_command_card_page();
                     self.status = Some((
                         "SPECIALIST SELECTED // COMMAND CARD UPDATED".to_owned(),
                         1.8,
@@ -3216,10 +3305,12 @@ impl LastLight {
                         self.selected_structure = Some(structure);
                         self.selected_resource_node = None;
                         self.simulation.world.clear_selection();
+                        self.reset_command_card_page();
                     } else if let Some(node) = self.salvage_node_at(mouse_world) {
                         self.selected_structure = None;
                         if self.selected_single_unit_kind() == Some(UnitKind::Surveyor) {
                             self.selected_resource_node = None;
+                            self.reset_command_card_page();
                             let assigned = self.assign_harvest_order(node);
                             self.status = Some(if assigned > 0 {
                                 (format!("{assigned} SURVEYOR // RESOURCE ROUTE SET"), 2.5)
@@ -3229,6 +3320,7 @@ impl LastLight {
                         } else {
                             self.selected_resource_node = Some(node);
                             self.simulation.world.clear_selection();
+                            self.reset_command_card_page();
                         }
                     } else if !ctx.input.shift_down()
                         && !self.simulation.world.selection().ids().is_empty()
@@ -3240,11 +3332,13 @@ impl LastLight {
                         // intercepted by the host platform.
                         self.selected_structure = None;
                         self.selected_resource_node = None;
+                        self.reset_command_card_page();
                         self.issue_move_order(mouse_world);
                         ctx.audio.collect();
                     } else {
                         self.selected_structure = None;
                         self.selected_resource_node = None;
+                        self.reset_command_card_page();
                         let additive = ctx.input.shift_down();
                         if ctx.input.control_down() {
                             if let Some(clicked) = self.friendly_unit_id_at(mouse_world) {
@@ -3260,6 +3354,7 @@ impl LastLight {
                 } else {
                     self.selected_structure = None;
                     self.selected_resource_node = None;
+                    self.reset_command_card_page();
                     self.simulation.world.select_bounds(
                         drag.bounds(),
                         PLAYER,
@@ -5067,6 +5162,7 @@ impl Game for LastLight {
         // a menu transition earlier in this same frame.
         self.input_handled_this_frame = false;
         self.normalize_selection_context();
+        self.clamp_command_card_page_to_context();
         let t = ctx.time.elapsed;
         // Comms are the highest-priority onboarding surface. While a person
         // is speaking, suppress the lower-priority controls legend so the
@@ -5631,6 +5727,7 @@ impl Game for LastLight {
                 self.draw_selection_brackets(ctx.renderer, position, radius);
             } else {
                 self.selected_structure = None;
+                self.reset_command_card_page();
             }
         }
 
@@ -5639,6 +5736,7 @@ impl Game for LastLight {
                 self.draw_selection_brackets(ctx.renderer, node.position, 82.0);
             } else {
                 self.selected_resource_node = None;
+                self.reset_command_card_page();
             }
         }
 
@@ -6612,11 +6710,11 @@ impl Game for LastLight {
             let panel_size = if compact_card {
                 Vec2::new(310.0, (visible_rows.len().max(1) as f32 * 30.0) + 104.0)
             } else {
-                Vec2::new(if dense_hud { 500.0 } else { 530.0 }, 244.0)
+                Vec2::new(310.0, (visible_rows.len().max(1) as f32 * 30.0) + 104.0)
             };
             let card_center = card_text
                 + Vec2::new(
-                    if compact_card { 155.0 } else { 240.0 },
+                    155.0,
                     if compact_card { -132.0 } else { -132.5 },
                 ) * hud_scale;
             ctx.renderer.draw_sprite(
@@ -6666,8 +6764,8 @@ impl Game for LastLight {
                 .renderer
                 .camera
                 .screen_to_world(ctx.input.mouse_position);
-            for &index in visible_rows.iter() {
-                let rect = Self::command_card_row_rect(card_text, index, hud_scale);
+            for (slot, &index) in visible_rows.iter().enumerate() {
+                let rect = Self::command_card_row_rect(card_text, slot, hud_scale);
                 let hovered = rect.contains_point(mouse_world);
                 let available = self.command_card_available(index);
                 ctx.renderer.draw_sprite(
@@ -6720,14 +6818,12 @@ impl Game for LastLight {
                         8.0,
                     );
                 }
-            } else if self.command_card_has_more_rows_for_display(ctx.renderer) {
+            } else if self.command_card_should_paginate(ctx.renderer) {
+                let page = self.command_card_visible_page() + 1;
+                let pages = self.command_card_page_count();
                 self.draw_text(
                     ctx.renderer,
-                    if dense_hud {
-                        "M EXPAND COMMANDS"
-                    } else {
-                        "M SHOW MORE COMMANDS"
-                    },
+                    &format!("PAGE {page} / {pages}  // ARROWS PAGINATE"),
                     card_text + Vec2::new(0.0, -112.0) * hud_scale,
                     1.35 * hud_scale,
                     Color::rgba(0.55, 0.78, 0.9, 0.9),
@@ -8695,10 +8791,15 @@ mod tests {
         assert!(game.command_card_has_more_rows());
 
         game.command_card_compact = false;
+        assert_eq!(game.visible_command_card_rows(), vec![0, 1, 2]);
+        game.command_card_page = 1;
+        game.clamp_command_card_page_to_context();
         assert_eq!(
             game.visible_command_card_rows().len(),
-            game.command_card_rows().len()
+            3,
+            "non-compact mode still respects pagination with one page visible"
         );
+        assert_eq!(game.visible_command_card_rows(), vec![3, 4, 5]);
         assert!(game.command_card_has_more_rows());
     }
 
@@ -8982,12 +9083,13 @@ mod tests {
         game.start_mission(missions::reclaim_the_reactor());
         game.selected_structure = Some(StructureKind::Fabricator);
         let card_text = Vec2::ZERO;
+        let rect = LastLight::command_card_row_rect(card_text, 2, 1.0);
         assert_eq!(
-            game.command_card_key_at(5, Vec2::new(300.0, -98.0), card_text, 1.0),
+            game.command_card_key_at(5, 2, rect.center() + Vec2::new(-1.0, 0.0), card_text, 1.0),
             Some(KeyCode::KeyB)
         );
         assert_eq!(
-            game.command_card_key_at(5, Vec2::new(500.0, -98.0), card_text, 1.0),
+            game.command_card_key_at(5, 2, rect.center() + Vec2::new(1.0, 0.0), card_text, 1.0),
             Some(KeyCode::KeyD)
         );
     }
