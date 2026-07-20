@@ -221,6 +221,11 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                 .create_window(window_attrs)
                 .expect("failed to create window"),
         );
+        // Keep native pointer coordinates in the same logical-pixel space as
+        // the camera/HUD. The renderer applies the same scale when building
+        // its viewport, so selection and asset framing stay aligned on
+        // Retina displays.
+        self.input.set_scale_factor(window.scale_factor() as f32);
 
         #[cfg(target_arch = "wasm32")]
         {
@@ -300,6 +305,12 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.input.set_scale_factor(scale_factor as f32);
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.set_scale_factor(scale_factor);
+                }
             }
             WindowEvent::Resized(physical_size) => {
                 #[cfg(target_arch = "wasm32")]

@@ -65,6 +65,10 @@ pub struct Input {
     /// Vertical scroll this frame (lines-ish; positive = up).
     pub scroll: f32,
     modifiers: ModifiersState,
+    /// Native pointer events arrive in physical pixels. The renderer keeps
+    /// its camera/HUD viewport in logical pixels so Retina and browser input
+    /// hit the same world-space locations.
+    scale_factor: f32,
     prev_mouse: Vec2,
     mouse_initialized: bool,
 }
@@ -72,6 +76,16 @@ pub struct Input {
 impl Input {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the native window scale used to normalize pointer coordinates.
+    /// WASM cursor events already arrive in CSS pixels and ignore this value.
+    pub fn set_scale_factor(&mut self, scale: f32) {
+        self.scale_factor = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
     }
 
     /// Call at the start of each frame (clears edge-triggered state).
@@ -118,6 +132,8 @@ impl Input {
             },
             WindowEvent::CursorMoved { position, .. } => {
                 let pos = Vec2::new(position.x as f32, position.y as f32);
+                #[cfg(not(target_arch = "wasm32"))]
+                let pos = pos / self.scale_factor.max(1.0);
                 // winit's web cursor positions are already in the canvas's
                 // CSS (logical) pixels. The renderer's viewport uses that
                 // same unit, so applying devicePixelRatio here would halve

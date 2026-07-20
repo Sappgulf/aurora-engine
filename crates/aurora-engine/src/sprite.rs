@@ -60,6 +60,18 @@ impl Sprite {
     }
 }
 
+/// Map image-space UV bounds (V=0 at the top row) onto the engine's Y-up
+/// world corners. The first corner is world bottom-left, so it must sample
+/// the image bottom row (`uv_max.y`) rather than the image top row.
+pub(crate) fn sprite_corner_uvs(uv_min: Vec2, uv_max: Vec2) -> [Vec2; 4] {
+    [
+        Vec2::new(uv_min.x, uv_max.y),
+        Vec2::new(uv_max.x, uv_max.y),
+        Vec2::new(uv_max.x, uv_min.y),
+        Vec2::new(uv_min.x, uv_min.y),
+    ]
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct SpriteVertex {
@@ -173,12 +185,7 @@ impl SpriteBatch {
             Vec2::new(-half.x, half.y),
         ];
         let (s, c) = sprite.rotation.sin_cos();
-        let uvs = [
-            sprite.uv_min,
-            Vec2::new(sprite.uv_max.x, sprite.uv_min.y),
-            sprite.uv_max,
-            Vec2::new(sprite.uv_min.x, sprite.uv_max.y),
-        ];
+        let uvs = sprite_corner_uvs(sprite.uv_min, sprite.uv_max);
         let col = [
             sprite.color.r,
             sprite.color.g,
@@ -248,3 +255,24 @@ pub fn sort_by_texture(queue: &mut [QueuedSprite]) {
 
 /// Placeholder to keep Texture referenced in docs.
 pub type SpriteTexture = Texture;
+
+#[cfg(test)]
+mod tests {
+    use super::sprite_corner_uvs;
+    use glam::Vec2;
+
+    #[test]
+    fn sprite_corners_preserve_image_orientation_in_y_up_world() {
+        let uv_min = Vec2::new(0.25, 0.10);
+        let uv_max = Vec2::new(0.50, 0.40);
+        assert_eq!(
+            sprite_corner_uvs(uv_min, uv_max),
+            [
+                Vec2::new(0.25, 0.40),
+                Vec2::new(0.50, 0.40),
+                Vec2::new(0.50, 0.10),
+                Vec2::new(0.25, 0.10),
+            ]
+        );
+    }
+}

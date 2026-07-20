@@ -40,6 +40,10 @@ const BEACON_COST: u32 = 50;
 /// second. Keeping the value beside the HUD formatter prevents the card from
 /// promising a rate that differs from the fixed-step harvest loop.
 const HARVEST_RATE_PER_SECOND: f32 = 18.0;
+const ENEMY_CLICK_RADIUS_SCALE: f32 = 2.8;
+const FRIENDLY_CLICK_RADIUS_SCALE: f32 = 1.9;
+const FRIENDLY_HOVER_RADIUS_SCALE: f32 = 1.6;
+const RESOURCE_CLICK_RADIUS: f32 = 130.0;
 /// The shipped unit strips are authored facing the lower edge of the screen
 /// (world-space -Y). Keep that art convention explicit so movement rotation
 /// cannot silently turn every unit 180 degrees away from its travel direction.
@@ -169,6 +173,7 @@ struct LastLight {
     tex_down_reactions: TextureHandle,
     tex_structures: TextureHandle,
     tex_portraits: TextureHandle,
+    tex_mission_cover: TextureHandle,
     tex_resources: TextureHandle,
     tex_resource_effects: TextureHandle,
     tex_glow: TextureHandle,
@@ -330,6 +335,7 @@ impl LastLight {
             tex_down_reactions: TextureHandle::default(),
             tex_structures: TextureHandle::default(),
             tex_portraits: TextureHandle::default(),
+            tex_mission_cover: TextureHandle::default(),
             tex_resources: TextureHandle::default(),
             tex_resource_effects: TextureHandle::default(),
             tex_glow: TextureHandle::default(),
@@ -2412,7 +2418,8 @@ impl LastLight {
             .filter(|unit| self.fog.state_at(unit.position) == FogState::Visible)
             .filter_map(|unit| {
                 let distance = unit.position.distance(point);
-                (distance <= unit.radius * 1.8).then_some((unit.id, distance))
+                let radius = (unit.radius * ENEMY_CLICK_RADIUS_SCALE).max(62.0);
+                (distance <= radius).then_some((unit.id, distance))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(id, _)| id)
@@ -2437,7 +2444,7 @@ impl LastLight {
     fn salvage_node_at(&self, point: Vec2) -> Option<usize> {
         self.salvage_nodes
             .iter()
-            .position(|node| node.position.distance(point) <= 95.0)
+            .position(|node| node.position.distance(point) <= RESOURCE_CLICK_RADIUS)
     }
 
     fn workers_at_node(&self, node: usize) -> usize {
@@ -2654,7 +2661,8 @@ impl LastLight {
         self.simulation.world.units().iter().any(|unit| {
             unit.faction == PLAYER
                 && unit.alive()
-                && unit.position.distance(point) <= unit.radius * 1.35
+                && unit.position.distance(point)
+                    <= (unit.radius * FRIENDLY_HOVER_RADIUS_SCALE).max(58.0)
         })
     }
 
@@ -2666,7 +2674,8 @@ impl LastLight {
             .filter(|unit| unit.faction == PLAYER && unit.alive())
             .filter_map(|unit| {
                 let distance = unit.position.distance(point);
-                (distance <= unit.radius * 1.6).then_some((unit.id, distance))
+                let radius = (unit.radius * FRIENDLY_CLICK_RADIUS_SCALE).max(60.0);
+                (distance <= radius).then_some((unit.id, distance))
             })
             .min_by(|left, right| left.1.total_cmp(&right.1))
             .map(|(id, _)| id)
@@ -4477,6 +4486,10 @@ impl LastLight {
         (view.x / 1280.0).min(view.y / 720.0).clamp(0.5, 1.0)
     }
 
+    fn mission_menu_cover_size(view: Vec2) -> Vec2 {
+        Vec2::new(view.x * 0.38, view.y * 0.38 * 9.0 / 16.0)
+    }
+
     fn mission_entry_rect(camera_position: Vec2, index: usize, scale: f32) -> Aabb {
         // Six authored missions now fit with a deliberate footer gap at the
         // reference 1280x720 viewport. Keeping this in the shared hit-test
@@ -4489,6 +4502,14 @@ impl LastLight {
         self.draw_full_screen_backdrop(ctx, Color::rgba(0.01, 0.02, 0.045, 0.82));
         let center = ctx.renderer.camera.position;
         let menu_scale = Self::mission_select_scale(ctx.renderer.camera.visible_world_size());
+        let cover_size = Self::mission_menu_cover_size(ctx.renderer.camera.visible_world_size());
+        let cover_position = center + Vec2::new(-300.0, 155.0) * menu_scale;
+        ctx.renderer.draw_sprite(
+            self.tex_mission_cover,
+            Sprite::new(cover_position, cover_size * menu_scale)
+                .with_color(Color::rgba(0.65, 0.65, 0.72, 0.96))
+                .with_z(9.2),
+        );
         self.draw_text_shadowed(
             ctx.renderer,
             "AURORA: LAST LIGHT",
@@ -4727,6 +4748,7 @@ impl Game for LastLight {
             resource_effects,
             glow,
             ui,
+            mission_cover,
         ) = {
             let gpu = renderer.gpu();
             (
@@ -4751,6 +4773,12 @@ impl Game for LastLight {
                 assets::load_texture(&gpu, TextureAsset::ResourceHarvestEffects),
                 Texture::soft_circle(&gpu, 64, Color::WHITE),
                 Texture::solid(&gpu, Color::WHITE),
+                Texture::from_bytes(
+                    &gpu,
+                    include_bytes!("../assets/cover/aurora-last-light-cover-v001.png"),
+                    "menu.cover.aurora-last-light",
+                )
+                .expect("cover texture should decode"),
             )
         };
         self.tex_environment = renderer.add_texture(environment);
@@ -4770,6 +4798,7 @@ impl Game for LastLight {
         self.tex_down_reactions = renderer.add_texture(down_reactions);
         self.tex_structures = renderer.add_texture(structures);
         self.tex_portraits = renderer.add_texture(portraits);
+        self.tex_mission_cover = renderer.add_texture(mission_cover);
         self.tex_resources = renderer.add_texture(resources);
         self.tex_resource_effects = renderer.add_texture(resource_effects);
         self.tex_glow = renderer.add_texture(glow);
@@ -8551,10 +8580,22 @@ mod tests {
 
         let modifiers = game.simulation_modifiers();
         let spawn_point = Vec2::new(-120.0, -80.0);
-        game.simulation
-            .spawn(UnitKind::Warden, PLAYER, spawn_point, 90.0, 210.0, modifiers);
-        game.simulation
-            .spawn(UnitKind::Warden, PLAYER, spawn_point + Vec2::new(18.0, 0.0), 90.0, 210.0, modifiers);
+        game.simulation.spawn(
+            UnitKind::Warden,
+            PLAYER,
+            spawn_point,
+            90.0,
+            210.0,
+            modifiers,
+        );
+        game.simulation.spawn(
+            UnitKind::Warden,
+            PLAYER,
+            spawn_point + Vec2::new(18.0, 0.0),
+            90.0,
+            210.0,
+            modifiers,
+        );
 
         let warden_ids: Vec<UnitId> = game
             .simulation

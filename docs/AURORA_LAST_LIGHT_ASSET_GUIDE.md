@@ -35,6 +35,33 @@ terrain change.
 
 Bloom should affect emissive details, never the entire silhouette.
 
+## Tactical feedback layers
+
+The current build keeps the playfield readable by composing feedback from
+small runtime layers rather than baking it into the terrain atlas:
+
+- **Command Surge** uses an amber selection pulse and a short-lived cyan status
+  line; no new sprite sheet is required.
+- **Emergency Repair** reuses the Engineer repair strip and adds a warm beam to
+  the target structure or Lantern.
+- **Scan Pulse** uses the existing glow texture as an expanding ring and
+  reveals fog from simulation-owned coordinates.
+- **Comms** reuses the six-frame portrait sheet; the panel slides in, queues
+  subsequent lines, and stores a world position for the `Space` focus action.
+- **Terrain bands** stay procedural: authored elevation/cover zones receive
+  restrained cyan ridge or violet cover fills in-world and on the minimap. Do
+  not paint these bonuses into a background texture, because combat and HUD
+  need the same deterministic bounds.
+- **Threat telegraphs** remain procedural as well: a magenta target pulse and
+  thin attack line are layered from the enemy's live order. Keep the warning
+  separate from unit art so a new Choir weapon can reuse it without another
+  generated strip.
+
+When new art is generated, keep these as separate transparent layers (unit,
+effect, selection, and UI) so the browser build can budget and stream them
+independently. Do not bake scan rings, radio panels, or health bars into the
+terrain PNG.
+
 ## Shape language
 
 - Lantern: open frames, repair clamps, backpacks, visible tools.
@@ -110,25 +137,85 @@ unrelated images.
   `build`, `scan`, `hit`, `down`.
 - Re-selecting the active clip must not restart it. A state transition resets to
   frame zero and non-looping clips hold their last frame until the next state.
-- Movement strips face north in source art and rotate toward velocity in-engine.
+- Movement strips face screen-down in source art (world-space −Y) and rotate
+  toward velocity in-engine. The runtime keeps this art-facing contract
+  explicit so a generated strip cannot be rendered 180° away from its order.
 
 ### Shipped vertical-slice assets
 
-| File | Grid | Runtime role |
-|---|---:|---|
-| `last-light-units-atlas-v001.png` | 3×2 | Six unit idle silhouettes |
-| `warden-move-strip-v001.png` | 6×1 | Per-Warden locomotion clip |
-| `engineer-move-strip-v001.png` | 6×1 | Engineer manipulator locomotion |
-| `engineer-repair-strip-v001.png` | 6×1 | Tool deploy, repair beam, sparks, and recovery |
-| `surveyor-scan-strip-v001.png` | 6×1 | Survey mast sweep and cyan scan fan |
-| `needle-attack-strip-v001.png` | 6×1 | Choir Needle charge, lance, and recoil |
-| `canticle-command-strip-v001.png` | 6×1 | Canticle charge, command rings, and release |
-| `bell-mine-arm-strip-v001.png` | 6×1 | Mine apertures, warning arcs, and armed recoil |
-| `unit-hit-reactions-atlas-v001.png` | 4×6 | Full-roster impact, spark, and recovery reactions |
-| `unit-down-reactions-atlas-v001.png` | 4×6 | Full-roster non-gory shutdown and persistent wrecks |
-| `last-light-structures-atlas-v001.png` | 2×2 | Relay, fabricator, reactor, Choir tower |
-| `reactor-sector-v001.png` | single | 2600×1460 authored mission floor |
-| `portraits/lantern-command-portrait-sheet-v001.png` | 3×2 | Mara, Ivo, Sena, Olan, Vale, and Lumen comms portraits |
+| File | Pixel size | Grid | Runtime role |
+|---|---:|---:|---|
+| `last-light-units-atlas-v001.png` | 1536×1024 | 3×2 | Six unit idle silhouettes |
+| `warden-move-strip-v001.png` | 2172×724 | 6×1 | Per-Warden locomotion clip (high-resolution shield silhouette) |
+| `warden-attack-strip-v001.png` | 1280×256 | 5×1 | Warden shield-lance charge, fire, recoil, and settle |
+| `engineer-move-strip-v001.png` | 1536×256 | 6×1 | Engineer manipulator locomotion |
+| `engineer-repair-strip-v001.png` | 1536×256 | 6×1 | Tool deploy, repair beam, sparks, and recovery |
+| `surveyor-move-strip-v001.png` | 1536×256 | 6×1 | Surveyor scout locomotion |
+| `surveyor-scan-strip-v001.png` | 1536×256 | 6×1 | Survey mast sweep and cyan scan fan |
+| `needle-attack-strip-v001.png` | 1536×256 | 6×1 | Choir Needle charge, lance, and recoil |
+| `canticle-command-strip-v001.png` | 1536×256 | 6×1 | Canticle charge, command rings, and release |
+| `bell-mine-arm-strip-v001.png` | 1536×256 | 6×1 | Mine apertures, warning arcs, and armed recoil |
+| `unit-hit-reactions-atlas-v001.png` | 1024×1536 | 4×6 | Full-roster impact, spark, and recovery reactions |
+| `unit-down-reactions-atlas-v001.png` | 1024×1536 | 4×6 | Full-roster non-gory shutdown and persistent wrecks |
+| `last-light-structures-atlas-v001.png` | 1254×1254 | 2×2 | Relay, fabricator, reactor, Choir tower |
+| `resource-node-atlas-v001.png` | 512×512 | 2×2 | Salvage and Flux mine nodes, idle and active frames |
+| `resource-harvest-effects-v001.png` | 512×512 | 2×2 | Extraction beams, cargo lift, and depleted-node pulse |
+| `reactor-sector-v001.png` | 1672×941 | 1×1 | Authored mission floor plate |
+| `portraits/lantern-command-portrait-sheet-v001.png` | 768×512 | 3×2 | Mara, Ivo, Sena, Olan, Vale, and Lumen comms portraits |
+
+`games/last-light/src/assets.rs` is the executable catalog for this table. Its
+embedded PNG-header tests fail when a file is replaced without updating the
+pixel-size or grid contract, which prevents a UV crop from silently pointing
+at the wrong frame. The Warden strip is intentionally retained at its
+high-resolution source size; atlas UVs remain normalized and the other
+runtime strips stay on the 256-pixel cell standard.
+
+The resource-node atlas is ordered as Salvage idle, Flux idle, Salvage active,
+Flux active. The renderer selects the active frame only while a Surveyor is
+working the node, so the mine reads as a living gameplay object without adding
+HUD clutter or unbounded world text.
+
+The harvest-effects atlas is ordered as Salvage extraction, Flux extraction,
+returning cargo, and depleted pulse. These are state-driven overlays rather
+than replacement node art; they are drawn only while a Surveyor job is active
+or while a selected/occupied node needs to communicate that it is dry.
+
+The catalog also validates the semantic grid for each presentation role before
+shipping: the environment plate is 1×1, unit and portrait sheets are 3×2,
+animation strips are single-row (four or more frames), reaction atlases are
+4×6, structure atlases are 2×2, resource atlases are 2×2, and resource effect
+atlases are 2×2. This catches a dimensionally valid PNG that
+would still crop the wrong comms portrait, reaction row, or building frame.
+Run `cargo test -p last_light assets::tests` after replacing generated art.
+
+### Player-visible state ledger
+
+`games/last-light/src/assets.rs` also exposes
+`PLAYER_VISIBLE_ART_STATES`, a small coverage ledger for every state that can
+appear in the tactical view. Each entry names one of three sources:
+
+| Source | Meaning |
+|---|---|
+| `Atlas` | A contiguous, validated frame range in a shipped PNG. |
+| `ProceduralFallback` | A deliberate runtime composition such as the Warden shield beam or structure boot/damage overlay. |
+| `PlannedAsset` | A named state that still needs dedicated authored art; it must not silently fall back to an idle frame. |
+
+Warden attack, Engineer build, Surveyor move, and Surveyor mark have been
+promoted to normalized runtime atlases (`warden-attack-strip-v001.png`,
+`engineer-build-strip-v001.png`, `surveyor-move-strip-v001.png`, and
+`surveyor-mark-strip-v001.png`) and are selected by their corresponding runtime
+states. The executable
+`NEXT_PASS_ART_CONTRACTS` table and companion
+[`player-visible-art-gap-contract.yaml`](../tools/asset-sources/last-light/player-visible-art-gap-contract.yaml).
+The table is intentionally empty while no planned player-visible strip
+remains. The existing Engineer repair and Surveyor scan strips have different
+action semantics and remain separate from the marking art.
+Structure offline/boot/damaged states remain readable procedural compositions;
+the Warden attack state is now a promoted five-frame authored strip. Any future
+strip should first add a new planned entry, then replace it only after adding the normalized PNG to
+`TextureAsset` and wiring its runtime state; the range, origin, and coverage
+tests will catch a wrong grid, frame origin, or crop before the native or
+browser build can ship it.
 
 ### Reaction-atlas contract
 
@@ -201,6 +288,18 @@ games/last-light/assets/
 Stable engine manifest keys use dots, independent of filenames:
 `lantern.warden.move`, `choir.sentinel.idle`, `sector.reactor.floor`,
 `ui.cursor.repair`.
+
+## App cover art
+
+Final app cover is stored under:
+
+- `games/last-light/assets/cover/aurora-last-light-cover-v001.png`
+- Source/pre-render asset: `tools/asset-sources/last-light/cover/aurora-last-light-cover-v001-source.png`
+
+Current cover is a high-resolution in-game briefing frame converted to 16:9
+render size and used for storefront, launcher, and repository references. Treat
+it as marketing/UX-facing art rather than gameplay runtime content: do not add it
+to the in-game `TextureAsset` atlas registry.
 
 ## Generated-strip normalization recipe
 

@@ -2,6 +2,7 @@
 //!
 //! Fast Rust game engine powered by **wgpu** — desktop + browser (WebGPU).
 
+pub mod abilities;
 pub mod ai;
 pub mod app;
 pub mod assets;
@@ -32,6 +33,7 @@ pub mod time;
 pub mod trace;
 pub mod ui;
 
+pub use abilities::CooldownBook;
 pub use ai::{mark_obstacles, AiParams, SimpleAggroAi};
 pub use app::{run, FrameCtx, Game, TriangleDemo};
 pub use assets::{
@@ -57,11 +59,12 @@ pub use renderer::Mesh3DHandle;
 pub use renderer::{GpuContext, PointLight, RenderQuality, Renderer};
 pub use renderer::{RenderStats, TextureHandle};
 pub use rts::{
-    ArmorClass, DamageType, FactionId, FogOfWar, FogState, MinimapTransform, NavGrid,
-    PlacementError, PlacementRules, PowerGrid, PowerNode, PowerNodeId, ProductId, ProductionItem,
-    ProductionQueue, ProductionRecipe, QueueError, ResourceBank, ResourceCost, ResourceSet,
-    RtsUnit, RtsWorld, Selection, SelectionBox, SupplyLedger, TechGraph, TechId, TerrainZone,
-    UnitId, UnitOrder,
+    ArmorClass, BuildId, BuildItem, BuildQueue, BuildQueueError, BuildRecipe, DamageType,
+    FactionId, FogOfWar, FogState, MinimapTransform, NavGrid, PlacementError, PlacementRules,
+    PowerGrid, PowerNode, PowerNodeId, ProductId, ProductionCancelError, ProductionCancelReceipt,
+    ProductionItem, ProductionQueue, ProductionRecipe, QueueError, ResourceBank, ResourceCost,
+    ResourceSet, RtsUnit, RtsWorld, Selection, SelectionBox, SupplyLedger, SupplyQueueError,
+    TechGraph, TechId, TerrainClass, TerrainReadout, TerrainZone, UnitId, UnitOrder,
 };
 pub use save::{SaveEnvelope, SaveError, SaveStore, DEFAULT_SAVE_SLOT};
 pub use scene::{EntityId, Scene};

@@ -10,11 +10,18 @@ from pathlib import Path
 from PIL import Image
 
 
-def background_candidate(pixel: tuple[int, int, int], dark_background: bool) -> bool:
+def background_candidate(
+    pixel: tuple[int, int, int], dark_background: bool, neutral_matte: bool
+) -> bool:
     low = min(pixel)
     high = max(pixel)
     if dark_background:
         return high <= 28
+    if neutral_matte:
+        # Generated checkerboards often use a darker neutral tile around
+        # 205–220 and a lighter tile around 235–245. Treat both as matte only
+        # when the source corners already prove the canvas is grayscale.
+        return low >= 185 and high - low <= 18
     return low >= 220 and high - low <= 18
 
 
@@ -30,6 +37,11 @@ def extract_alpha(image: Image.Image) -> Image.Image:
         pixels[width - 1, height - 1],
     ]
     dark_background = sum(sum(pixel) for pixel in corners) / 12 < 64
+    neutral_matte = (
+        not dark_background
+        and all(max(pixel) - min(pixel) <= 8 for pixel in corners)
+        and min(min(pixel) for pixel in corners) >= 185
+    )
     source_alpha = source.getchannel("A")
     alpha_pixels = source_alpha.load()
     visited = bytearray(width * height)
@@ -38,7 +50,7 @@ def extract_alpha(image: Image.Image) -> Image.Image:
     def enqueue(x: int, y: int) -> None:
         index = y * width + x
         removable = alpha_pixels[x, y] == 0 or background_candidate(
-            pixels[x, y], dark_background
+            pixels[x, y], dark_background, neutral_matte
         )
         if not visited[index] and removable:
             visited[index] = 1

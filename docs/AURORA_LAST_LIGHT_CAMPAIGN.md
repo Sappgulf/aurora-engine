@@ -17,6 +17,9 @@ The strategic question is: **do we repair Aurora, control it, or let it die?**
   and interact orders.
 - Reclaim dark station sectors by restoring relay power.
 - Build a connected field network: relay, fabricator, turret, med-bay, sensor.
+- Read the tactical ground: cyan ridges grant high-ground advantage, while
+  violet pockets soften incoming fire; the same authored zones appear in the
+  world and on the minimap.
 - Protect named specialists whose abilities unlock alternate mission routes.
 - Read enemy intent through silhouettes, telegraphs, light, and sound.
 - Make campaign decisions that alter allies, upgrades, and the final mission.
@@ -123,6 +126,70 @@ by the same data model as the simulation: relay activation, delivered Salvage,
 enemy-funded raids, and unit defeats can all advance a radio line without
 renderer-specific scripting.
 
+Terrain is authored per mission as a small set of deterministic `TerrainZone`
+bands. A positive elevation band represents a ridge/high-ground position and a
+cover value reduces damage inside either band; movement remains free-form, but
+the combat resolver applies the same zone data to every attacker and target.
+Keep these zones broad enough to create a choice (approach, hold, or flank),
+and use the cyan/violet minimap key rather than adding floating labels over the
+playfield.
+
+Surveyor harvest orders are persistent field jobs: a worker fills a 24-unit
+cargo hold, returns to the Fabricator, and resumes the same node while it has
+stock and an open worker slot. When a pocket is exhausted, the route chooses
+the nearest unsaturated node deterministically. Choir attacks expose their
+current target with a short magenta warning pulse before damage, giving Mara's
+line time to reposition, repair, or spend a specialist ability.
+
+## Campaign chapters
+
+The current playable order is intentionally compact but no longer a single
+vertical slice:
+
+1. **Reclaim the Reactor** — restore the three-relay lattice and silence the
+   Canticle; this establishes contact with Lumen.
+2. **A Voice in Conduit Twelve** — escort Sena through the maintenance spine;
+   elevation, obstacles, and formation discipline matter more than production.
+3. **Terms of Salvage** — claim the vault under Prefect Vale's scrutiny; the
+   victory records `meridian-allied` and enables Meridian briefing accords.
+4. **The Garden Below** — escort Sena to the Verdant array while optional
+   relays fund the route; the victory records `verdant-cultivated` and enables
+   Verdant briefing covenants.
+5. **Choir Invisible** — expose Cantor Nine's hidden relay lattice from a
+   contested signal cache, then hold the eastern sensor deck long enough for
+   Sena to map the Choir's approach. Victory records `choir-invisible-cleared`
+   and opens the next campaign tier.
+6. **The Vesper Gate** — reopen the auxiliary reactor corridor behind two
+   dead gate walls. Sena secures the false-exit cache, Ivo repairs the reactor,
+   and Mara holds the eastern ridge while the Vesper route comes back online.
+   Victory records `vesper-gate-open` and opens the next campaign tier.
+7. **The Hollow Orbit** — anchor the eastern ridge, secure a dead-orbit cache
+   under Canticle fire, and escort the Engineer through a mined coolant lane.
+   The chapter records `hollow-orbit-anchored` and makes each specialist's
+   counterplay job explicit before the first gated objective.
+
+Each chapter uses the same mission contract, so later chapters can add new
+objectives or faction pressure without duplicating the renderer or input
+stack. Choir Invisible is the first chapter to combine a finite resource
+contract with a terrain-control hold: the Surveyor secures the middle cache
+while Mara contests the larger pressure radius, then the Warden claims the
+high-ground relay deck. The authored four-wall blackout layout leaves a safe
+maintenance lane and a faster exposed route, so the map changes the decision
+without changing the shared simulation contract.
+
+The Vesper Gate extends that contract into a three-role branch beat: the
+Surveyor must remain on the middle cache, the Engineer must repair the exposed
+auxiliary reactor, and the Warden must hold the eastern relay ridge. Two gate
+walls split the safe maintenance lane from the northern Flux flank, making
+formation movement and support timing part of the story rather than optional
+map decoration.
+
+The Hollow Orbit turns that branch into an orbital-ring assault. A covered
+opening pocket feeds the first production cycle, a dead-orbit cache is exposed
+to Canticle fire, and a mined coolant lane asks the Warden to clear Bell Mines
+without chasing Needle bait. The eastern ridge, Surveyor cache, and Engineer
+reactor are separate objectives so the player must sequence all three roles.
+
 ## Lumen upgrade lattice
 
 Campaign Lumen is earned once per mission completion and spent permanently from
@@ -159,6 +226,21 @@ horizontal mission choices, not permanent power purchases: `V` cycles Ivo and
 The default mission posture is Relay Rigger, Deep Scan, Rescue Screen, and
 Lattice Audit. Completing Reclaim the Reactor records Lumen contact and unlocks
 an additional `L` briefing choice:
+
+During a mission, the named field specialists also have one readable active
+signature on `Y` (the contextual command card only shows it for a single-role
+selection):
+
+| Specialist | Signature | Effect | Recharge |
+|---|---|---|---:|
+| Mara Vey / Warden | Command Surge | The selected Warden deals 35% more damage for 6 seconds | 18 s |
+| Ivo Rook / Engineer | Emergency Repair | Repairs the most damaged nearby Lantern or structure for 90/120 HP | 20 s |
+| Sena Quill / Surveyor | Scan Pulse | Reveals a large tactical ring for 5 seconds | 16 s |
+
+These actions are deterministic simulation state, not presentation-only buffs,
+so native play, browser play, and truth traces agree about timing. Radio lines
+queue in the comms inbox and `Space` centers the last transmission, giving a
+story beat a spatial consequence instead of leaving it as unanchored text.
 
 | Relationship protocol | Mission effect | Character expression |
 |---|---|---|

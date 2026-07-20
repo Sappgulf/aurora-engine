@@ -14,7 +14,14 @@ if [[ -z "$WASM" ]]; then
 fi
 
 wasm_bytes="$(stat -f '%z' "$WASM")"
-asset_bytes="$(find "$ROOT/games/last-light/assets" -type f -name '*.png' -exec stat -f '%z' {} \; | awk '{sum += $1} END {print sum + 0}')"
+# Only tracked source art is part of the reproducible web artifact. This
+# intentionally ignores local exploration copies (for example, a designer's
+# "asset 2.png") without deleting or hiding them from the working tree.
+asset_bytes=0
+while IFS= read -r -d '' asset; do
+  [[ "$asset" == *.png ]] || continue
+  asset_bytes=$((asset_bytes + $(stat -f '%z' "$ROOT/$asset")))
+done < <(git -C "$ROOT" ls-files -z -- 'games/last-light/assets')
 
 echo "Last Light WASM: $wasm_bytes bytes (budget $MAX_WASM_BYTES)"
 echo "Last Light source PNGs: $asset_bytes bytes (budget $MAX_SOURCE_ASSET_BYTES)"

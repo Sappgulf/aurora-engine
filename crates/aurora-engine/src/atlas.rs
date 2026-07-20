@@ -30,7 +30,9 @@ impl TextureAtlas {
         self.columns * self.rows
     }
 
-    /// UV min/max for frame index (wraps).
+    /// UV min/max for frame index (wraps), using the source image's top row
+    /// as atlas row zero. The renderer maps this image-space rectangle onto
+    /// the engine's Y-up world quad in `sprite_corner_uvs`.
     pub fn uv_rect(&self, frame: u32) -> (Vec2, Vec2) {
         let count = self.frame_count();
         let frame = frame % count;
@@ -41,7 +43,27 @@ impl TextureAtlas {
         // Image rows top→bottom; V increases down in UV.
         let u0 = col as f32 * fw;
         let v0 = row as f32 * fh;
-        (Vec2::new(u0, v0), Vec2::new(u0 + fw, v0 + fh))
+        let u1 = u0 + fw;
+        let v1 = v0 + fh;
+
+        // Keep linear filtering inside the selected frame. This matters for
+        // generated strips such as Warden's 6×1 sheet, which intentionally
+        // omit gutters to preserve their large source silhouette. A zero or
+        // invalid texture size is retained as an explicit compatibility path
+        // for callers that only need normalized UVs in tests/tools.
+        if self.texture_size.x.is_finite()
+            && self.texture_size.y.is_finite()
+            && self.texture_size.x > 0.0
+            && self.texture_size.y > 0.0
+        {
+            let inset = Vec2::new(0.5 / self.texture_size.x, 0.5 / self.texture_size.y);
+            (
+                Vec2::new(u0 + inset.x, v0 + inset.y),
+                Vec2::new(u1 - inset.x, v1 - inset.y),
+            )
+        } else {
+            (Vec2::new(u0, v0), Vec2::new(u1, v1))
+        }
     }
 
     pub fn apply_frame(&self, sprite: &mut Sprite, frame: u32) {
@@ -223,6 +245,36 @@ mod tests {
         animation.tick(1.0);
         assert!(animation.finished());
         assert_eq!(animation.frame(), 4);
+    }
+
+    #[test]
+    fn atlas_rows_are_top_origin_before_world_uv_mapping() {
+        let atlas = TextureAtlas::new(TextureHandle::default(), 2, 2, Vec2::splat(64.0));
+        let inset = 0.5 / 64.0;
+        assert_eq!(
+            atlas.uv_rect(0),
+            (Vec2::new(inset, inset), Vec2::new(0.5 - inset, 0.5 - inset))
+        );
+        assert_eq!(
+            atlas.uv_rect(2),
+            (
+                Vec2::new(inset, 0.5 + inset),
+                Vec2::new(0.5 - inset, 1.0 - inset)
+            )
+        );
+    }
+
+    #[test]
+    fn atlas_uvs_inset_each_frame_to_prevent_linear_bleed() {
+        let atlas = TextureAtlas::new(TextureHandle::default(), 6, 1, Vec2::new(2172.0, 724.0));
+        let (first_min, first_max) = atlas.uv_rect(0);
+        let (second_min, second_max) = atlas.uv_rect(1);
+        let texel_x = 0.5 / 2172.0;
+        assert_eq!(first_min.x, texel_x);
+        assert_eq!(first_max.x, 1.0 / 6.0 - texel_x);
+        assert_eq!(second_min.x, 1.0 / 6.0 + texel_x);
+        assert_eq!(second_max.x, 2.0 / 6.0 - texel_x);
+        assert!(first_max.x < second_min.x);
     }
 
     #[test]

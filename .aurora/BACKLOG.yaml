@@ -26,26 +26,89 @@ tasks:
     priority: P0
     owner: devtools_playtest
     title: Headless Reclaim scenario and event log
-    status: pending
+    status: complete
     depends_on: [FOUNDRY-002]
   - id: FOUNDRY-004
     priority: P0
     owner: browser_platform
     title: Trunk browser scenario and screenshot harness
-    status: pending
+    status: complete
     depends_on: [FOUNDRY-003]
   - id: ENGINE-RENDER-001
     priority: P0
     owner: engine
     title: Reusable renderer frame scratch storage
-    status: pending
+    status: in_progress
   - id: ENGINE-UI-001
     priority: P0
     owner: engine
     title: Generic font-atlas UI and game-owned screens
-    status: pending
+    status: complete
   - id: ENGINE-RTS-001
     priority: P0
     owner: engine
     title: Generation-safe RTS storage and queued orders
-    status: pending
+    status: complete
+
+  - id: FOUNDRY-007
+    priority: P0
+    owner: last_light_simulation
+    title: Contextual specialist abilities, worker saturation, and comms inbox
+    status: complete
+    depends_on: [FOUNDRY-006]
+    acceptance:
+      - Warden, Engineer, and Surveyor expose distinct deterministic abilities
+      - finite resource nodes report and enforce worker saturation
+      - radio lines queue and retain a world-space focus position
+      - native and browser builds share the same cooldown ledger
+
+  - id: FOUNDRY-008
+    priority: P1
+    owner: campaign_content
+    title: Larger terrain pass and structure build queues
+    status: complete
+    depends_on: [FOUNDRY-007]
+    acceptance:
+      - Terms of Salvage resolves a high-ground ridge over a covered relay apron
+      - terrain-control progress stalls while a Choir contact contests the ridge
+      - runtime HUD and Mara comms expose Warden ridge completion
+      - structures disclose booting, offline, online, and damaged states
+      - Fabricator module/resource gates stay inside the compact command-card width
+
+  - id: FOUNDRY-009
+    priority: P1
+    owner: campaign_content
+    title: Campaign branch beats and combat/terrain browser coverage
+    status: complete
+    depends_on: [FOUNDRY-008]
+    acceptance:
+      - Mission 6 Choir Invisible ships with blackout blockers, a contested resource cache, and a high-ground sensor deck
+      - Shift + right-click queues an enemy attack without interrupting the current order
+      - player-visible art states are classified as atlas-backed, procedural, or explicitly planned
+      - browser playtests cover combat telegraphs and terrain contest transitions
+      - Engineer build, Surveyor move, and Surveyor mark use promoted authored strips with runtime animation coverage
+
+  - id: FOUNDRY-010
+    priority: P1
+    owner: campaign_content
+    title: Late-campaign counterplay, authored attack art, and Stop semantics
+    status: complete
+    depends_on: [FOUNDRY-009]
+    acceptance:
+      - Mission 7 The Vesper Gate follows Choir Invisible at required tier 7 and records the vesper-gate-open decision
+      - Mission 8 The Hollow Orbit adds a 1.18x orbital map with safe opening income, contested dead-orbit cache, mined coolant lane, and separate ridge hold
+      - Surveyor cache security, Engineer reactor repair, and Warden ridge control remain role-gated with non-collapsed routes
+      - native and browser playtests open both late-mission briefings and tactical maps from progressed campaign saves
+      - Warden attack uses a promoted authored five-frame strip, and the engine Stop command clears selected queued work without becoming Hold
+
+  - id: FOUNDRY-011
+    priority: P1
+    owner: campaign_content
+    title: Faction counterplay and landmark art follow-through
+    status: in_progress
+    depends_on: [FOUNDRY-010]
+    acceptance:
+      - each Lantern role has a named Choir counter and a readable telegraph before the next objective gate
+      - at least one authored landmark asset communicates a new route or production decision without baking gameplay state into the floor plate
+      - production, scouting, and resource return remain visible through contextual cards and transient comms rather than permanent HUD text
+      - native and browser playtests cover the new encounter without HUD overlap or art-orientation regressions

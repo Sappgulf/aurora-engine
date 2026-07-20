@@ -1,0 +1,76 @@
+version: 1
+game: aurora-last-light
+status: complete
+frame_origin: top-left
+runtime_cell: [256, 256]
+normalization:
+  command: >-
+    python3 tools/normalize_generated_strip.py --input <candidate.png>
+    --output games/last-light/assets/<clip>-strip-v001.png
+    --frames <frames> --frame-size 256
+  requirements:
+    - transparent RGBA output
+    - one shared bottom-center anchor for all Lantern mobile units
+    - no baked text, shadow, selection ring, or terrain
+    - inspect on both dark and bright floor regions before catalog promotion
+
+# Warden attack, Engineer build, Surveyor move, and Surveyor mark were promoted
+# after their generated candidates were normalized, visually inspected, and
+# runtime-wired.
+clips:
+  - key: warden.attack
+    output: games/last-light/assets/warden-attack-strip-v001.png
+    source: tools/asset-sources/last-light/warden-attack-strip-v001-source.png
+    frames: 5
+    playback_fps: [6, 12]
+    anchor: bottom-center
+    visual_intent: >-
+      Shield projector charge, compact cyan lance, peak fire, shield-facet
+      recoil, and a guarded settle; keep the Warden's broad cyan silhouette
+      readable at tactical zoom.
+    current_runtime: shipped
+    promotion_gate: >-
+      Promoted: TextureAsset::WardenAttack uses the normalized 5x1 atlas and
+      UnitAnimationState::Attack selects it for Warden combat.
+
+  - key: engineer.build
+    output: games/last-light/assets/engineer-build-strip-v001.png
+    source: tools/asset-sources/last-light/engineer-build-strip-v001-source.png
+    frames: 8
+    playback_fps: [6, 12]
+    anchor: bottom-center
+    visual_intent: >-
+      Clamp deployment, scaffold rise, weld sparks, and a settled build pose;
+      the tool rig must remain amber and distinct from the repair beam.
+    current_runtime: shipped
+    promotion_gate: >-
+      Promoted: TextureAsset::EngineerBuild uses the normalized 8x1 atlas and
+      UnitAnimationState::Build selects it at runtime.
+
+  - key: surveyor.move
+    output: games/last-light/assets/surveyor-move-strip-v001.png
+    source: tools/asset-sources/last-light/surveyor-move-strip-v001-source.png
+    frames: 6
+    playback_fps: [6, 12]
+    anchor: bottom-center
+    visual_intent: >-
+      Low scout chassis stride with a stable sensor mast and readable leg
+      cadence; do not reuse the scan fan or the idle roster frame.
+    current_runtime: shipped
+    promotion_gate: >-
+      Promoted: TextureAsset::SurveyorMove uses the normalized 6x1 atlas and
+      UnitAnimationState::Move selects it for Surveyor traversal.
+
+  - key: surveyor.mark
+    output: games/last-light/assets/surveyor-mark-strip-v001.png
+    source: tools/asset-sources/last-light/surveyor-mark-strip-v001-source.png
+    frames: 4
+    playback_fps: [6, 12]
+    anchor: bottom-center
+    visual_intent: >-
+      Mast lock, target bracket, cyan designation pulse, and release; the mark
+      cue must remain legible without painting a marker into the unit silhouette.
+    current_runtime: shipped
+    promotion_gate: >-
+      Promoted: TextureAsset::SurveyorMark uses the normalized 4x1 atlas and
+      UnitAnimationState::Mark selects it at runtime.

@@ -2,7 +2,7 @@
 
 **Fast Rust game engine · beautiful wgpu graphics · desktop + browser**
 
-> Status: **v0.3 / Milestone 3 RTS** — point-and-click command simulation, authored campaign, native + browser.
+> Status: **v0.4 / Milestone 4 campaign** — point-and-click command simulation, six authored missions, native + browser.
 
 ## Play now
 
@@ -18,17 +18,22 @@ cargo run -p last_light
 | **Space / Enter** | Deploy from mission briefing |
 | **Left click / drag** | Select one unit or a squad |
 | **Shift + select** | Add units to the current selection |
+| **Ctrl/Cmd + left click** | Select every visible living unit of that type |
+| **Shift + Ctrl/Cmd + left click** | Add every living unit of that type |
 | **Right click** | Move or attack contextually |
-| **Shift + right click** | Queue a waypoint after the current order |
+| **Shift + right click** | Queue a waypoint or enemy attack after the current order |
 | **A, then right click** | Attack-move to a destination |
 | **P, then right click** | Patrol between the current position and a waypoint |
 | **U, then right click** | Follow a friendly unit |
 | **Q / E / F** | Queue Warden / Engineer / Surveyor |
-| **D (Fabricator selected)** | Buy a Supply Module (+4 capacity, 100 Salvage) |
+| **Y (single role selected)** | Activate Command Surge / Emergency Repair / Scan Pulse |
+| **G (Surveyor selected)** | Route to the closest finite resource node; workers return cargo and retarget when a pocket dries up |
+| **D (Fabricator selected)** | Queue a powered Supply Module (+4 capacity, 100 Salvage, 6s build) |
 | **B, then left click** | Preview and deploy a powered field beacon |
 | **H** | Hold selected units in position |
 | **T** | Stop selected units and clear their queued paths |
 | **R** | Focus the tactical camera on the next mission objective |
+| **Space (tactical)** | Center the latest comms transmission; in briefing, deploy |
 | **Cmd/Ctrl + 1–5** | Assign a control group |
 | **1–5** | Recall and focus a control group |
 | **WASD / screen edge** | Pan tactical camera |
@@ -39,7 +44,13 @@ cargo run -p last_light
 
 On launch, `Up/Down` (or `Left/Right`) pick a mission from the mission-select
 screen and `Space/Enter` deploy — mission 3, "A Voice in Conduit Twelve,"
-unlocks after completing "Reclaim the Reactor." During mission 3, `K` near
+unlocks after completing "Reclaim the Reactor." Mission 4, "Terms of Salvage,"
+opens the Meridian branch; mission 5, "The Garden Below," opens the Verdant
+branch; mission 6, "Choir Invisible," turns blackout terrain into a resource
+and sensor puzzle; mission 7, "The Vesper Gate," combines Surveyor cache
+security, Engineer reactor repair, and Warden ridge control into a coordinated
+gate assault; mission 8, "The Hollow Orbit," adds a mined coolant lane and a
+Canticle-exposed dead-orbit cache. During mission 3, `K` near
 the extraction console (while an Engineer is selected and in range) wakes
 Lumen.
 
@@ -50,6 +61,15 @@ immediately. `M` cycles Mara's command doctrine and `O` cycles Olan's analysis
 package. After establishing contact with Lumen, `L` cycles the relationship-gated
 Guardian and Witness protocols. Later campaign decisions unlock `P` for Meridian
 Bastion/Charter accords and `G` for Verdant Bloom/Briar covenants.
+
+The command card is contextual: a mixed squad exposes production and squad
+orders, while a single Warden, Engineer, or Surveyor exposes that role's
+signature ability. Radio lines queue in the upper-right comms inbox; press
+`Space` to revisit the location that prompted the latest transmission. Resource
+nodes have visible worker saturation, so sending a second Surveyor is a
+deliberate throughput decision rather than a hidden no-op. Visible Choir attacks
+also telegraph their current target with a faction-colored line and pulse before
+damage lands, giving the player a readable chance to reposition or repair.
 
 Select the Engineer and command it near each of the three power relays. Active
 relays generate Salvage for the Lantern fabricator; violet Flux blooms fund
@@ -99,10 +119,12 @@ cargo run -p skirmish        # free-play two-base RTS skirmish vs. the engine's 
 | Save/settings + audio mixer contracts | ✅ |
 | Tile collisions/triggers + camera rig | ✅ |
 | Diagnostics + asset loading queue | ✅ foundation |
+| Deterministic cooldown ledger for gameplay abilities | ✅ |
 | Feature-gated 3D mesh pipeline (depth-tested, single-light PBR) | ✅ core |
 | RTS selection, formations, orders, navigation, fog | ✅ |
 | RTS economy, two-resource production, supply, tech prerequisites, power graphs, control groups | ✅ |
 | Attack-move, patrol, follow, queued waypoints | ✅ |
+| Contextual specialist command cards, signature abilities, and comms inbox | ✅ |
 | Combat damage classes, armor, elevation, and cover zones | ✅ |
 | Structure lifecycle (health/build/power) and Engineer repairs | ✅ |
 | Economy-aware Choir raids and data-driven campaign triggers | ✅ |
@@ -113,10 +135,10 @@ cargo run -p skirmish        # free-play two-base RTS skirmish vs. the engine's 
 | Relationship-gated Lumen Guardian/Witness protocols | ✅ |
 | Meridian and Verdant alliance doctrine foundations | ✅ |
 | Versioned campaign progress with v1 save migration | ✅ |
-| Data-driven mission definitions + in-game mission select | ✅ 3-mission campaign |
+| Data-driven mission definitions + in-game mission select | ✅ 7-mission campaign |
 | Generic `SimpleAggroAi` (target scoring, retreat, focus-fire, `NavGrid` pathing) | ✅ |
 | Skirmish free-play mode (reuses RTS core, no campaign/art dependency) | ✅ |
-| Last Light point-and-click campaign missions | ✅ 3-mission vertical slice |
+| Last Light point-and-click campaign missions | ✅ 7-mission vertical slice |
 
 ## Library sketch
 

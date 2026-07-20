@@ -110,6 +110,16 @@ pub enum QueueError {
     Full,
 }
 
+/// Admission failures for the supply-aware production path. This is kept
+/// separate from [`QueueError`] so existing games that exhaustively match the
+/// original queue API remain source-compatible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupplyQueueError {
+    InsufficientResources,
+    InsufficientSupply,
+    Full,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ResourceBank {
     amount: u32,
@@ -308,8 +318,57 @@ impl DamageType {
     }
 }
 
+/// Maximum cover fraction recognized by the tactical resolver.
+pub const TERRAIN_MAX_COVER: f32 = 0.3;
+
+/// Cover at or above this threshold is a meaningful covered pocket for
+/// tactical overlays and map-authoring previews.
+pub const TERRAIN_COVER_THRESHOLD: f32 = 0.2;
+
+/// Coarse strategic classification used by minimaps, terrain overlays, and
+/// authoring tools. The class intentionally stays independent of art assets:
+/// callers can choose their own palette or iconography for each class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TerrainClass {
+    Open,
+    Covered,
+    HighGround,
+    FortifiedHighGround,
+}
+
+impl TerrainClass {
+    pub const fn has_cover(self) -> bool {
+        matches!(self, Self::Covered | Self::FortifiedHighGround)
+    }
+
+    pub const fn is_high_ground(self) -> bool {
+        matches!(self, Self::HighGround | Self::FortifiedHighGround)
+    }
+}
+
+/// Stable, renderer-neutral terrain data for a minimap marker or context
+/// chip. Keeping cover as an integer percent makes this payload cheap to
+/// compare, serialize, and display in native and browser builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TerrainReadout {
+    pub class: TerrainClass,
+    pub elevation: i8,
+    pub cover_percent: u8,
+}
+
+impl TerrainReadout {
+    pub const fn has_cover(self) -> bool {
+        self.class.has_cover()
+    }
+
+    pub const fn is_high_ground(self) -> bool {
+        self.class.is_high_ground()
+    }
+}
+
 /// Authored strategic map metadata used by combat and future visibility or
-/// movement rules. `cover` is a 0..1 fraction; elevation is a relative band.
+/// movement rules. `cover` is a 0..1 fraction; the engine clamps it to the
+/// [`TERRAIN_MAX_COVER`] contract when classifying or resolving damage.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TerrainZone {
     pub bounds: Aabb,
@@ -330,13 +389,86 @@ impl TerrainZone {
         self.bounds.contains_point(position)
     }
 
+    /// Returns a finite cover value suitable for rendering or combat.
+    ///
+    /// Mission validators reject malformed values, but keeping this guard in
+    /// the engine prevents editor previews or runtime-authored maps from
+    /// turning a NaN/oversized cover value into non-deterministic colors or
+    /// damage.
+    pub fn normalized_cover(self) -> f32 {
+        if self.cover.is_finite() {
+            self.cover.clamp(0.0, TERRAIN_MAX_COVER)
+        } else {
+            0.0
+        }
+    }
+
+    /// Classifies this zone for a compact strategic overlay or authoring UI.
+    pub fn classification(self) -> TerrainClass {
+        match (
+            self.elevation > 0,
+            self.normalized_cover() >= TERRAIN_COVER_THRESHOLD,
+        ) {
+            (false, false) => TerrainClass::Open,
+            (false, true) => TerrainClass::Covered,
+            (true, false) => TerrainClass::HighGround,
+            (true, true) => TerrainClass::FortifiedHighGround,
+        }
+    }
+
+    /// Produces the compact payload used by tactical overlays and context
+    /// chips without exposing the zone's world-space bounds.
+    pub fn readout(self) -> TerrainReadout {
+        TerrainReadout {
+            class: self.classification(),
+            elevation: self.elevation,
+            cover_percent: (self.normalized_cover() * 100.0).round() as u8,
+        }
+    }
+
+    /// Returns a stable priority for resolving overlapping authored zones.
+    ///
+    /// Elevation is the primary tactical discriminator, followed by cover.
+    /// Cover is quantized to thousandths so callers can compare priorities
+    /// without relying on floating-point ordering or NaN behavior.
+    pub fn priority_key(self) -> (i16, u16) {
+        (
+            i16::from(self.elevation),
+            (self.normalized_cover() * 1_000.0).round() as u16,
+        )
+    }
+
+    /// Resolves the strongest authored zone at a world position.
+    ///
+    /// The returned index lets renderers/editor tools keep a stable link to
+    /// the original authoring entry. Higher elevation wins, then stronger
+    /// cover; equal-priority zones keep the lowest authored index so adding a
+    /// later decorative band cannot silently change an existing result.
+    pub fn resolve_at(position: Vec2, zones: &[Self]) -> Option<(usize, Self)> {
+        zones
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, zone)| zone.contains(position))
+            .max_by(|(left_index, left), (right_index, right)| {
+                left.priority_key()
+                    .cmp(&right.priority_key())
+                    .then_with(|| right_index.cmp(left_index))
+            })
+    }
+
+    /// Resolves only the compact terrain payload needed by a HUD or minimap.
+    pub fn resolve_readout_at(position: Vec2, zones: &[Self]) -> Option<(usize, TerrainReadout)> {
+        Self::resolve_at(position, zones).map(|(index, zone)| (index, zone.readout()))
+    }
+
     pub fn damage_multiplier(self, attacker_elevation: i8) -> f32 {
         let high_ground = if attacker_elevation < self.elevation {
             0.7
         } else {
             1.0
         };
-        high_ground * (1.0 - self.cover.clamp(0.0, 0.3))
+        high_ground * (1.0 - self.normalized_cover())
     }
 }
 
@@ -357,9 +489,32 @@ impl ProductionItem {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProductionReservation {
+    resource_cost: u32,
+    supply_cost: u32,
+}
+
+/// Failure reasons for cancelling a production item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductionCancelError {
+    InvalidIndex,
+    SupplyLedgerRequired,
+}
+
+/// Stable result returned after a production item is cancelled. The game can
+/// use this receipt for HUD feedback without reconstructing queue metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductionCancelReceipt {
+    pub product: ProductId,
+    pub refunded_resources: u32,
+    pub released_supply: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProductionQueue {
     items: VecDeque<ProductionItem>,
+    reservations: VecDeque<ProductionReservation>,
     capacity: usize,
 }
 
@@ -367,6 +522,7 @@ impl ProductionQueue {
     pub fn new(capacity: usize) -> Self {
         Self {
             items: VecDeque::new(),
+            reservations: VecDeque::new(),
             capacity: capacity.max(1),
         }
     }
@@ -386,13 +542,120 @@ impl ProductionQueue {
         if !resources.spend(recipe.cost) {
             return Err(QueueError::InsufficientResources);
         }
+        self.push_recipe(recipe, 0);
+        Ok(())
+    }
+
+    /// Enqueues a unit while atomically spending resources and reserving its
+    /// supply. Supply is reserved at queue admission, matching RTS behavior:
+    /// a player cannot over-queue units and discover the cap only on spawn.
+    /// Existing [`Self::enqueue`] remains available for games without supply.
+    pub fn enqueue_with_supply(
+        &mut self,
+        recipe: ProductionRecipe,
+        resources: &mut ResourceBank,
+        supply: &mut SupplyLedger,
+        supply_cost: u32,
+    ) -> Result<(), SupplyQueueError> {
+        if self.items.len() >= self.capacity {
+            return Err(SupplyQueueError::Full);
+        }
+        if resources.amount() < recipe.cost {
+            return Err(SupplyQueueError::InsufficientResources);
+        }
+        if supply.available() < supply_cost {
+            return Err(SupplyQueueError::InsufficientSupply);
+        }
+
+        // The preflight checks above make these operations infallible in the
+        // single-threaded simulation, while the rollback keeps the contract
+        // correct even if a future ResourceBank/SupplyLedger implementation
+        // adds additional admission rules.
+        if !supply.try_add(supply_cost) {
+            return Err(SupplyQueueError::InsufficientSupply);
+        }
+        if !resources.spend(recipe.cost) {
+            supply.release(supply_cost);
+            return Err(SupplyQueueError::InsufficientResources);
+        }
+        self.push_recipe(recipe, supply_cost);
+        Ok(())
+    }
+
+    fn push_recipe(&mut self, recipe: ProductionRecipe, supply_cost: u32) {
         let seconds = recipe.build_millis as f32 / 1000.0;
         self.items.push_back(ProductionItem {
             product: recipe.product,
             remaining_seconds: seconds,
             total_seconds: seconds,
         });
-        Ok(())
+        self.reservations.push_back(ProductionReservation {
+            resource_cost: recipe.cost,
+            supply_cost,
+        });
+    }
+
+    /// Cancels a legacy production item and refunds the requested percentage
+    /// of its original resource cost. Supply-backed items must use
+    /// [`Self::cancel_with_supply`] so a reserved cap cannot leak.
+    pub fn cancel(
+        &mut self,
+        index: usize,
+        resources: &mut ResourceBank,
+        refund_percent: u8,
+    ) -> Result<ProductionCancelReceipt, ProductionCancelError> {
+        self.cancel_internal(index, resources, None, refund_percent)
+    }
+
+    /// Cancels a supply-aware production item, refunds its deterministic cost
+    /// percentage, and releases the reserved supply in the same operation.
+    pub fn cancel_with_supply(
+        &mut self,
+        index: usize,
+        resources: &mut ResourceBank,
+        supply: &mut SupplyLedger,
+        refund_percent: u8,
+    ) -> Result<ProductionCancelReceipt, ProductionCancelError> {
+        self.cancel_internal(index, resources, Some(supply), refund_percent)
+    }
+
+    fn cancel_internal(
+        &mut self,
+        index: usize,
+        resources: &mut ResourceBank,
+        mut supply: Option<&mut SupplyLedger>,
+        refund_percent: u8,
+    ) -> Result<ProductionCancelReceipt, ProductionCancelError> {
+        let Some(reservation) = self.reservations.get(index).copied() else {
+            return Err(ProductionCancelError::InvalidIndex);
+        };
+        if reservation.supply_cost > 0 && supply.is_none() {
+            return Err(ProductionCancelError::SupplyLedgerRequired);
+        }
+
+        let Some(item) = self.items.remove(index) else {
+            return Err(ProductionCancelError::InvalidIndex);
+        };
+        let Some(reservation) = self.reservations.remove(index) else {
+            // The two deques are kept in lockstep by the queue's private
+            // helpers. Treat a broken invariant as an invalid cancellation
+            // rather than refunding against an unknown cost.
+            self.items.insert(index, item);
+            self.reservations.insert(index, reservation);
+            return Err(ProductionCancelError::InvalidIndex);
+        };
+        let refund_percent = u64::from(refund_percent.min(100));
+        let refunded_resources = ((u64::from(reservation.resource_cost) * refund_percent) / 100)
+            .min(u64::from(u32::MAX)) as u32;
+        resources.credit(refunded_resources);
+        if let Some(supply) = supply.as_mut() {
+            supply.release(reservation.supply_cost);
+        }
+        Ok(ProductionCancelReceipt {
+            product: item.product,
+            refunded_resources,
+            released_supply: reservation.supply_cost,
+        })
     }
 
     /// Advances only the front item and returns all products completed this tick.
@@ -409,6 +672,7 @@ impl ProductionQueue {
             }
             dt -= front.remaining_seconds.max(0.0);
             if let Some(item) = self.items.pop_front() {
+                self.reservations.pop_front();
                 completed.push(item.product);
             }
         }
@@ -419,6 +683,126 @@ impl ProductionQueue {
 impl Default for ProductionQueue {
     fn default() -> Self {
         Self::new(5)
+    }
+}
+
+/// Stable identifier for a structure or infrastructure build job. Games can
+/// map this to a structure kind without making the engine know about their
+/// content roster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BuildId(pub u16);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BuildRecipe {
+    pub build: BuildId,
+    pub build_seconds: f32,
+}
+
+impl BuildRecipe {
+    pub const fn new(build: BuildId, build_seconds: f32) -> Self {
+        Self {
+            build,
+            build_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildQueueError {
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BuildItem {
+    pub build: BuildId,
+    pub remaining_seconds: f32,
+    pub total_seconds: f32,
+}
+
+impl BuildItem {
+    pub fn progress(self) -> f32 {
+        if self.total_seconds <= f32::EPSILON {
+            1.0
+        } else {
+            (1.0 - self.remaining_seconds / self.total_seconds).clamp(0.0, 1.0)
+        }
+    }
+}
+
+/// A deterministic, renderer-free queue for infrastructure jobs. Unlike
+/// [`ProductionQueue`], it intentionally does not own a resource wallet:
+/// games can validate power, tech, and multi-resource costs before enqueueing
+/// a build while sharing the same bounded timing semantics.
+#[derive(Debug, Clone)]
+pub struct BuildQueue {
+    items: VecDeque<BuildItem>,
+    capacity: usize,
+}
+
+impl BuildQueue {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            items: VecDeque::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn items(&self) -> &VecDeque<BuildItem> {
+        &self.items
+    }
+
+    pub fn front(&self) -> Option<&BuildItem> {
+        self.items.front()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.items.len() >= self.capacity
+    }
+
+    pub fn enqueue(&mut self, recipe: BuildRecipe) -> Result<(), BuildQueueError> {
+        if self.is_full() {
+            return Err(BuildQueueError::Full);
+        }
+        let seconds = recipe.build_seconds.max(0.0);
+        self.items.push_back(BuildItem {
+            build: recipe.build,
+            remaining_seconds: seconds,
+            total_seconds: seconds,
+        });
+        Ok(())
+    }
+
+    /// Advances only the front job and returns every build completed during
+    /// this tick. Any elapsed time beyond one completion carries into the
+    /// next queued job, keeping large fixed-step updates deterministic.
+    pub fn update(&mut self, mut dt: f32) -> Vec<BuildId> {
+        let mut completed = Vec::new();
+        dt = dt.max(0.0);
+        while let Some(front) = self.items.front_mut() {
+            if front.remaining_seconds > dt {
+                front.remaining_seconds -= dt;
+                break;
+            }
+            dt -= front.remaining_seconds.max(0.0);
+            if let Some(item) = self.items.pop_front() {
+                completed.push(item.build);
+            }
+        }
+        completed
+    }
+}
+
+impl Default for BuildQueue {
+    fn default() -> Self {
+        Self::new(3)
     }
 }
 
@@ -531,6 +915,13 @@ pub struct RtsUnit {
     pub position: Vec2,
     pub velocity: Vec2,
     pub radius: f32,
+    /// Optional center-to-center firing distance for explicit `Attack`
+    /// orders. A zero value preserves the legacy behavior of walking all the
+    /// way to the target, which keeps non-combat users source-compatible.
+    /// Combat games should set this to their weapon range (or a small margin
+    /// below it) so units stop at a readable firing line instead of stacking
+    /// on the target's origin.
+    pub engagement_range: f32,
     pub speed: f32,
     pub health: f32,
     pub max_health: f32,
@@ -546,6 +937,7 @@ impl RtsUnit {
             position,
             velocity: Vec2::ZERO,
             radius: 28.0,
+            engagement_range: 0.0,
             speed: 180.0,
             health: 100.0,
             max_health: 100.0,
@@ -737,6 +1129,30 @@ impl RtsWorld {
         }
     }
 
+    /// Adds a caller-selected set of living units from one faction to the
+    /// current selection. Games use this for semantic selection gestures such
+    /// as Ctrl-clicking a unit type; the engine still validates ownership and
+    /// liveness so stale presentation IDs cannot leak into orders.
+    ///
+    /// Returning the number of accepted IDs gives a UI a cheap way to report
+    /// an empty result without inspecting the private selection buffer.
+    pub fn select_ids(&mut self, ids: &[UnitId], faction: FactionId, additive: bool) -> usize {
+        if !additive {
+            self.selection.clear();
+        }
+        let mut accepted = 0;
+        for id in ids.iter().copied() {
+            let valid = self
+                .unit(id)
+                .is_some_and(|unit| unit.alive() && unit.faction == faction);
+            if valid && !self.selection.contains(id) {
+                self.add_selected(id);
+                accepted += 1;
+            }
+        }
+        accepted
+    }
+
     pub fn select_bounds(&mut self, bounds: Aabb, faction: FactionId, additive: bool) {
         if !additive {
             self.selection.clear();
@@ -747,10 +1163,14 @@ impl RtsWorld {
             .filter(|unit| {
                 unit.alive()
                     && unit.faction == faction
-                    && unit.position.x >= bounds.min.x
-                    && unit.position.x <= bounds.max.x
-                    && unit.position.y >= bounds.min.y
-                    && unit.position.y <= bounds.max.y
+                    // Marquee selection is footprint-aware: a unit whose
+                    // visible body overlaps the drag box is selectable even
+                    // when its center is just outside the box.
+                    && Aabb::from_center_size(
+                        unit.position,
+                        Vec2::splat(unit.radius.max(0.0) * 2.0),
+                    )
+                    .intersects(bounds)
             })
             .map(|unit| unit.id)
             .collect();
@@ -767,36 +1187,18 @@ impl RtsWorld {
 
     /// Issue a move command with deterministic square-spiral formation slots.
     pub fn issue_move(&mut self, destination: Vec2, spacing: f32) {
-        let ids = self.selection.ids.clone();
-        let width = (ids.len() as f32).sqrt().ceil().max(1.0) as usize;
-        for (index, id) in ids.into_iter().enumerate() {
-            let column = index % width;
-            let row = index / width;
-            let centered = Vec2::new(
-                column as f32 - (width.saturating_sub(1)) as f32 * 0.5,
-                row as f32
-                    - self.selection.ids.len().div_ceil(width).saturating_sub(1) as f32 * 0.5,
-            );
+        for (id, target) in self.formation_destinations(destination, spacing) {
             if let Some(unit) = self.unit_mut(id) {
-                unit.order = UnitOrder::Move(destination + centered * spacing.max(0.0));
+                unit.order = UnitOrder::Move(target);
                 unit.queued_orders.clear();
             }
         }
     }
 
     pub fn queue_move(&mut self, destination: Vec2, spacing: f32) {
-        let ids = self.selection.ids.clone();
-        let width = (ids.len() as f32).sqrt().ceil().max(1.0) as usize;
-        for (index, id) in ids.into_iter().enumerate() {
-            let column = index % width;
-            let row = index / width;
-            let centered = Vec2::new(
-                column as f32 - (width.saturating_sub(1)) as f32 * 0.5,
-                row as f32
-                    - self.selection.ids.len().div_ceil(width).saturating_sub(1) as f32 * 0.5,
-            );
+        for (id, target) in self.formation_destinations(destination, spacing) {
             if let Some(unit) = self.unit_mut(id) {
-                let order = UnitOrder::Move(destination + centered * spacing.max(0.0));
+                let order = UnitOrder::Move(target);
                 if matches!(unit.order, UnitOrder::Idle) {
                     unit.order = order;
                 } else {
@@ -807,18 +1209,58 @@ impl RtsWorld {
     }
 
     pub fn issue_attack_move(&mut self, destination: Vec2, append: bool) {
-        let ids = self.selection.ids.clone();
-        for id in ids {
+        self.issue_attack_move_with_spacing(destination, self.default_formation_spacing(), append);
+    }
+
+    /// Issues an attack-move while preserving squad cohesion with deterministic
+    /// formation slots. Use this when a game has authored spacing; the simpler
+    /// [`Self::issue_attack_move`] derives spacing from the selected units.
+    pub fn issue_attack_move_with_spacing(
+        &mut self,
+        destination: Vec2,
+        spacing: f32,
+        append: bool,
+    ) {
+        for (id, target) in self.formation_destinations(destination, spacing) {
             if let Some(unit) = self.unit_mut(id) {
                 if append && !matches!(unit.order, UnitOrder::Idle) {
-                    unit.queued_orders
-                        .push_back(UnitOrder::AttackMove(destination));
+                    unit.queued_orders.push_back(UnitOrder::AttackMove(target));
                 } else {
-                    unit.order = UnitOrder::AttackMove(destination);
+                    unit.order = UnitOrder::AttackMove(target);
                     unit.queued_orders.clear();
                 }
             }
         }
+    }
+
+    fn default_formation_spacing(&self) -> f32 {
+        let max_radius = self
+            .selection
+            .ids
+            .iter()
+            .filter_map(|id| self.unit(*id).map(|unit| unit.radius.max(0.0)))
+            .fold(0.0, f32::max);
+        (max_radius * 2.5).max(1.0)
+    }
+
+    fn formation_destinations(&self, destination: Vec2, spacing: f32) -> Vec<(UnitId, Vec2)> {
+        let ids = &self.selection.ids;
+        let width = (ids.len() as f32).sqrt().ceil().max(1.0) as usize;
+        let rows = ids.len().div_ceil(width);
+        let spacing = spacing.max(0.0);
+        ids.iter()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| {
+                let column = index % width;
+                let row = index / width;
+                let centered = Vec2::new(
+                    column as f32 - (width.saturating_sub(1)) as f32 * 0.5,
+                    row as f32 - rows.saturating_sub(1) as f32 * 0.5,
+                );
+                (id, destination + centered * spacing)
+            })
+            .collect()
     }
 
     pub fn issue_patrol(&mut self, destination: Vec2, append: bool) {
@@ -868,14 +1310,32 @@ impl RtsWorld {
         true
     }
 
-    pub fn issue_attack(&mut self, target: UnitId) {
+    /// Issues an explicit attack order to every selected unit.
+    ///
+    /// With `append` enabled this behaves like a shift-click attack command:
+    /// units that are already busy keep their current order and attack the
+    /// target after their existing queue. Idle units begin attacking
+    /// immediately. A non-appended command replaces both the active order and
+    /// any queued work, matching the rest of the imperative `issue_*` APIs.
+    pub fn issue_attack_order(&mut self, target: UnitId, append: bool) {
         let ids = self.selection.ids.clone();
         for id in ids {
             if let Some(unit) = self.unit_mut(id) {
-                unit.order = UnitOrder::Attack(target);
-                unit.queued_orders.clear();
+                let order = UnitOrder::Attack(target);
+                if append && !matches!(unit.order, UnitOrder::Idle) {
+                    unit.queued_orders.push_back(order);
+                } else {
+                    unit.order = order;
+                    unit.queued_orders.clear();
+                }
             }
         }
+    }
+
+    /// Replaces the selected units' current work with an explicit attack.
+    /// Kept as the source-compatible shorthand for the pre-append API.
+    pub fn issue_attack(&mut self, target: UnitId) {
+        self.issue_attack_order(target, false);
     }
 
     pub fn issue_hold(&mut self) {
@@ -889,7 +1349,30 @@ impl RtsWorld {
         }
     }
 
+    /// Cancels all work for the currently selected living units.
+    ///
+    /// Unlike [`Self::issue_hold`], this is a true stop command: it returns
+    /// units to [`UnitOrder::Idle`], drops every queued order, and clears any
+    /// residual velocity in the same deterministic pass. Selection can outlive
+    /// a unit (for example, when it dies between input frames), so stale or
+    /// dead IDs are ignored rather than mutating an invalid combatant.
+    pub fn issue_stop(&mut self) {
+        let ids = self.selection.ids.clone();
+        for id in ids {
+            let Some(unit) = self.unit_mut(id) else {
+                continue;
+            };
+            if !unit.alive() {
+                continue;
+            }
+            unit.order = UnitOrder::Idle;
+            unit.queued_orders.clear();
+            unit.velocity = Vec2::ZERO;
+        }
+    }
+
     pub fn update(&mut self, dt: f32) {
+        let dt = dt.max(0.0);
         let positions: Vec<(UnitId, Vec2, bool)> = self
             .units
             .iter()
@@ -915,16 +1398,54 @@ impl RtsWorld {
                 UnitOrder::Patrol(first, _) => Some(first),
                 UnitOrder::Idle | UnitOrder::Hold => None,
             };
+            // Orders that reference a destroyed or removed unit must not
+            // strand a worker in a permanently busy state. Advance one
+            // queued order immediately; the next update will validate that
+            // order too if it is another stale target reference.
+            if matches!(unit.order, UnitOrder::Attack(_) | UnitOrder::Follow(_)) && target.is_none()
+            {
+                unit.velocity = Vec2::ZERO;
+                unit.order = unit.queued_orders.pop_front().unwrap_or(UnitOrder::Idle);
+                continue;
+            }
             let Some(target) = target else {
                 unit.velocity = Vec2::ZERO;
                 continue;
             };
             let offset = target - unit.position;
-            if offset.length() <= unit.radius * 0.35 {
-                unit.position = target;
+            let distance = offset.length();
+            let arrival_radius = unit.radius.max(0.0) * 0.35;
+            let engagement_range = match unit.order {
+                UnitOrder::Attack(_) => unit.engagement_range.max(0.0),
+                _ => 0.0,
+            };
+            // Attack orders have a distinct firing line. Once a unit is
+            // inside that envelope it must hold position and keep its order;
+            // the combat resolver can then apply damage without the movement
+            // integrator pushing the unit through the target.
+            if engagement_range > arrival_radius && distance <= engagement_range {
+                unit.velocity = Vec2::ZERO;
+                continue;
+            }
+            // Clamp the integration step to the destination. Without this,
+            // a hitch or a headless simulation tick can overshoot a waypoint
+            // and make the unit oscillate around it forever.
+            let step = unit.speed.max(0.0) * dt;
+            let stopping_distance = engagement_range.max(arrival_radius);
+            if distance <= arrival_radius || distance <= step + stopping_distance {
+                if engagement_range > arrival_radius && distance > f32::EPSILON {
+                    // Place the unit exactly on the near edge of its firing
+                    // envelope. The order remains Attack, so a later target
+                    // death or retarget can advance naturally.
+                    unit.position = target - offset / distance * engagement_range;
+                } else {
+                    unit.position = target;
+                }
                 unit.velocity = Vec2::ZERO;
                 match unit.order {
-                    UnitOrder::Move(_) | UnitOrder::AttackMove(_) | UnitOrder::Interact(_) => {
+                    UnitOrder::Move(_) | UnitOrder::AttackMove(_) | UnitOrder::Interact(_)
+                        if engagement_range <= arrival_radius =>
+                    {
                         unit.order = unit.queued_orders.pop_front().unwrap_or(UnitOrder::Idle);
                     }
                     UnitOrder::Patrol(first, second) => {
@@ -933,8 +1454,8 @@ impl RtsWorld {
                     _ => {}
                 }
             } else {
-                unit.velocity = offset.normalize_or_zero() * unit.speed;
-                unit.position += unit.velocity * dt.max(0.0);
+                unit.velocity = offset / distance * unit.speed.max(0.0);
+                unit.position += unit.velocity * dt;
             }
         }
     }
@@ -1038,11 +1559,38 @@ impl NavGrid {
             cells.push(current);
         }
         cells.reverse();
-        cells
+        let cell_waypoints: Vec<Vec2> = cells
             .into_iter()
             .skip(1)
             .map(|cell| self.cell_center(cell))
-            .collect()
+            .collect();
+
+        // Collapse the raw cell-center route into the longest visible segments.
+        // This keeps BFS's deterministic ordering while avoiding a stop-start
+        // movement cadence on every cardinal cell.
+        let mut path = Vec::with_capacity(cell_waypoints.len() + 1);
+        let mut anchor = start_world;
+        let mut next = 0;
+        while next < cell_waypoints.len() {
+            let mut furthest = next;
+            for (candidate, waypoint) in cell_waypoints.iter().enumerate().skip(next) {
+                if !self.segment_blocked(anchor, *waypoint) {
+                    furthest = candidate;
+                }
+            }
+            let waypoint = cell_waypoints[furthest];
+            path.push(waypoint);
+            anchor = waypoint;
+            next = furthest + 1;
+        }
+
+        // Cell centers are only an intermediate navigation representation. The
+        // caller's world-space destination is always the final target when its
+        // final segment is clear (which it is for an unblocked goal cell).
+        if anchor.distance(goal_world) > f32::EPSILON && !self.segment_blocked(anchor, goal_world) {
+            path.push(goal_world);
+        }
+        path
     }
 
     fn index(&self, cell: IVec2) -> Option<usize> {
@@ -1195,14 +1743,106 @@ mod tests {
     }
 
     #[test]
+    fn marquee_selection_includes_footprint_overlap_without_nearby_units() {
+        let mut world = RtsWorld::default();
+        let edge = world.spawn(PLAYER, Vec2::new(20.0, 0.0));
+        world.unit_mut(edge).unwrap().radius = 12.0;
+        let outside = world.spawn(PLAYER, Vec2::new(26.0, 0.0));
+        world.unit_mut(outside).unwrap().radius = 4.0;
+
+        world.select_bounds(
+            Aabb::from_center_size(Vec2::ZERO, Vec2::splat(20.0)),
+            PLAYER,
+            false,
+        );
+
+        assert_eq!(world.selection().ids(), &[edge]);
+    }
+
+    #[test]
+    fn semantic_select_ids_filters_stale_or_hostile_units() {
+        let mut world = RtsWorld::default();
+        let first = world.spawn(PLAYER, Vec2::ZERO);
+        let second = world.spawn(PLAYER, Vec2::X);
+        let dead = world.spawn(PLAYER, Vec2::Y);
+        let hostile = world.spawn(FactionId(2), Vec2::new(2.0, 0.0));
+        world.unit_mut(dead).unwrap().health = 0.0;
+
+        assert_eq!(
+            world.select_ids(&[first, second, dead, hostile, first], PLAYER, false),
+            2
+        );
+        assert_eq!(world.selection().ids(), &[first, second]);
+
+        let third = world.spawn(PLAYER, Vec2::new(3.0, 0.0));
+        assert_eq!(world.select_ids(&[second, third], PLAYER, true), 1);
+        assert_eq!(world.selection().ids(), &[first, second, third]);
+    }
+
+    #[test]
+    fn attack_move_keeps_selected_units_in_a_deterministic_formation() {
+        let mut world = RtsWorld::default();
+        world.spawn(PLAYER, Vec2::new(-10.0, 0.0));
+        world.spawn(PLAYER, Vec2::new(10.0, 0.0));
+        world.select_bounds(
+            Aabb::from_center_size(Vec2::ZERO, Vec2::splat(100.0)),
+            PLAYER,
+            false,
+        );
+
+        let destination = Vec2::new(200.0, 100.0);
+        world.issue_attack_move_with_spacing(destination, 40.0, false);
+        let orders: Vec<UnitOrder> = world.units().iter().map(|unit| unit.order).collect();
+        assert_eq!(
+            orders,
+            [
+                UnitOrder::AttackMove(Vec2::new(180.0, 100.0)),
+                UnitOrder::AttackMove(Vec2::new(220.0, 100.0)),
+            ]
+        );
+
+        // The legacy command derives safe spacing from unit radii, so it also
+        // keeps a squad apart without requiring a game-specific constant.
+        world.issue_attack_move(destination, false);
+        let defaults: Vec<Vec2> = world
+            .units()
+            .iter()
+            .filter_map(|unit| match unit.order {
+                UnitOrder::AttackMove(target) => Some(target),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(defaults, [Vec2::new(165.0, 100.0), Vec2::new(235.0, 100.0)]);
+    }
+
+    #[test]
     fn navigation_routes_around_blocked_cells() {
         let mut grid = NavGrid::new(5, 3, Vec2::ZERO, 10.0);
         grid.set_blocked(IVec2::new(2, 1), true);
-        let path = grid.find_path(Vec2::new(5.0, 15.0), Vec2::new(45.0, 15.0));
+        let goal = Vec2::new(45.0, 15.0);
+        let path = grid.find_path(Vec2::new(5.0, 15.0), goal);
         assert!(!path.is_empty());
+        assert_eq!(path.last().copied(), Some(goal));
         assert!(path
             .iter()
             .all(|point| grid.world_to_cell(*point) != IVec2::new(2, 1)));
+    }
+
+    #[test]
+    fn navigation_smooths_clear_cells_without_crossing_blockers() {
+        let mut grid = NavGrid::new(7, 5, Vec2::ZERO, 10.0);
+        grid.set_blocked(IVec2::new(3, 2), true);
+        let start = Vec2::new(5.0, 25.0);
+        let goal = Vec2::new(65.0, 25.0);
+        let path = grid.find_path(start, goal);
+
+        assert_eq!(path.last().copied(), Some(goal));
+        assert!(path.len() <= 3, "smoothed path was {path:?}");
+        let mut anchor = start;
+        for waypoint in path {
+            assert!(!grid.segment_blocked(anchor, waypoint));
+            anchor = waypoint;
+        }
     }
 
     #[test]
@@ -1235,6 +1875,138 @@ mod tests {
         assert_eq!(queue.update(1.5), [ProductId(7)]);
         assert!((queue.items()[0].progress() - 0.25).abs() < 0.001);
         assert_eq!(queue.update(1.5), [ProductId(9)]);
+    }
+
+    #[test]
+    fn supply_aware_production_admission_is_atomic() {
+        let recipe = ProductionRecipe::new(ProductId(12), 40, 1_000);
+        let mut queue = ProductionQueue::new(1);
+        let mut resources = ResourceBank::new(50);
+        let mut supply = SupplyLedger::new(2);
+
+        assert_eq!(
+            queue.enqueue_with_supply(recipe, &mut resources, &mut supply, 2),
+            Ok(())
+        );
+        assert_eq!(resources.amount(), 10);
+        assert_eq!(supply.used(), 2);
+
+        // Capacity is checked before either wallet is touched.
+        assert_eq!(
+            queue.enqueue_with_supply(recipe, &mut resources, &mut supply, 1),
+            Err(SupplyQueueError::Full)
+        );
+        assert_eq!(resources.amount(), 10);
+        assert_eq!(supply.used(), 2);
+
+        let mut resource_blocked = ProductionQueue::new(1);
+        let mut poor_resources = ResourceBank::new(39);
+        let mut open_supply = SupplyLedger::new(2);
+        assert_eq!(
+            resource_blocked.enqueue_with_supply(recipe, &mut poor_resources, &mut open_supply, 1,),
+            Err(SupplyQueueError::InsufficientResources)
+        );
+        assert_eq!(poor_resources.amount(), 39);
+        assert_eq!(open_supply.used(), 0);
+
+        let mut supply_blocked = ProductionQueue::new(1);
+        let mut enough_resources = ResourceBank::new(50);
+        let mut capped_supply = SupplyLedger::new(1);
+        assert_eq!(
+            supply_blocked.enqueue_with_supply(
+                recipe,
+                &mut enough_resources,
+                &mut capped_supply,
+                2,
+            ),
+            Err(SupplyQueueError::InsufficientSupply)
+        );
+        assert_eq!(enough_resources.amount(), 50);
+        assert_eq!(capped_supply.used(), 0);
+    }
+
+    #[test]
+    fn production_cancellation_refunds_metadata_and_releases_supply() {
+        let first = ProductionRecipe::new(ProductId(30), 40, 1_000);
+        let second = ProductionRecipe::new(ProductId(31), 60, 2_000);
+        let mut queue = ProductionQueue::new(2);
+        let mut resources = ResourceBank::new(100);
+        let mut supply = SupplyLedger::new(3);
+        queue.enqueue(first, &mut resources).unwrap();
+        queue
+            .enqueue_with_supply(second, &mut resources, &mut supply, 2)
+            .unwrap();
+        assert_eq!(resources.amount(), 0);
+        assert_eq!(supply.used(), 2);
+
+        // A supply-backed job cannot be cancelled through the legacy API, so
+        // callers cannot accidentally leave the ledger permanently blocked.
+        assert_eq!(
+            queue.cancel(1, &mut resources, 100),
+            Err(ProductionCancelError::SupplyLedgerRequired)
+        );
+        assert_eq!(resources.amount(), 0);
+        assert_eq!(supply.used(), 2);
+
+        let receipt = queue.cancel(0, &mut resources, 75).unwrap();
+        assert_eq!(
+            receipt,
+            ProductionCancelReceipt {
+                product: ProductId(30),
+                refunded_resources: 30,
+                released_supply: 0,
+            }
+        );
+        assert_eq!(resources.amount(), 30);
+        assert_eq!(supply.used(), 2);
+        assert_eq!(queue.items()[0].product, ProductId(31));
+
+        let receipt = queue
+            .cancel_with_supply(0, &mut resources, &mut supply, 150)
+            .unwrap();
+        assert_eq!(receipt.refunded_resources, 60);
+        assert_eq!(receipt.released_supply, 2);
+        assert_eq!(resources.amount(), 90);
+        assert_eq!(supply.used(), 0);
+        assert!(queue.items().is_empty());
+        assert_eq!(
+            queue.cancel(0, &mut resources, 100),
+            Err(ProductionCancelError::InvalidIndex)
+        );
+        assert_eq!(resources.amount(), 90);
+    }
+
+    #[test]
+    fn build_queue_carries_elapsed_time_across_structure_jobs() {
+        let first = BuildId(10);
+        let second = BuildId(11);
+        let mut queue = BuildQueue::new(2);
+        queue
+            .enqueue(BuildRecipe::new(first, 2.0))
+            .expect("first build fits");
+        queue
+            .enqueue(BuildRecipe::new(second, 3.0))
+            .expect("second build fits");
+        assert_eq!(queue.front().unwrap().progress(), 0.0);
+        assert_eq!(queue.update(2.5), [first]);
+        assert_eq!(queue.front().unwrap().build, second);
+        assert!((queue.front().unwrap().progress() - (0.5 / 3.0)).abs() < 0.001);
+        assert_eq!(queue.update(0.5), []);
+        assert_eq!(queue.update(2.5), [second]);
+        assert!(queue.is_empty());
+        assert_eq!(queue.enqueue(BuildRecipe::new(BuildId(12), 1.0)), Ok(()));
+    }
+
+    #[test]
+    fn build_queue_rejects_jobs_above_capacity() {
+        let mut queue = BuildQueue::new(1);
+        queue
+            .enqueue(BuildRecipe::new(BuildId(20), 1.0))
+            .expect("first build fits");
+        assert_eq!(
+            queue.enqueue(BuildRecipe::new(BuildId(21), 1.0)),
+            Err(BuildQueueError::Full)
+        );
     }
 
     #[test]
@@ -1274,6 +2046,94 @@ mod tests {
     }
 
     #[test]
+    fn terrain_classification_is_stable_for_overlay_contracts() {
+        let bounds = Aabb::from_center_size(Vec2::ZERO, Vec2::splat(100.0));
+        assert_eq!(
+            TerrainZone::new(bounds, 0, 0.0).classification(),
+            TerrainClass::Open
+        );
+        assert_eq!(
+            TerrainZone::new(bounds, 0, TERRAIN_COVER_THRESHOLD).classification(),
+            TerrainClass::Covered
+        );
+        assert_eq!(
+            TerrainZone::new(bounds, 1, TERRAIN_COVER_THRESHOLD - 0.01).classification(),
+            TerrainClass::HighGround
+        );
+        assert_eq!(
+            TerrainZone::new(bounds, 1, TERRAIN_MAX_COVER + 1.0).classification(),
+            TerrainClass::FortifiedHighGround
+        );
+        assert!(TerrainClass::FortifiedHighGround.has_cover());
+        assert!(TerrainClass::FortifiedHighGround.is_high_ground());
+
+        // Editor-authored malformed values stay finite and render as open
+        // terrain until the mission validator reports the authoring error.
+        let malformed = TerrainZone::new(bounds, 0, f32::NAN);
+        assert_eq!(malformed.normalized_cover(), 0.0);
+        assert_eq!(malformed.classification(), TerrainClass::Open);
+        assert_eq!(malformed.damage_multiplier(0), 1.0);
+    }
+
+    #[test]
+    fn terrain_resolver_prefers_strategic_strength_and_keeps_authored_ties() {
+        let bounds = Aabb::from_center_size(Vec2::ZERO, Vec2::splat(100.0));
+        let zones = [
+            TerrainZone::new(bounds, 0, 0.0),
+            TerrainZone::new(bounds, 0, TERRAIN_MAX_COVER),
+            TerrainZone::new(bounds, 1, 0.0),
+            TerrainZone::new(bounds, 1, TERRAIN_COVER_THRESHOLD),
+        ];
+
+        let (index, zone) = TerrainZone::resolve_at(Vec2::ZERO, &zones).unwrap();
+        assert_eq!(index, 3);
+        assert_eq!(zone.classification(), TerrainClass::FortifiedHighGround);
+        assert_eq!(TerrainZone::resolve_at(Vec2::new(101.0, 0.0), &zones), None);
+
+        let tied = [
+            TerrainZone::new(bounds, 1, TERRAIN_COVER_THRESHOLD),
+            TerrainZone::new(bounds, 1, TERRAIN_COVER_THRESHOLD),
+        ];
+        assert_eq!(TerrainZone::resolve_at(Vec2::ZERO, &tied).unwrap().0, 0);
+    }
+
+    #[test]
+    fn terrain_readout_is_compact_and_finite_for_hud_consumers() {
+        let bounds = Aabb::from_center_size(Vec2::ZERO, Vec2::splat(100.0));
+        let zones = [
+            TerrainZone::new(bounds, 0, 0.0),
+            TerrainZone::new(bounds, 0, TERRAIN_COVER_THRESHOLD),
+            TerrainZone::new(bounds, 2, TERRAIN_MAX_COVER),
+        ];
+
+        let open = zones[0].readout();
+        assert_eq!(
+            open,
+            TerrainReadout {
+                class: TerrainClass::Open,
+                elevation: 0,
+                cover_percent: 0,
+            }
+        );
+        let covered = zones[1].readout();
+        assert_eq!(covered.class, TerrainClass::Covered);
+        assert_eq!(covered.cover_percent, 20);
+        assert!(covered.has_cover());
+
+        let (index, high) = TerrainZone::resolve_readout_at(Vec2::ZERO, &zones).unwrap();
+        assert_eq!(index, 2);
+        assert_eq!(high.class, TerrainClass::FortifiedHighGround);
+        assert_eq!(high.elevation, 2);
+        assert_eq!(high.cover_percent, 30);
+        assert!(high.is_high_ground());
+
+        let malformed = TerrainZone::new(bounds, -2, f32::INFINITY).readout();
+        assert_eq!(malformed.class, TerrainClass::Open);
+        assert_eq!(malformed.elevation, -2);
+        assert_eq!(malformed.cover_percent, 0);
+    }
+
+    #[test]
     fn queued_orders_start_after_waypoint_arrival() {
         let mut world = RtsWorld::default();
         let id = world.spawn(PLAYER, Vec2::ZERO);
@@ -1287,6 +2147,208 @@ mod tests {
             UnitOrder::Move(destination) if destination == Vec2::new(100.0, 0.0)
         ));
         assert!(world.unit(id).unwrap().queued_orders.is_empty());
+    }
+
+    #[test]
+    fn appended_attack_orders_preserve_current_work_and_fifo_order() {
+        let mut world = RtsWorld::default();
+        let first = world.spawn(PLAYER, Vec2::ZERO);
+        let second = world.spawn(PLAYER, Vec2::new(20.0, 0.0));
+        let first_target = world.spawn(FactionId(2), Vec2::new(100.0, 0.0));
+        let second_target = world.spawn(FactionId(2), Vec2::new(120.0, 0.0));
+
+        world.select_bounds(
+            Aabb::from_center_size(Vec2::new(10.0, 0.0), Vec2::splat(80.0)),
+            PLAYER,
+            false,
+        );
+        world.issue_move(Vec2::new(60.0, 0.0), 0.0);
+        world.issue_attack_order(first_target, true);
+        world.issue_attack_order(second_target, true);
+
+        for id in [first, second] {
+            let unit = world.unit(id).unwrap();
+            assert_eq!(unit.order, UnitOrder::Move(Vec2::new(60.0, 0.0)));
+            assert_eq!(
+                unit.queued_orders.iter().copied().collect::<Vec<_>>(),
+                [
+                    UnitOrder::Attack(first_target),
+                    UnitOrder::Attack(second_target),
+                ]
+            );
+        }
+
+        // A non-appended command is an immediate replacement and clears the
+        // queued attack chain for every selected unit.
+        world.issue_attack(second_target);
+        for id in [first, second] {
+            let unit = world.unit(id).unwrap();
+            assert_eq!(unit.order, UnitOrder::Attack(second_target));
+            assert!(unit.queued_orders.is_empty());
+        }
+    }
+
+    #[test]
+    fn stop_command_clears_selected_orders_queues_and_velocity() {
+        let mut world = RtsWorld::default();
+        let first = world.spawn(PLAYER, Vec2::ZERO);
+        let second = world.spawn(PLAYER, Vec2::new(20.0, 0.0));
+        let target = world.spawn(FactionId(2), Vec2::new(200.0, 0.0));
+        assert_eq!(world.select_ids(&[first, second], PLAYER, false), 2);
+
+        world.unit_mut(first).unwrap().order = UnitOrder::Move(Vec2::new(80.0, 0.0));
+        world.unit_mut(first).unwrap().velocity = Vec2::new(12.0, -4.0);
+        world.unit_mut(first).unwrap().queued_orders.extend([
+            UnitOrder::Attack(target),
+            UnitOrder::Move(Vec2::new(160.0, 0.0)),
+        ]);
+        world.unit_mut(second).unwrap().order = UnitOrder::AttackMove(Vec2::X * 90.0);
+        world.unit_mut(second).unwrap().velocity = Vec2::new(-8.0, 3.0);
+        world
+            .unit_mut(second)
+            .unwrap()
+            .queued_orders
+            .push_back(UnitOrder::Follow(first));
+
+        world.issue_stop();
+
+        for id in [first, second] {
+            let unit = world.unit(id).unwrap();
+            assert_eq!(unit.order, UnitOrder::Idle);
+            assert!(unit.queued_orders.is_empty());
+            assert_eq!(unit.velocity, Vec2::ZERO);
+        }
+    }
+
+    #[test]
+    fn stop_command_excludes_stale_dead_and_hostile_units() {
+        let mut world = RtsWorld::default();
+        let living = world.spawn(PLAYER, Vec2::ZERO);
+        let stale = world.spawn(PLAYER, Vec2::new(20.0, 0.0));
+        let hostile = world.spawn(FactionId(2), Vec2::new(40.0, 0.0));
+
+        // The hostile ID is rejected at selection time. The second friendly
+        // unit is selected, then dies before the command arrives, leaving a
+        // realistic stale selection entry for the stop path to filter.
+        assert_eq!(
+            world.select_ids(&[living, stale, hostile], PLAYER, false),
+            2
+        );
+        world.unit_mut(living).unwrap().order = UnitOrder::AttackMove(Vec2::X * 50.0);
+        world.unit_mut(living).unwrap().velocity = Vec2::X * 10.0;
+        world.unit_mut(stale).unwrap().order = UnitOrder::Move(Vec2::X * 75.0);
+        world.unit_mut(stale).unwrap().velocity = Vec2::X * 9.0;
+        world.unit_mut(stale).unwrap().health = 0.0;
+        world.unit_mut(hostile).unwrap().order = UnitOrder::Attack(living);
+        world.unit_mut(hostile).unwrap().velocity = Vec2::X * 11.0;
+
+        world.issue_stop();
+
+        let living_unit = world.unit(living).unwrap();
+        assert_eq!(living_unit.order, UnitOrder::Idle);
+        assert_eq!(living_unit.velocity, Vec2::ZERO);
+        assert!(living_unit.queued_orders.is_empty());
+
+        let stale_unit = world.unit(stale).unwrap();
+        assert_eq!(stale_unit.order, UnitOrder::Move(Vec2::X * 75.0));
+        assert_eq!(stale_unit.velocity, Vec2::X * 9.0);
+
+        let hostile_unit = world.unit(hostile).unwrap();
+        assert_eq!(hostile_unit.order, UnitOrder::Attack(living));
+        assert_eq!(hostile_unit.velocity, Vec2::X * 11.0);
+    }
+
+    #[test]
+    fn stop_command_is_a_noop_with_empty_selection() {
+        let mut world = RtsWorld::default();
+        let id = world.spawn(PLAYER, Vec2::ZERO);
+        world.unit_mut(id).unwrap().order = UnitOrder::Move(Vec2::X * 100.0);
+        world.unit_mut(id).unwrap().velocity = Vec2::new(4.0, 2.0);
+        world
+            .unit_mut(id)
+            .unwrap()
+            .queued_orders
+            .push_back(UnitOrder::Patrol(Vec2::ZERO, Vec2::X * 20.0));
+
+        world.issue_stop();
+
+        let unit = world.unit(id).unwrap();
+        assert_eq!(unit.order, UnitOrder::Move(Vec2::X * 100.0));
+        assert_eq!(unit.velocity, Vec2::new(4.0, 2.0));
+        assert_eq!(unit.queued_orders.len(), 1);
+    }
+
+    #[test]
+    fn movement_clamps_large_steps_to_destination() {
+        let mut world = RtsWorld::default();
+        let id = world.spawn(PLAYER, Vec2::ZERO);
+        world.select_point(Vec2::ZERO, PLAYER, false);
+        let destination = Vec2::new(50.0, 0.0);
+        world.issue_move(destination, 0.0);
+
+        // A ten-second tick is intentionally much larger than the travel
+        // time. The unit should arrive exactly, not overshoot and oscillate.
+        world.update(10.0);
+
+        let unit = world.unit(id).unwrap();
+        assert_eq!(unit.position, destination);
+        assert_eq!(unit.velocity, Vec2::ZERO);
+        assert_eq!(unit.order, UnitOrder::Idle);
+    }
+
+    #[test]
+    fn attack_orders_hold_at_engagement_range() {
+        let mut world = RtsWorld::default();
+        let attacker = world.spawn(PLAYER, Vec2::ZERO);
+        let target = world.spawn(FactionId(2), Vec2::new(500.0, 0.0));
+        world.unit_mut(attacker).unwrap().engagement_range = 100.0;
+        world.unit_mut(attacker).unwrap().order = UnitOrder::Attack(target);
+
+        // A large step crosses the firing line. The unit should stop 100
+        // world units short of the target and keep its attack order instead
+        // of consuming it like a Move command.
+        world.update(10.0);
+
+        let unit = world.unit(attacker).unwrap();
+        assert_eq!(unit.position, Vec2::new(400.0, 0.0));
+        assert_eq!(unit.velocity, Vec2::ZERO);
+        assert_eq!(unit.order, UnitOrder::Attack(target));
+    }
+
+    #[test]
+    fn attack_orders_inside_engagement_range_do_not_snap_or_consume() {
+        let mut world = RtsWorld::default();
+        let attacker = world.spawn(PLAYER, Vec2::ZERO);
+        let target = world.spawn(FactionId(2), Vec2::new(60.0, 0.0));
+        world.unit_mut(attacker).unwrap().engagement_range = 100.0;
+        world.unit_mut(attacker).unwrap().order = UnitOrder::Attack(target);
+
+        world.update(1.0);
+
+        let unit = world.unit(attacker).unwrap();
+        assert_eq!(unit.position, Vec2::ZERO);
+        assert_eq!(unit.velocity, Vec2::ZERO);
+        assert_eq!(unit.order, UnitOrder::Attack(target));
+    }
+
+    #[test]
+    fn stale_target_order_advances_to_queued_work() {
+        let mut world = RtsWorld::default();
+        let attacker = world.spawn(PLAYER, Vec2::ZERO);
+        let target = world.spawn(FactionId(2), Vec2::new(100.0, 0.0));
+        world.unit_mut(attacker).unwrap().order = UnitOrder::Attack(target);
+        world
+            .unit_mut(attacker)
+            .unwrap()
+            .queued_orders
+            .push_back(UnitOrder::Move(Vec2::new(40.0, 0.0)));
+        world.unit_mut(target).unwrap().health = 0.0;
+
+        world.update(1.0);
+
+        let unit = world.unit(attacker).unwrap();
+        assert_eq!(unit.order, UnitOrder::Move(Vec2::new(40.0, 0.0)));
+        assert_eq!(unit.velocity, Vec2::ZERO);
     }
 
     #[test]

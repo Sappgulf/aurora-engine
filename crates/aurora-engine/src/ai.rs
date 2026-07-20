@@ -4,7 +4,7 @@
 //! skirmish-mode opponent, ...) — behavior is driven entirely by
 //! [`AiParams`], not by any specific game's unit kinds.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glam::{IVec2, Vec2};
 
@@ -103,10 +103,15 @@ impl SimpleAggroAi {
             attacker_ids.iter().copied().collect();
         self.memory.retain(|id, _| attacker_set.contains(id));
 
+        let candidate_ids: HashSet<UnitId> = candidates.iter().map(|(id, _, _)| *id).collect();
         let mut assigned_counts: HashMap<UnitId, usize> = HashMap::new();
         for memory in self.memory.values() {
             if let Some(target) = memory.target {
-                *assigned_counts.entry(target).or_insert(0) += 1;
+                // Do not let a dead/out-of-scope target consume the soft cap
+                // for the rest of the match.
+                if candidate_ids.contains(&target) {
+                    *assigned_counts.entry(target).or_insert(0) += 1;
+                }
             }
         }
 
@@ -135,7 +140,9 @@ impl SimpleAggroAi {
             if health_fraction <= params.retreat_health_fraction && elapsed >= memory.retreat_until
             {
                 memory.retreat_until = elapsed + params.retreat_duration;
-                memory.target = None;
+                if let Some(previous_target) = memory.target.take() {
+                    decrement_assignment(&mut assigned_counts, previous_target);
+                }
             }
             if elapsed < memory.retreat_until {
                 if let Some(unit) = world.unit_mut(id) {
@@ -155,6 +162,15 @@ impl SimpleAggroAi {
             });
             let should_retarget = current_valid.is_none()
                 || elapsed - memory.target_since >= params.retarget_interval;
+
+            // The counts above describe the assignments entering this tick.
+            // Remove this unit's previous assignment before choosing a new
+            // target, then add exactly one assignment below.
+            if should_retarget {
+                if let Some(previous_target) = memory.target.take() {
+                    decrement_assignment(&mut assigned_counts, previous_target);
+                }
+            }
 
             let chosen = if should_retarget {
                 candidates
@@ -187,13 +203,26 @@ impl SimpleAggroAi {
                 memory.target = Some(target_id);
                 memory.target_since = elapsed;
             }
-            *assigned_counts.entry(target_id).or_insert(0) += 1;
+            if should_retarget {
+                *assigned_counts.entry(target_id).or_insert(0) += 1;
+            }
 
             let order = approach_order(nav, position, target_position, target_id);
             if let Some(unit) = world.unit_mut(id) {
                 unit.order = order;
             }
         }
+    }
+}
+
+fn decrement_assignment(assigned: &mut HashMap<UnitId, usize>, target: UnitId) {
+    let Some(count) = assigned.get_mut(&target) else {
+        return;
+    };
+    if *count <= 1 {
+        assigned.remove(&target);
+    } else {
+        *count -= 1;
     }
 }
 
@@ -341,6 +370,35 @@ mod tests {
         assert_ne!(order_a1, order_a2);
         assert!(matches!(order_a1, UnitOrder::Attack(id) if id == t1 || id == t2));
         assert!(matches!(order_a2, UnitOrder::Attack(id) if id == t1 || id == t2));
+    }
+
+    #[test]
+    fn repeated_retargeting_does_not_inflate_assignments() {
+        let mut world = RtsWorld::default();
+        let a1 = world.spawn(ATTACKERS, Vec2::ZERO);
+        let a2 = world.spawn(ATTACKERS, Vec2::new(1.0, 0.0));
+        let t1 = world.spawn(TARGETS, Vec2::new(100.0, 0.0));
+        let t2 = world.spawn(TARGETS, Vec2::new(120.0, 0.0));
+
+        let mut ai = SimpleAggroAi::new();
+        for elapsed in [0.0, 2.1, 4.2, 6.3] {
+            ai.think(
+                &mut world,
+                ATTACKERS,
+                TARGETS,
+                elapsed,
+                &AiParams::default(),
+                None,
+            );
+            let order_a1 = world.unit(a1).unwrap().order;
+            let order_a2 = world.unit(a2).unwrap().order;
+            assert!(matches!(order_a1, UnitOrder::Attack(id) if id == t1 || id == t2));
+            assert!(matches!(order_a2, UnitOrder::Attack(id) if id == t1 || id == t2));
+            assert_ne!(
+                order_a1, order_a2,
+                "retarget tick {elapsed} should spread fire"
+            );
+        }
     }
 
     #[test]

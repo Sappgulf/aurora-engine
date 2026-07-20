@@ -15,7 +15,8 @@ use crate::color::Color;
 use crate::mesh3d::{GpuMesh, Material3D, Mesh3D};
 use crate::post::{PostFxSettings, PostPipeline, PostUniforms, ScreenLight, MAX_POINT_LIGHTS};
 use crate::sprite::{
-    camera_uniform, CameraUniform, QueuedSprite, Sprite, SpriteBatch, SpriteVertex,
+    camera_uniform, sprite_corner_uvs, CameraUniform, QueuedSprite, Sprite, SpriteBatch,
+    SpriteVertex,
 };
 use crate::texture::Texture;
 use crate::time::InstantCompat;
@@ -210,6 +211,10 @@ pub struct Renderer {
     quality: RenderQuality,
 
     pub camera: Camera2D,
+    /// Current window scale used to convert physical surface pixels into the
+    /// camera/HUD's logical viewport. Kept explicitly because winit can emit a
+    /// scale-factor event before the next resize event.
+    scale_factor: f64,
     stats: RenderStats,
     #[allow(dead_code)]
     window: Arc<Window>,
@@ -240,11 +245,29 @@ pub struct Renderer {
     mesh3d_scene: Scene3DState,
 }
 
+fn normalized_scale_factor(scale_factor: f64) -> f64 {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    }
+}
+
+fn logical_viewport(size: winit::dpi::PhysicalSize<u32>, scale_factor: f64) -> (f32, f32) {
+    let scale_factor = normalized_scale_factor(scale_factor);
+    (
+        (size.width.max(1) as f64 / scale_factor).max(1.0) as f32,
+        (size.height.max(1) as f64 / scale_factor).max(1.0) as f32,
+    )
+}
+
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
+        let scale_factor = normalized_scale_factor(window.scale_factor());
+        let (logical_width, logical_height) = logical_viewport(size, scale_factor);
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -540,7 +563,7 @@ impl Renderer {
         queue.write_buffer(&tri_vbo, 0, bytemuck::cast_slice(&tri_verts));
 
         let batch = SpriteBatch::new(&device, SpriteBatch::DEFAULT_CAPACITY);
-        let camera = Camera2D::new(width as f32, height as f32);
+        let camera = Camera2D::new(logical_width, logical_height);
         let post = PostPipeline::new(&device, width, height, surface_format);
 
         #[cfg(feature = "3d")]
@@ -693,6 +716,7 @@ impl Renderer {
             post_fx: PostFxSettings::default(),
             quality: RenderQuality::default(),
             camera,
+            scale_factor,
             stats: RenderStats::default(),
             window,
 
@@ -733,6 +757,18 @@ impl Renderer {
 
     pub fn size(&self) -> winit::dpi::PhysicalSize<u32> {
         self.size
+    }
+
+    /// Update the logical viewport after a native DPI/scale-factor change.
+    ///
+    /// Winit may deliver `ScaleFactorChanged` without an immediate `Resized`
+    /// event. Updating the cached scale and camera together keeps pointer
+    /// hit-testing, HUD anchors, and world rendering in the same coordinate
+    /// space during that gap.
+    pub fn set_scale_factor(&mut self, scale_factor: f64) {
+        self.scale_factor = normalized_scale_factor(scale_factor);
+        let (width, height) = logical_viewport(self.size, self.scale_factor);
+        self.camera.set_viewport(width, height);
     }
 
     pub fn set_clear_color(&mut self, color: Color) {
@@ -865,8 +901,8 @@ impl Renderer {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
-            self.camera
-                .set_viewport(new_size.width as f32, new_size.height as f32);
+            let (width, height) = logical_viewport(new_size, self.scale_factor);
+            self.camera.set_viewport(width, height);
             self.post
                 .resize(&self.device, new_size.width, new_size.height);
             #[cfg(feature = "3d")]
@@ -1301,12 +1337,7 @@ fn push_sprite_mesh(
         Vec2::new(-half.x, half.y),
     ];
     let (s, c) = sprite.rotation.sin_cos();
-    let uvs = [
-        sprite.uv_min,
-        Vec2::new(sprite.uv_max.x, sprite.uv_min.y),
-        sprite.uv_max,
-        Vec2::new(sprite.uv_min.x, sprite.uv_max.y),
-    ];
+    let uvs = sprite_corner_uvs(sprite.uv_min, sprite.uv_max);
     let col = [
         sprite.color.r,
         sprite.color.g,
@@ -1329,11 +1360,44 @@ fn push_sprite_mesh(
 
 #[cfg(test)]
 mod tests {
-    use super::RenderQuality;
+    use super::{logical_viewport, normalized_scale_factor, push_sprite_mesh, RenderQuality};
+    use crate::sprite::Sprite;
+    use glam::Vec2;
+    use winit::dpi::PhysicalSize;
 
     #[test]
     fn quality_presets_use_bounded_light_budgets() {
         assert!(RenderQuality::Performance.light_budget() < RenderQuality::Balanced.light_budget());
         assert!(RenderQuality::Balanced.light_budget() < RenderQuality::Cinematic.light_budget());
+    }
+
+    #[test]
+    fn renderer_mesh_maps_world_bottom_to_image_bottom() {
+        let mut sprite = Sprite::new(Vec2::ZERO, Vec2::ONE);
+        sprite.uv_min = Vec2::new(0.25, 0.10);
+        sprite.uv_max = Vec2::new(0.50, 0.40);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        push_sprite_mesh(&sprite, &mut vertices, &mut indices);
+
+        assert_eq!(vertices[0].uv, [0.25, 0.40]);
+        assert_eq!(vertices[1].uv, [0.50, 0.40]);
+        assert_eq!(vertices[2].uv, [0.50, 0.10]);
+        assert_eq!(vertices[3].uv, [0.25, 0.10]);
+    }
+
+    #[test]
+    fn logical_viewport_tracks_scale_factor_without_nan_or_zero_dimensions() {
+        assert_eq!(
+            logical_viewport(PhysicalSize::new(1920, 1080), 2.0),
+            (960.0, 540.0)
+        );
+        assert_eq!(
+            logical_viewport(PhysicalSize::new(0, 0), f64::NAN),
+            (1.0, 1.0)
+        );
+        assert_eq!(normalized_scale_factor(0.0), 1.0);
+        assert_eq!(normalized_scale_factor(f64::INFINITY), 1.0);
     }
 }

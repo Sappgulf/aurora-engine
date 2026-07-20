@@ -40,8 +40,38 @@ actual Trunk build, browser lane, and uploads screenshot evidence.
 32-entry buffers. The canonical 3600-tick victory trace asserts both buffer
 capacities remain unchanged while preserving matching final hashes.
 
+`FOUNDRY-007`: Contextual specialist command cards, deterministic role
+abilities, finite worker saturation, and a queued comms inbox with world-space
+transmission focus. The shared engine `CooldownBook` keeps ability timing
+fixed-step and hashable across native and WASM.
+
+`FOUNDRY-008`: Expanded Terms of Salvage with a resolved high-ground ridge over
+the covered relay apron, deterministic terrain-control progression/contest
+state, runtime Warden hold feedback, and procedural structure state overlays
+for booting, offline, and damaged buildings. The compact Fabricator module and
+resource gate copy remains readable at the reference native/browser viewport.
+Evidence: 124 Last Light tests, 4 browser checks at DPR 1/2, and the fresh
+native package playtested through movement, Warden ability, Surveyor harvest,
+comms, and Fabricator module progress.
+
 ## Next iteration
 
-`FOUNDRY-007`: Remove path-following and HUD command-card transient frame
-allocations, add capacity/budget assertions for both, and preserve native and
-browser interaction behavior.
+`FOUNDRY-009`: Turn terrain-control completion into a broader campaign branch
+beat, add a second authored map with a distinct resource/defense geometry, and
+extend the native/browser playtest contract to exercise combat telegraphs and
+terrain contest transitions. The first content slice is now in place: Mission
+6, `CHOIR INVISIBLE`, adds a three-relay blackout map, a contested worker cache,
+an eastern high-ground sensor deck, named specialist spawns, and authored radio
+beats; the engine also exposes FIFO Shift+right-click attack queues and the
+asset ledger explicitly tracks atlas/procedural/planned player-visible states.
+Browser combat/terrain coverage is now verified at DPR 1 and 2; Engineer build,
+Surveyor move, and Surveyor mark are normalized authored atlases selected by
+their runtime animation states. The Vesper Gate branch is now authored as the
+next three-role beat: Surveyor cache security, Engineer reactor repair, and
+Warden ridge control share a widened twin-gate map with distinct worker and
+defense routes. FOUNDRY-010 extends that branch through The Hollow Orbit with
+three-route orbital geometry, a mined Engineer lane, Canticle-exposed Surveyor
+cache, and a separate Warden ridge hold; it also promotes Warden attack art and
+the shared engine Stop command. Native and browser smoke now cover both late
+missions. The next slice can focus on deeper faction counterplay, production
+depth, and additional authored landmark art.
