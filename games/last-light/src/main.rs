@@ -57,6 +57,11 @@ const COMMAND_CARD_KEYS: [KeyCode; 6] = [
     KeyCode::KeyB,
 ];
 const COMMAND_CARD_COMPACT_ROWS: usize = 3;
+const HUD_SCALE_MIN: f32 = 0.5;
+const HUD_SCALE_MAX: f32 = 0.95;
+/// At dense zoom levels the HUD should prioritize command clarity over
+/// always-showing telemetry, so command and info overlays compress.
+const HUD_DENSE_SCALE: f32 = 0.84;
 const COMMAND_CARD_LABELS: [&str; 5] = [
     "Q  WARDEN  90",
     "E  ENGINEER  70",
@@ -950,7 +955,11 @@ impl LastLight {
         const REFERENCE_VIEW: Vec2 = Vec2::from_array([1164.0, 654.0]);
         let zoom_scale = zoom.max(f32::EPSILON).recip();
         let view_scale = (view.x / REFERENCE_VIEW.x).min(view.y / REFERENCE_VIEW.y);
-        (zoom_scale * view_scale).clamp(0.5, 1.0)
+        (zoom_scale * view_scale).clamp(HUD_SCALE_MIN, HUD_SCALE_MAX)
+    }
+
+    fn hud_dense_layout(renderer: &Renderer) -> bool {
+        Self::hud_scale(renderer) >= HUD_DENSE_SCALE
     }
 
     fn hud_scale(renderer: &Renderer) -> f32 {
@@ -1120,6 +1129,19 @@ impl LastLight {
         } else {
             rows.into_iter().take(COMMAND_CARD_COMPACT_ROWS).collect()
         }
+    }
+
+    fn visible_command_card_rows_for_display(&self, renderer: &Renderer) -> Vec<usize> {
+        let rows = self.command_card_rows();
+        if self.command_card_compact || Self::hud_dense_layout(renderer) {
+            rows.into_iter().take(COMMAND_CARD_COMPACT_ROWS).collect()
+        } else {
+            rows
+        }
+    }
+
+    fn command_card_has_more_rows_for_display(&self, renderer: &Renderer) -> bool {
+        self.command_card_rows().len() > self.visible_command_card_rows_for_display(renderer).len()
     }
 
     fn command_card_has_more_rows(&self) -> bool {
@@ -1989,7 +2011,10 @@ impl LastLight {
             let scale = Self::hud_scale(ctx.renderer);
             if self.command_card_visible() {
                 let card_text = Self::command_card_text_origin(ctx.renderer);
-                for &index in self.visible_command_card_rows().iter() {
+                for &index in self
+                    .visible_command_card_rows_for_display(ctx.renderer)
+                    .iter()
+                {
                     if Self::command_card_row_rect(card_text, index, scale)
                         .contains_point(mouse_world)
                     {
@@ -5875,6 +5900,7 @@ impl Game for LastLight {
         }
 
         let hud_scale = Self::hud_scale(ctx.renderer);
+        let dense_hud = Self::hud_dense_layout(ctx.renderer);
         let top_left = ctx
             .renderer
             .camera
@@ -5882,12 +5908,21 @@ impl Game for LastLight {
             + Vec2::new(30.0, -34.0) * hud_scale;
         // Keep only the high-value StarCraft-style strip persistent. Detailed
         // controls and action feedback are disclosed below as transient text.
-        let telemetry_panel_height = if controls_hint_visible { 132.0 } else { 104.0 };
+        let telemetry_panel_height = if controls_hint_visible {
+            132.0
+        } else if dense_hud {
+            84.0
+        } else {
+            104.0
+        };
         ctx.renderer.draw_sprite(
             self.tex_ui,
             Sprite::new(
-                top_left + Vec2::new(280.0, -(telemetry_panel_height * 0.5 - 2.0)) * hud_scale,
-                Vec2::new(590.0, telemetry_panel_height) * hud_scale,
+                top_left + Vec2::new(260.0, -(telemetry_panel_height * 0.5 - 2.0)) * hud_scale,
+                Vec2::new(
+                    if dense_hud { 540.0 } else { 590.0 },
+                    telemetry_panel_height,
+                ) * hud_scale,
             )
             .with_color(Color::rgba(0.01, 0.025, 0.05, 0.68))
             .with_z(7.5),
@@ -5939,7 +5974,11 @@ impl Game for LastLight {
             ctx.renderer,
             &objective_line,
             top_left,
-            3.35 * hud_scale,
+            if dense_hud {
+                2.9 * hud_scale
+            } else {
+                3.35 * hud_scale
+            },
             Color::rgb(0.73, 1.15, 1.08),
             8.0,
         );
@@ -5970,7 +6009,7 @@ impl Game for LastLight {
                 8.1,
             );
         }
-        if controls_hint_visible {
+        if controls_hint_visible && !dense_hud {
             let selection_count = self.simulation.world.selection().ids().len();
             let control_hint = if selection_count == 0 {
                 "DRAG SELECT  •  TERRAIN MOVE  •  F1 HELP"
@@ -5987,6 +6026,16 @@ impl Game for LastLight {
                 top_left + Vec2::new(0.0, -25.0) * hud_scale,
                 1.9 * hud_scale,
                 Color::rgba(0.58, 0.7, 0.78, 0.86),
+                8.0,
+            );
+        }
+        if controls_hint_visible && dense_hud {
+            self.draw_text(
+                ctx.renderer,
+                "F1 FOR CONTROL HINT",
+                top_left + Vec2::new(0.0, -25.0) * hud_scale,
+                1.45 * hud_scale,
+                Color::rgba(0.55, 0.7, 0.8, 0.9),
                 8.0,
             );
         }
@@ -6016,29 +6065,45 @@ impl Game for LastLight {
                 self.lumen_cores
             ),
         };
-        self.draw_text(
-            ctx.renderer,
-            &resource_line,
-            top_left + Vec2::new(0.0, -50.0) * hud_scale,
-            2.8 * hud_scale,
-            Color::rgb(0.96, 0.72, 0.28),
-            8.0,
-        );
-        self.draw_text(
-            ctx.renderer,
-            &format!(
-                "IN +{income}/S  POWER {}/{}  SUPPLY {}/{}",
-                active_relays + 1,
-                self.simulation.relays.len() + 1,
-                self.simulation.supply.used(),
-                self.simulation.supply.capacity()
-            ),
-            top_left + Vec2::new(0.0, -75.0) * hud_scale,
-            2.35 * hud_scale,
-            Color::rgb(0.96, 0.72, 0.28),
-            8.0,
-        );
-        if !self.briefing && !self.victory && !self.defeat {
+        if dense_hud {
+            self.draw_text(
+                ctx.renderer,
+                &format!(
+                    "{}  IN +{income}/S  RELAYS {}/{}",
+                    resource_line,
+                    active_relays + 1,
+                    self.simulation.relays.len() + 1
+                ),
+                top_left + Vec2::new(0.0, -52.0) * hud_scale,
+                2.15 * hud_scale,
+                Color::rgb(0.96, 0.72, 0.28),
+                8.0,
+            );
+        } else {
+            self.draw_text(
+                ctx.renderer,
+                &resource_line,
+                top_left + Vec2::new(0.0, -50.0) * hud_scale,
+                2.8 * hud_scale,
+                Color::rgb(0.96, 0.72, 0.28),
+                8.0,
+            );
+            self.draw_text(
+                ctx.renderer,
+                &format!(
+                    "IN +{income}/S  POWER {}/{}  SUPPLY {}/{}",
+                    active_relays + 1,
+                    self.simulation.relays.len() + 1,
+                    self.simulation.supply.used(),
+                    self.simulation.supply.capacity()
+                ),
+                top_left + Vec2::new(0.0, -75.0) * hud_scale,
+                2.35 * hud_scale,
+                Color::rgb(0.96, 0.72, 0.28),
+                8.0,
+            );
+        }
+        if !self.briefing && !self.victory && !self.defeat && !dense_hud {
             if let Some(idle_copy) = self.idle_surveyor_hud_copy() {
                 // This chip lives in the unused right side of the telemetry
                 // panel. Its bounded copy keeps the global resource line
@@ -6135,6 +6200,7 @@ impl Game for LastLight {
                     }
                 }
                 if let Some(unit) = self.simulation.world.unit(*selected) {
+                    let compact_unit_card = dense_hud;
                     let identity = self.unit_identity_label(*selected, kind);
                     self.draw_text(
                         ctx.renderer,
@@ -6150,6 +6216,15 @@ impl Game for LastLight {
                         8.1,
                     );
                     let role_text = match kind {
+                        UnitKind::Warden if count == 1 && compact_unit_card => {
+                            format!("{identity} // {}", kind.role().label())
+                        }
+                        UnitKind::Engineer if count == 1 && compact_unit_card => {
+                            format!("{identity} // {}", kind.role().label())
+                        }
+                        UnitKind::Surveyor if count == 1 && compact_unit_card => {
+                            format!("{identity} // {}", kind.role().label())
+                        }
                         UnitKind::Warden if count == 1 => {
                             format!("{identity} // {} // SURGE", kind.role().label())
                         }
@@ -6166,11 +6241,15 @@ impl Game for LastLight {
                         ctx.renderer,
                         &role_text,
                         unit_card + Vec2::new(122.0, 48.0) * hud_scale,
-                        1.55 * hud_scale,
+                        if compact_unit_card {
+                            1.35 * hud_scale
+                        } else {
+                            1.55 * hud_scale
+                        },
                         Color::rgba(0.55, 0.75, 0.78, 0.9),
                         8.1,
                     );
-                    if count > 1 {
+                    if count > 1 && !compact_unit_card {
                         let mut role_counts = [0_u32; 3];
                         for id in self.simulation.world.selection().ids() {
                             match self.simulation.kinds.get(id).copied() {
@@ -6216,7 +6295,7 @@ impl Game for LastLight {
                                 .draw_sprite(self.tex_portraits, portrait.with_z(8.1));
                         }
                     }
-                    if count == 1 {
+                    if count == 1 && !compact_unit_card {
                         if let Some(ability) = MissionSimulation::ability_for_kind(kind) {
                             let cooldown = self.simulation.ability_cooldown(*selected);
                             let ability_text = if cooldown > 0.0 {
@@ -6468,25 +6547,18 @@ impl Game for LastLight {
             && !self.defeat
             && self.command_card_visible()
         {
+            let compact_card = self.command_card_compact || dense_hud;
             let card_text = Self::command_card_text_origin(ctx.renderer);
-            let visible_rows = self.visible_command_card_rows();
-            let panel_size = if self.command_card_compact {
+            let visible_rows = self.visible_command_card_rows_for_display(ctx.renderer);
+            let panel_size = if compact_card {
                 Vec2::new(310.0, (visible_rows.len().max(1) as f32 * 30.0) + 104.0)
             } else {
-                Vec2::new(530.0, 244.0)
+                Vec2::new(if dense_hud { 500.0 } else { 530.0 }, 244.0)
             };
             let card_center = card_text
                 + Vec2::new(
-                    if self.command_card_compact {
-                        155.0
-                    } else {
-                        240.0
-                    },
-                    if self.command_card_compact {
-                        -132.0
-                    } else {
-                        -132.5
-                    },
+                    if compact_card { 155.0 } else { 240.0 },
+                    if compact_card { -132.0 } else { -132.5 },
                 ) * hud_scale;
             ctx.renderer.draw_sprite(
                 self.tex_ui,
@@ -6523,7 +6595,11 @@ impl Game for LastLight {
                 ctx.renderer,
                 &card_title,
                 card_text,
-                2.8 * hud_scale,
+                if compact_card {
+                    2.3 * hud_scale
+                } else {
+                    2.8 * hud_scale
+                },
                 Color::rgb(0.3, 1.4, 1.2),
                 8.0,
             );
@@ -6552,7 +6628,11 @@ impl Game for LastLight {
                     ctx.renderer,
                     &command_label,
                     rect.min + Vec2::new(8.0, 8.0) * hud_scale,
-                    1.65 * hud_scale,
+                    if compact_card {
+                        1.42 * hud_scale
+                    } else {
+                        1.65 * hud_scale
+                    },
                     if available {
                         Color::rgb(0.88, 0.92, 0.92)
                     } else {
@@ -6562,20 +6642,35 @@ impl Game for LastLight {
                 );
             }
             if controls_hint_visible {
+                if !dense_hud {
+                    self.draw_text(
+                        ctx.renderer,
+                        "CMD/CTRL+1-5 ASSIGN   1-5 OR CLICK RECALL",
+                        card_text + Vec2::new(0.0, -142.0) * hud_scale,
+                        1.4 * hud_scale,
+                        Color::rgba(0.55, 0.7, 0.78, 0.9),
+                        8.0,
+                    );
+                } else {
+                    self.draw_text(
+                        ctx.renderer,
+                        "CTRL+1-5 ASSIGN   1-5 RECALL",
+                        card_text + Vec2::new(0.0, -142.0) * hud_scale,
+                        1.35 * hud_scale,
+                        Color::rgba(0.58, 0.73, 0.84, 0.86),
+                        8.0,
+                    );
+                }
+            } else if self.command_card_has_more_rows_for_display(ctx.renderer) {
                 self.draw_text(
                     ctx.renderer,
-                    "CMD/CTRL+1-5 ASSIGN   1-5 OR CLICK RECALL",
-                    card_text + Vec2::new(0.0, -142.0) * hud_scale,
-                    1.6 * hud_scale,
-                    Color::rgba(0.55, 0.7, 0.78, 0.9),
-                    8.0,
-                );
-            } else if self.command_card_compact && self.command_card_has_more_rows() {
-                self.draw_text(
-                    ctx.renderer,
-                    "M SHOW MORE COMMANDS",
+                    if dense_hud {
+                        "M EXPAND COMMANDS"
+                    } else {
+                        "M SHOW MORE COMMANDS"
+                    },
                     card_text + Vec2::new(0.0, -112.0) * hud_scale,
-                    1.4 * hud_scale,
+                    1.35 * hud_scale,
                     Color::rgba(0.55, 0.78, 0.9, 0.9),
                     8.0,
                 );
@@ -6626,35 +6721,39 @@ impl Game for LastLight {
                     } else {
                         2.0
                     };
-                self.draw_text(
-                    ctx.renderer,
-                    &queue_label,
-                    card_text + Vec2::new(0.0, -166.0) * hud_scale,
-                    queue_label_pixel * hud_scale,
-                    Color::rgb(1.15, 0.7, 0.25),
-                    8.0,
-                );
+                if !dense_hud {
+                    self.draw_text(
+                        ctx.renderer,
+                        &queue_label,
+                        card_text + Vec2::new(0.0, -166.0) * hud_scale,
+                        queue_label_pixel * hud_scale,
+                        Color::rgb(1.15, 0.7, 0.25),
+                        8.0,
+                    );
+                }
             }
             if let Some(progress) = front_progress {
-                let bar_origin = card_text + Vec2::new(0.0, -188.0) * hud_scale;
-                ctx.renderer.draw_sprite(
-                    self.tex_ui,
-                    Sprite::new(
-                        bar_origin + Vec2::new(150.0, 0.0) * hud_scale,
-                        Vec2::new(300.0, 8.0) * hud_scale,
-                    )
-                    .with_color(Color::rgba(0.1, 0.1, 0.12, 0.9))
-                    .with_z(8.0),
-                );
-                ctx.renderer.draw_sprite(
-                    self.tex_ui,
-                    Sprite::new(
-                        bar_origin + Vec2::new(300.0 * progress * 0.5, 0.0) * hud_scale,
-                        Vec2::new(300.0 * progress, 8.0) * hud_scale,
-                    )
-                    .with_color(Color::rgb(1.15, 0.7, 0.25))
-                    .with_z(8.1),
-                );
+                if !dense_hud {
+                    let bar_origin = card_text + Vec2::new(0.0, -188.0) * hud_scale;
+                    ctx.renderer.draw_sprite(
+                        self.tex_ui,
+                        Sprite::new(
+                            bar_origin + Vec2::new(150.0, 0.0) * hud_scale,
+                            Vec2::new(300.0, 8.0) * hud_scale,
+                        )
+                        .with_color(Color::rgba(0.1, 0.1, 0.12, 0.9))
+                        .with_z(8.0),
+                    );
+                    ctx.renderer.draw_sprite(
+                        self.tex_ui,
+                        Sprite::new(
+                            bar_origin + Vec2::new(300.0 * progress * 0.5, 0.0) * hud_scale,
+                            Vec2::new(300.0 * progress, 8.0) * hud_scale,
+                        )
+                        .with_color(Color::rgb(1.15, 0.7, 0.25))
+                        .with_z(8.1),
+                    );
+                }
             }
         }
 
