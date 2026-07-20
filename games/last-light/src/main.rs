@@ -1058,6 +1058,12 @@ impl LastLight {
         kinds.all(|kind| kind == first).then_some(first)
     }
 
+    fn selected_single_unit_kind(&self) -> Option<UnitKind> {
+        (self.simulation.world.selection().ids().len() == 1)
+            .then(|| self.selected_unit_kind())
+            .flatten()
+    }
+
     fn selected_unit_id(&self) -> Option<UnitId> {
         self.simulation
             .world
@@ -1231,7 +1237,7 @@ impl LastLight {
                 5 => "B BEACON 50",
                 _ => "",
             },
-            None => match self.selected_unit_kind() {
+            None => match self.selected_single_unit_kind() {
                 Some(UnitKind::Warden) => match index {
                     0 => "Y  SURGE  +35%",
                     1 => "A  ATTACK-MOVE",
@@ -1364,7 +1370,7 @@ impl LastLight {
                 Some(KeyCode::KeyX)
             }
             Some(StructureKind::Fabricator) => COMMAND_CARD_KEYS.get(index).copied(),
-            None => match self.selected_unit_kind() {
+            None => match self.selected_single_unit_kind() {
                 Some(UnitKind::Warden) => [
                     KeyCode::KeyY,
                     KeyCode::KeyA,
@@ -1892,17 +1898,19 @@ impl LastLight {
             self.arm_follow();
         }
         if ctx.input.key_pressed(KeyCode::KeyY) {
-            self.activate_selected_ability();
+            if self.selected_single_unit_kind().is_some() {
+                self.activate_selected_ability();
+            }
         }
         if ctx.input.key_pressed(KeyCode::KeyG) {
             if self.selected_resource_node.is_some() {
                 self.assign_selected_resource_node();
-            } else if self.selected_unit_kind() == Some(UnitKind::Surveyor) {
+            } else if self.selected_single_unit_kind() == Some(UnitKind::Surveyor) {
                 self.assign_nearest_harvest_order();
             }
         }
         if ctx.input.key_pressed(KeyCode::KeyK)
-            && self.selected_unit_kind() == Some(UnitKind::Engineer)
+            && self.selected_single_unit_kind() == Some(UnitKind::Engineer)
         {
             self.awaken_lumen_console();
         }
@@ -1953,6 +1961,9 @@ impl LastLight {
                     if Self::command_card_row_rect(card_text, index, scale)
                         .contains_point(mouse_world)
                     {
+                        if !self.command_card_available(index) {
+                            return;
+                        }
                         match (
                             self.selected_structure,
                             self.command_card_key_at(index, mouse_world, card_text, scale),
@@ -3106,7 +3117,7 @@ impl LastLight {
                         self.simulation.world.clear_selection();
                     } else if let Some(node) = self.salvage_node_at(mouse_world) {
                         self.selected_structure = None;
-                        if self.selected_unit_kind() == Some(UnitKind::Surveyor) {
+                        if self.selected_single_unit_kind() == Some(UnitKind::Surveyor) {
                             self.selected_resource_node = None;
                             let assigned = self.assign_harvest_order(node);
                             self.status = Some(if assigned > 0 {
@@ -5921,7 +5932,8 @@ impl Game for LastLight {
             let selection_count = self.simulation.world.selection().ids().len();
             let control_hint = if selection_count == 0 {
                 "DRAG SELECT  •  TERRAIN MOVE  •  F1 HELP"
-            } else if selection_count == 1 && self.selected_unit_kind() == Some(UnitKind::Surveyor)
+            } else if selection_count == 1
+                && self.selected_single_unit_kind() == Some(UnitKind::Surveyor)
             {
                 "G HARVEST  •  RIGHT CLICK MOVE  •  Y SCAN  •  F1 HELP"
             } else {
@@ -6447,7 +6459,7 @@ impl Game for LastLight {
                     Some(StructureKind::Relay(_)) => "POWER RELAY".to_owned(),
                     Some(StructureKind::Reactor) => "AUXILIARY REACTOR".to_owned(),
                     Some(StructureKind::Fabricator) => self.fabricator_card_title(),
-                    None => match self.selected_unit_kind() {
+                    None => match self.selected_single_unit_kind() {
                         Some(kind) => self
                             .selected_unit_id()
                             .map(|id| {
@@ -8530,6 +8542,71 @@ mod tests {
         assert!(game.command_card_label(0).contains("ATTACK-MOVE"));
         assert_eq!(game.command_card_key(5), Some(KeyCode::KeyB));
         assert!(!game.command_card_label(0).contains("WARDEN"));
+    }
+
+    #[test]
+    fn same_kind_squad_card_hides_specialist_singleton_rows() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+
+        let modifiers = game.simulation_modifiers();
+        let spawn_point = Vec2::new(-120.0, -80.0);
+        game.simulation
+            .spawn(UnitKind::Warden, PLAYER, spawn_point, 90.0, 210.0, modifiers);
+        game.simulation
+            .spawn(UnitKind::Warden, PLAYER, spawn_point + Vec2::new(18.0, 0.0), 90.0, 210.0, modifiers);
+
+        let warden_ids: Vec<UnitId> = game
+            .simulation
+            .kinds
+            .iter()
+            .filter_map(|(id, kind)| (*kind == UnitKind::Warden).then_some(*id))
+            .collect();
+        game.simulation.world.clear_selection();
+        for (index, id) in warden_ids.iter().take(2).enumerate() {
+            let position = game
+                .simulation
+                .world
+                .unit(*id)
+                .map(|unit| unit.position)
+                .expect("selected warden should still exist");
+            game.simulation
+                .world
+                .select_point(position, PLAYER, index != 0);
+        }
+
+        assert!(
+            game.simulation.world.selection().ids().len() > 1,
+            "same-kind squad should contain multiple wardens"
+        );
+        assert_eq!(game.command_card_key(0), Some(KeyCode::KeyA));
+        assert_eq!(game.command_card_label(0), "A  ATTACK-MOVE");
+        assert_eq!(game.command_card_key(5), Some(KeyCode::KeyB));
+        assert_eq!(game.command_card_label(5), "B  FIELD BEACON");
+        assert!(!game.command_card_label(0).contains("SURGE"));
+    }
+
+    #[test]
+    fn singleton_squad_still_surfaces_singleton_ability_rows() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+
+        assert!(
+            game.simulation.select_player_kind(UnitKind::Warden),
+            "the mission should have a warden to validate singleton behavior"
+        );
+        let warden = game
+            .simulation
+            .kinds
+            .iter()
+            .find_map(|(id, kind)| (*kind == UnitKind::Warden).then_some(*id))
+            .expect("reclaim has a warden");
+        let position = game.simulation.world.unit(warden).unwrap().position;
+        game.simulation.world.clear_selection();
+        game.simulation.world.select_point(position, PLAYER, false);
+
+        assert_eq!(game.command_card_key(0), Some(KeyCode::KeyY));
+        assert!(game.command_card_label(0).contains("SURGE"));
     }
 
     #[test]
