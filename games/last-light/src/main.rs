@@ -1199,7 +1199,8 @@ impl LastLight {
         if !self.command_card_should_paginate(renderer) {
             return;
         }
-        self.command_card_page = (self.command_card_visible_page() + 1) % self.command_card_page_count();
+        self.command_card_page =
+            (self.command_card_visible_page() + 1) % self.command_card_page_count();
         self.status = Some((
             format!(
                 "CMD PAGE {} / {}",
@@ -6713,10 +6714,7 @@ impl Game for LastLight {
                 Vec2::new(310.0, (visible_rows.len().max(1) as f32 * 30.0) + 104.0)
             };
             let card_center = card_text
-                + Vec2::new(
-                    155.0,
-                    if compact_card { -132.0 } else { -132.5 },
-                ) * hud_scale;
+                + Vec2::new(155.0, if compact_card { -132.0 } else { -132.5 }) * hud_scale;
             ctx.renderer.draw_sprite(
                 self.tex_ui,
                 Sprite::new(card_center, panel_size * hud_scale)
@@ -8995,7 +8993,10 @@ mod tests {
         assert_eq!(game.simulation.production.items().len(), before_queue);
         assert_eq!(game.simulation.resources.amount(), before_resource);
         assert_eq!(game.simulation.flux, before_flux);
-        assert_eq!(game.simulation.ability_cooldown(warden_ids[0]), before_cooldown);
+        assert_eq!(
+            game.simulation.ability_cooldown(warden_ids[0]),
+            before_cooldown
+        );
     }
 
     #[test]
