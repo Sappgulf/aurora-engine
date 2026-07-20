@@ -65,12 +65,6 @@ const COMMAND_CARD_LABELS: [&str; 5] = [
     "T  STOP",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResourceCardAction {
-    AssignSurveyor,
-    FocusNode,
-}
-
 /// Source atlas for a tactical unit card portrait.
 ///
 /// Lantern specialists use the character portrait sheet because their named
@@ -1422,12 +1416,9 @@ impl LastLight {
         }
     }
 
-    fn resource_card_action(key: KeyCode) -> Option<ResourceCardAction> {
-        match key {
-            KeyCode::KeyG => Some(ResourceCardAction::AssignSurveyor),
-            KeyCode::KeyR => Some(ResourceCardAction::FocusNode),
-            _ => None,
-        }
+    fn command_row_for_key(&self, key: KeyCode) -> Option<usize> {
+        (0..COMMAND_CARD_KEYS.len())
+            .find_map(|index| (self.command_card_key(index) == Some(key)).then_some(index))
     }
 
     /// The Fabricator's final row intentionally contains two compact actions.
@@ -1759,11 +1750,61 @@ impl LastLight {
     }
 
     fn apply_command_action(&mut self, key: KeyCode) {
+        let Some(row) = self.command_row_for_key(key) else {
+            return;
+        };
+        if !self.command_card_available(row) {
+            return;
+        }
+
+        if self.selected_resource_node.is_some() {
+            match key {
+                KeyCode::KeyG => self.assign_selected_resource_node(),
+                KeyCode::KeyR => {}
+                _ => {}
+            }
+            return;
+        }
+
+        if let Some(structure) = self.selected_structure {
+            match structure {
+                StructureKind::Relay(_) | StructureKind::Reactor => {
+                    if key == KeyCode::KeyC {
+                        self.activate_structure_command(structure);
+                    }
+                }
+                StructureKind::Fabricator => match key {
+                    KeyCode::KeyQ => self.queue_unit(UnitKind::Warden),
+                    KeyCode::KeyE => self.queue_unit(UnitKind::Engineer),
+                    KeyCode::KeyF => self.queue_unit(UnitKind::Surveyor),
+                    KeyCode::KeyX => self.cancel_queued_unit(0),
+                    KeyCode::KeyB => {
+                        self.placing_beacon = !self.placing_beacon;
+                        self.status = Some((
+                            if self.placing_beacon {
+                                "BEACON PLACEMENT — LEFT CLICK / ESC CANCEL"
+                            } else {
+                                "BEACON PLACEMENT CANCELLED"
+                            }
+                            .to_owned(),
+                            3.0,
+                        ));
+                    }
+                    _ => {}
+                },
+            }
+            return;
+        }
+
         match key {
-            KeyCode::KeyQ => self.queue_unit(UnitKind::Warden),
-            KeyCode::KeyE => self.queue_unit(UnitKind::Engineer),
-            KeyCode::KeyF => self.queue_unit(UnitKind::Surveyor),
-            KeyCode::KeyX => self.cancel_queued_unit(0),
+            KeyCode::KeyY => {
+                if self.selected_single_unit_kind().is_some() {
+                    self.activate_selected_ability();
+                }
+            }
+            KeyCode::KeyA => self.arm_attack_move(),
+            KeyCode::KeyP => self.arm_patrol(),
+            KeyCode::KeyU => self.arm_follow(),
             KeyCode::KeyH => {
                 self.simulation.world.issue_hold();
                 self.status = Some(("SQUAD HOLDING POSITION".to_owned(), 2.0));
@@ -1785,12 +1826,16 @@ impl LastLight {
                     3.0,
                 ));
             }
-            KeyCode::KeyY => self.activate_selected_ability(),
-            KeyCode::KeyA => self.arm_attack_move(),
-            KeyCode::KeyP => self.arm_patrol(),
-            KeyCode::KeyU => self.arm_follow(),
-            KeyCode::KeyG => self.assign_nearest_harvest_order(),
-            KeyCode::KeyK => self.awaken_lumen_console(),
+            KeyCode::KeyG => {
+                if self.selected_single_unit_kind() == Some(UnitKind::Surveyor) {
+                    self.assign_nearest_harvest_order();
+                }
+            }
+            KeyCode::KeyK => {
+                if self.selected_single_unit_kind() == Some(UnitKind::Engineer) {
+                    self.awaken_lumen_console();
+                }
+            }
             _ => {}
         }
     }
@@ -1886,7 +1931,9 @@ impl LastLight {
         }
         if ctx.input.key_pressed(KeyCode::KeyR) {
             if self.selected_resource_node.is_some() {
-                self.focus_resource_node(ctx);
+                if self.command_row_for_key(KeyCode::KeyR).is_some() {
+                    self.focus_resource_node(ctx);
+                }
             } else {
                 self.focus_next_objective(ctx);
             }
@@ -1894,52 +1941,31 @@ impl LastLight {
         if ctx.input.key_pressed(KeyCode::Space) {
             self.focus_last_transmission(ctx);
         }
-        if ctx.input.key_pressed(KeyCode::KeyA) {
-            self.arm_attack_move();
-        }
-        if ctx.input.key_pressed(KeyCode::KeyP) {
-            self.arm_patrol();
-        }
-        if ctx.input.key_pressed(KeyCode::KeyU) {
-            self.arm_follow();
-        }
-        if ctx.input.key_pressed(KeyCode::KeyY) {
-            if self.selected_single_unit_kind().is_some() {
-                self.activate_selected_ability();
+        for key in [
+            KeyCode::KeyA,
+            KeyCode::KeyP,
+            KeyCode::KeyU,
+            KeyCode::KeyY,
+            KeyCode::KeyG,
+            KeyCode::KeyK,
+            KeyCode::KeyH,
+            KeyCode::KeyT,
+            KeyCode::KeyB,
+            KeyCode::KeyQ,
+            KeyCode::KeyE,
+            KeyCode::KeyF,
+            KeyCode::KeyC,
+            KeyCode::KeyX,
+        ] {
+            if ctx.input.key_pressed(key) {
+                self.apply_command_action(key);
             }
         }
-        if ctx.input.key_pressed(KeyCode::KeyG) {
-            if self.selected_resource_node.is_some() {
-                self.assign_selected_resource_node();
-            } else if self.selected_single_unit_kind() == Some(UnitKind::Surveyor) {
-                self.assign_nearest_harvest_order();
-            }
-        }
-        if ctx.input.key_pressed(KeyCode::KeyK)
-            && self.selected_single_unit_kind() == Some(UnitKind::Engineer)
-        {
-            self.awaken_lumen_console();
-        }
-        if let Some(structure @ (StructureKind::Relay(_) | StructureKind::Reactor)) =
-            self.selected_structure
-        {
-            if ctx.input.key_pressed(KeyCode::KeyC) {
-                self.activate_structure_command(structure);
-            }
-        } else if matches!(self.selected_structure, Some(StructureKind::Fabricator))
-            && ctx.input.key_pressed(KeyCode::KeyX)
-        {
-            self.cancel_queued_unit(0);
-        } else if matches!(self.selected_structure, Some(StructureKind::Fabricator))
-            && ctx.input.key_pressed(KeyCode::KeyD)
+        if ctx.input.key_pressed(KeyCode::KeyD)
+            && self.command_row_for_key(KeyCode::KeyD).is_none()
+            && matches!(self.selected_structure, Some(StructureKind::Fabricator))
         {
             self.upgrade_supply_module();
-        } else {
-            for key in COMMAND_CARD_KEYS {
-                if ctx.input.key_pressed(key) {
-                    self.apply_command_action(key);
-                }
-            }
         }
 
         for slot in 1..=5 {
@@ -1970,32 +1996,19 @@ impl LastLight {
                         if !self.command_card_available(index) {
                             return;
                         }
-                        match (
-                            self.selected_structure,
-                            self.command_card_key_at(index, mouse_world, card_text, scale),
-                        ) {
-                            (None, Some(key)) if self.selected_resource_node.is_some() => {
-                                match Self::resource_card_action(key) {
-                                    Some(ResourceCardAction::AssignSurveyor) => {
-                                        self.assign_selected_resource_node()
-                                    }
-                                    Some(ResourceCardAction::FocusNode) => {
-                                        self.focus_resource_node(ctx)
-                                    }
-                                    None => {}
-                                }
+                        if let Some(key) =
+                            self.command_card_key_at(index, mouse_world, card_text, scale)
+                        {
+                            if key == KeyCode::KeyD
+                                && matches!(
+                                    self.selected_structure,
+                                    Some(StructureKind::Fabricator)
+                                )
+                            {
+                                self.upgrade_supply_module();
+                            } else {
+                                self.apply_command_action(key);
                             }
-                            (
-                                Some(
-                                    structure @ (StructureKind::Relay(_) | StructureKind::Reactor),
-                                ),
-                                Some(KeyCode::KeyC),
-                            ) => self.activate_structure_command(structure),
-                            (Some(StructureKind::Fabricator), Some(KeyCode::KeyD)) => {
-                                self.upgrade_supply_module()
-                            }
-                            (_, Some(key)) => self.apply_command_action(key),
-                            _ => {}
                         }
                         return;
                     }
@@ -8547,18 +8560,34 @@ mod tests {
 
     #[test]
     fn resource_card_keys_route_to_the_selected_node_actions() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        game.selected_resource_node = Some(0);
+        game.selected_structure = None;
+        assert_eq!(game.command_card_key(0), Some(KeyCode::KeyG));
+        assert_eq!(game.command_card_key(1), Some(KeyCode::KeyR));
         assert_eq!(
-            LastLight::resource_card_action(KeyCode::KeyG),
-            Some(ResourceCardAction::AssignSurveyor)
-        );
-        assert_eq!(
-            LastLight::resource_card_action(KeyCode::KeyR),
-            Some(ResourceCardAction::FocusNode)
-        );
-        assert_eq!(
-            LastLight::resource_card_action(KeyCode::KeyQ),
+            game.command_row_for_key(KeyCode::KeyQ),
             None,
             "resource cards must not fall through to production shortcuts"
+        );
+        assert_eq!(game.command_row_for_key(KeyCode::KeyG), Some(0));
+        assert_eq!(game.command_row_for_key(KeyCode::KeyR), Some(1));
+    }
+
+    #[test]
+    fn structure_card_key_lookup_filters_context_rows() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        game.selected_structure = Some(StructureKind::Relay(0));
+
+        assert_eq!(game.command_row_for_key(KeyCode::KeyC), Some(0));
+        assert_eq!(game.command_row_for_key(KeyCode::KeyQ), None);
+        assert_eq!(game.command_row_for_key(KeyCode::KeyE), None);
+        assert_eq!(
+            game.command_row_for_key(KeyCode::KeyF),
+            None,
+            "structure cards must not fall through to squad/production shortcuts"
         );
     }
 
@@ -8737,6 +8766,56 @@ mod tests {
         game.simulation.world.unit_mut(surveyor).unwrap().health = 0.0;
         game.harvest_jobs.remove(&surveyor);
         assert_eq!(game.idle_surveyor_hud_copy(), None);
+    }
+
+    #[test]
+    fn command_row_lookup_matches_visible_context_only() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+
+        assert_eq!(game.command_row_for_key(KeyCode::KeyC), None);
+        game.selected_structure = Some(StructureKind::Relay(0));
+        assert_eq!(game.command_row_for_key(KeyCode::KeyC), Some(0));
+        assert_eq!(game.command_row_for_key(KeyCode::KeyQ), None);
+    }
+
+    #[test]
+    fn structure_context_ignores_unit_and_global_commands() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        let queue_before = game.simulation.production.items().len();
+
+        game.selected_structure = Some(StructureKind::Relay(0));
+        game.selected_resource_node = None;
+        game.simulation.world.clear_selection();
+        game.attack_move_mode = false;
+
+        game.apply_command_action(KeyCode::KeyA);
+        game.apply_command_action(KeyCode::KeyQ);
+        game.apply_command_action(KeyCode::KeyG);
+        game.apply_command_action(KeyCode::KeyT);
+
+        assert!(!game.attack_move_mode);
+        assert_eq!(game.simulation.production.items().len(), queue_before);
+    }
+
+    #[test]
+    fn resource_context_ignores_unit_only_production_keys() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        let queue_before = game.simulation.production.items().len();
+
+        game.selected_structure = None;
+        game.selected_resource_node = Some(0);
+        game.attack_move_mode = false;
+
+        game.apply_command_action(KeyCode::KeyQ);
+        game.apply_command_action(KeyCode::KeyE);
+        game.apply_command_action(KeyCode::KeyA);
+        game.apply_command_action(KeyCode::KeyT);
+
+        assert!(!game.attack_move_mode);
+        assert_eq!(game.simulation.production.items().len(), queue_before);
     }
 
     #[test]
