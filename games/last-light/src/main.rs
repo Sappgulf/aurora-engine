@@ -1127,15 +1127,15 @@ impl LastLight {
             || self.selected_squad_active()
     }
 
-    /// Command card rows should remain stable across contexts; this helper
-    /// always returns only non-empty rows so hidden rows do not render as dead
-    /// space.
+    /// Command card rows are contextual and only include actions that can
+    /// currently execute, so unavailable verbs remain hidden instead of
+    /// rendering as disabled UI noise.
     fn command_card_rows(&self) -> Vec<usize> {
         (0..COMMAND_CARD_KEYS.len())
             .filter(|&index| {
                 let key = self.command_card_key(index);
                 let label = self.command_card_label(index);
-                key.is_some() || !label.is_empty()
+                (key.is_some() || !label.is_empty()) && self.command_card_available(index)
             })
             .collect()
     }
@@ -1534,7 +1534,8 @@ impl LastLight {
     }
 
     fn command_row_for_key(&self, key: KeyCode) -> Option<usize> {
-        (0..COMMAND_CARD_KEYS.len())
+        self.command_card_rows()
+            .into_iter()
             .find_map(|index| (self.command_card_key(index) == Some(key)).then_some(index))
     }
 
@@ -8936,6 +8937,8 @@ mod tests {
         game.start_mission(missions::reclaim_the_reactor());
         game.selected_structure = Some(StructureKind::Relay(0));
 
+        assert_eq!(game.command_row_for_key(KeyCode::KeyC), None);
+        game.simulation.relays[0].active = true;
         assert_eq!(game.command_row_for_key(KeyCode::KeyC), Some(0));
         assert_eq!(game.command_row_for_key(KeyCode::KeyQ), None);
         assert_eq!(game.command_row_for_key(KeyCode::KeyE), None);
@@ -9194,6 +9197,8 @@ mod tests {
 
         assert_eq!(game.command_row_for_key(KeyCode::KeyC), None);
         game.selected_structure = Some(StructureKind::Relay(0));
+        // Relay actions stay hidden until the relay is active and funded.
+        game.simulation.relays[0].active = true;
         assert_eq!(game.command_row_for_key(KeyCode::KeyC), Some(0));
         assert_eq!(game.command_row_for_key(KeyCode::KeyQ), None);
     }
