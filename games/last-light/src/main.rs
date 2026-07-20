@@ -40,7 +40,7 @@ const BEACON_COST: u32 = 50;
 /// second. Keeping the value beside the HUD formatter prevents the card from
 /// promising a rate that differs from the fixed-step harvest loop.
 const HARVEST_RATE_PER_SECOND: f32 = 18.0;
-const ENEMY_CLICK_RADIUS_SCALE: f32 = 2.8;
+const ENEMY_CLICK_RADIUS_SCALE: f32 = 3.55;
 const FRIENDLY_CLICK_RADIUS_SCALE: f32 = 1.9;
 const FRIENDLY_HOVER_RADIUS_SCALE: f32 = 1.6;
 const RESOURCE_CLICK_RADIUS: f32 = 130.0;
@@ -218,6 +218,7 @@ struct LastLight {
     follow_mode: bool,
     status: Option<(String, f32)>,
     command_card_compact: bool,
+    minimal_hud: bool,
     save_store: CampaignStore,
     save_data: SaveData,
     victory_saved: bool,
@@ -385,6 +386,7 @@ impl LastLight {
             follow_mode: false,
             status: None,
             command_card_compact: true,
+            minimal_hud: false,
             save_store,
             save_data,
             victory_saved: false,
@@ -1124,7 +1126,7 @@ impl LastLight {
     /// restricting to the first few actionable rows.
     fn visible_command_card_rows(&self) -> Vec<usize> {
         let rows = self.command_card_rows();
-        if !self.command_card_compact {
+        if !self.command_card_compact && !self.minimal_hud {
             rows
         } else {
             rows.into_iter().take(COMMAND_CARD_COMPACT_ROWS).collect()
@@ -1133,7 +1135,7 @@ impl LastLight {
 
     fn visible_command_card_rows_for_display(&self, renderer: &Renderer) -> Vec<usize> {
         let rows = self.command_card_rows();
-        if self.command_card_compact || Self::hud_dense_layout(renderer) {
+        if self.command_card_compact || self.minimal_hud || Self::hud_dense_layout(renderer) {
             rows.into_iter().take(COMMAND_CARD_COMPACT_ROWS).collect()
         } else {
             rows
@@ -1615,7 +1617,7 @@ impl LastLight {
             self.status = Some(("SELECT A RESOURCE NODE FIRST".to_owned(), 2.0));
             return;
         };
-        let Some((position, remaining, max_workers, node_kind)) = self
+        let Some((_, remaining, max_workers, node_kind)) = self
             .salvage_nodes
             .get(node)
             .map(|node| (node.position, node.remaining, node.max_workers, node.kind))
@@ -1634,25 +1636,7 @@ impl LastLight {
             self.status = Some(("RESOURCE NODE SATURATED".to_owned(), 2.0));
             return;
         }
-        let candidates: Vec<UnitId> = self
-            .simulation
-            .world
-            .units()
-            .iter()
-            .filter(|unit| {
-                unit.faction == PLAYER
-                    && unit.alive()
-                    && self.simulation.kinds.get(&unit.id) == Some(&UnitKind::Surveyor)
-                    && !self.harvest_jobs.contains_key(&unit.id)
-            })
-            .map(|unit| (unit.id, unit.position.distance(position)))
-            .min_by(|left, right| {
-                left.1
-                    .total_cmp(&right.1)
-                    .then_with(|| left.0 .0.cmp(&right.0 .0))
-            })
-            .map(|(id, _)| vec![id])
-            .unwrap_or_default();
+        let candidates: Vec<UnitId> = self.nearest_idle_surveyors_to_node(node);
         let assigned =
             self.assign_surveyors_to_node(node, &candidates[..candidates.len().min(slots)]);
         let kind = match node_kind {
@@ -1931,6 +1915,17 @@ impl LastLight {
     }
 
     fn handle_command_keys(&mut self, ctx: &mut FrameCtx<'_>) {
+        if ctx.input.key_pressed(KeyCode::Tab) {
+            self.minimal_hud = !self.minimal_hud;
+            self.status = Some((
+                if self.minimal_hud {
+                    "HUD MODE // MINIMAL".to_owned()
+                } else {
+                    "HUD MODE // NORMAL".to_owned()
+                },
+                1.6,
+            ));
+        }
         if ctx.input.key_pressed(KeyCode::F1) {
             self.controls_hint_remaining = 5.0;
         }
@@ -2659,8 +2654,51 @@ impl LastLight {
         surveyors.len().min(available)
     }
 
+    fn nearest_idle_surveyors_to_node(&self, node: usize) -> Vec<UnitId> {
+        let Some((position, capacity)) = self.salvage_nodes.get(node).map(|salvage_node| {
+            let max_workers = salvage_node.max_workers as usize;
+            let occupied = self.workers_at_node(node);
+            (salvage_node.position, max_workers.saturating_sub(occupied))
+        }) else {
+            return Vec::new();
+        };
+        if capacity == 0 {
+            return Vec::new();
+        }
+        let mut candidates: Vec<(UnitId, f32)> = self
+            .simulation
+            .world
+            .units()
+            .iter()
+            .filter(|unit| {
+                unit.faction == PLAYER
+                    && unit.alive()
+                    && self.simulation.kinds.get(&unit.id) == Some(&UnitKind::Surveyor)
+                    && !self.harvest_jobs.contains_key(&unit.id)
+            })
+            .map(|unit| (unit.id, unit.position.distance(position)))
+            .collect();
+        candidates.sort_by(|left, right| {
+            left.1
+                .total_cmp(&right.1)
+                .then_with(|| left.0 .0.cmp(&right.0 .0))
+        });
+        let mut surveyors = Vec::new();
+        for (id, _) in candidates.into_iter().take(capacity) {
+            surveyors.push(id);
+        }
+        surveyors
+    }
+
     fn assign_harvest_order(&mut self, node: usize) -> usize {
-        let surveyors: Vec<UnitId> = self
+        let Some((_, max_workers)) = self
+            .salvage_nodes
+            .get(node)
+            .map(|node| (node.position, node.max_workers as usize))
+        else {
+            return 0;
+        };
+        let selected_surveyors: Vec<UnitId> = self
             .simulation
             .world
             .selection()
@@ -2669,7 +2707,19 @@ impl LastLight {
             .copied()
             .filter(|id| self.simulation.kinds.get(id) == Some(&UnitKind::Surveyor))
             .collect();
-        self.assign_surveyors_to_node(node, &surveyors)
+        let surveyors = if selected_surveyors.is_empty() {
+            self.nearest_idle_surveyors_to_node(node)
+                .into_iter()
+                .take(max_workers)
+                .collect()
+        } else {
+            selected_surveyors
+        };
+        if surveyors.is_empty() {
+            0
+        } else {
+            self.assign_surveyors_to_node(node, &surveyors)
+        }
     }
 
     fn resource_node_status_line(&self, node_index: usize) -> String {
@@ -3254,7 +3304,8 @@ impl LastLight {
                 if assigned > 0 {
                     self.status = Some((format!("{assigned} SURVEYOR // SALVAGE ROUTE SET"), 2.5));
                 } else {
-                    self.status = Some(("SELECT A SURVEYOR TO HARVEST".to_owned(), 2.5));
+                    self.status =
+                        Some(("NO SURVEYOR AVAILABLE // G KEY TO FIND ONE".to_owned(), 2.5));
                 }
             } else if let Some(enemy) = self.closest_enemy_at(mouse_world) {
                 self.simulation
@@ -5674,7 +5725,8 @@ impl Game for LastLight {
             }
         }
 
-        if !self.briefing && !self.paused && !self.victory && !self.defeat {
+        let hud_minimal = self.minimal_hud;
+        if !self.briefing && !self.paused && !self.victory && !self.defeat && !hud_minimal {
             let hud_scale = Self::hud_scale(ctx.renderer);
             let minimap = self.minimap_transform(ctx.renderer);
             ctx.renderer.draw_sprite(
@@ -5906,260 +5958,263 @@ impl Game for LastLight {
             .camera
             .world_from_viewport_fraction(Vec2::new(0.0, 1.0))
             + Vec2::new(30.0, -34.0) * hud_scale;
-        // Keep only the high-value StarCraft-style strip persistent. Detailed
-        // controls and action feedback are disclosed below as transient text.
-        let telemetry_panel_height = if controls_hint_visible {
-            132.0
-        } else if dense_hud {
-            84.0
-        } else {
-            104.0
-        };
-        ctx.renderer.draw_sprite(
-            self.tex_ui,
-            Sprite::new(
-                top_left + Vec2::new(260.0, -(telemetry_panel_height * 0.5 - 2.0)) * hud_scale,
-                Vec2::new(
-                    if dense_hud { 540.0 } else { 590.0 },
-                    telemetry_panel_height,
-                ) * hud_scale,
-            )
-            .with_color(Color::rgba(0.01, 0.025, 0.05, 0.68))
-            .with_z(7.5),
-        );
-        let active_relays = self
-            .simulation
-            .relays
-            .iter()
-            .filter(|relay| relay.active)
-            .count();
-        let objective_line = match self.mission.victory {
-            VictoryCondition::RestoreRelaysAndDefeatBoss { .. } => self
-                .mission_objective_progress_line()
-                .map(|specialist| {
-                    format!(
-                        "{}  {specialist}  RELAYS {active_relays}/{}",
-                        self.mission.title,
-                        self.simulation.relays.len()
-                    )
-                })
-                .unwrap_or_else(|| {
-                    format!(
-                        "{}  RELAYS {active_relays}/{}",
-                        self.mission.title,
-                        self.simulation.relays.len()
-                    )
-                }),
-            VictoryCondition::EscortToExtraction { point, .. } => {
-                if let Some(scan_line) = self.mission_objective_progress_line() {
-                    format!("{}  {scan_line}", self.mission.title)
-                } else {
-                    let escort_status = self
-                        .simulation
-                        .escort_unit
-                        .and_then(|id| self.simulation.world.unit(id))
-                        .map(|unit| {
-                            if unit.alive() {
-                                format!("{:.0}M TO EXTRACTION", unit.position.distance(point))
-                            } else {
-                                "ESCORT LOST".to_owned()
-                            }
-                        })
-                        .unwrap_or_else(|| "ESCORT LOST".to_owned());
-                    format!("{}  {escort_status}", self.mission.title)
-                }
-            }
-        };
-        self.draw_text(
-            ctx.renderer,
-            &objective_line,
-            top_left,
-            if dense_hud {
-                2.9 * hud_scale
+        if !self.briefing && !self.victory && !self.defeat && !hud_minimal {
+            // Keep only the high-value StarCraft-style strip persistent. Detailed
+            // controls and action feedback are disclosed below as transient text.
+            let telemetry_panel_height = if controls_hint_visible {
+                132.0
+            } else if dense_hud {
+                84.0
             } else {
-                3.35 * hud_scale
-            },
-            Color::rgb(0.73, 1.15, 1.08),
-            8.0,
-        );
-        if let Some(raid_copy) = Self::raid_hud_copy(self.simulation.raid_state()) {
-            // Keep the warning in the open top-center lane. Anchoring it from
-            // the title's left edge made long mission names collide with the
-            // alert at the compact 1280px native viewport.
-            let top_center = ctx
-                .renderer
-                .camera
-                .world_from_viewport_fraction(Vec2::new(0.5, 1.0));
-            let chip_origin = top_center + Vec2::new(-95.0, -44.0) * hud_scale;
+                104.0
+            };
             ctx.renderer.draw_sprite(
                 self.tex_ui,
                 Sprite::new(
-                    chip_origin + Vec2::new(95.0, 0.0) * hud_scale,
-                    Vec2::new(190.0, 25.0) * hud_scale,
+                    top_left + Vec2::new(260.0, -(telemetry_panel_height * 0.5 - 2.0)) * hud_scale,
+                    Vec2::new(
+                        if dense_hud { 540.0 } else { 590.0 },
+                        telemetry_panel_height,
+                    ) * hud_scale,
                 )
-                .with_color(Color::rgba(0.34, 0.045, 0.11, 0.92))
-                .with_z(8.05),
+                .with_color(Color::rgba(0.01, 0.025, 0.05, 0.68))
+                .with_z(7.5),
             );
-            self.draw_text(
-                ctx.renderer,
-                &raid_copy,
-                chip_origin + Vec2::new(8.0, -5.0) * hud_scale,
-                1.28 * hud_scale,
-                Color::rgb(1.25, 0.52, 0.55),
-                8.1,
-            );
-        }
-        if controls_hint_visible && !dense_hud {
-            let selection_count = self.simulation.world.selection().ids().len();
-            let control_hint = if selection_count == 0 {
-                "DRAG SELECT  •  TERRAIN MOVE  •  F1 HELP"
-            } else if selection_count == 1
-                && self.selected_single_unit_kind() == Some(UnitKind::Surveyor)
-            {
-                "G HARVEST  •  RIGHT CLICK MOVE  •  Y SCAN  •  F1 HELP"
-            } else {
-                "RIGHT CLICK MOVE  •  SHIFT QUEUE  •  Y SPECIAL  •  F1 HELP"
+            let active_relays = self
+                .simulation
+                .relays
+                .iter()
+                .filter(|relay| relay.active)
+                .count();
+            let objective_line = match self.mission.victory {
+                VictoryCondition::RestoreRelaysAndDefeatBoss { .. } => self
+                    .mission_objective_progress_line()
+                    .map(|specialist| {
+                        format!(
+                            "{}  {specialist}  RELAYS {active_relays}/{}",
+                            self.mission.title,
+                            self.simulation.relays.len()
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{}  RELAYS {active_relays}/{}",
+                            self.mission.title,
+                            self.simulation.relays.len()
+                        )
+                    }),
+                VictoryCondition::EscortToExtraction { point, .. } => {
+                    if let Some(scan_line) = self.mission_objective_progress_line() {
+                        format!("{}  {scan_line}", self.mission.title)
+                    } else {
+                        let escort_status = self
+                            .simulation
+                            .escort_unit
+                            .and_then(|id| self.simulation.world.unit(id))
+                            .map(|unit| {
+                                if unit.alive() {
+                                    format!("{:.0}M TO EXTRACTION", unit.position.distance(point))
+                                } else {
+                                    "ESCORT LOST".to_owned()
+                                }
+                            })
+                            .unwrap_or_else(|| "ESCORT LOST".to_owned());
+                        format!("{}  {escort_status}", self.mission.title)
+                    }
+                }
             };
             self.draw_text(
                 ctx.renderer,
-                control_hint,
-                top_left + Vec2::new(0.0, -25.0) * hud_scale,
-                1.9 * hud_scale,
-                Color::rgba(0.58, 0.7, 0.78, 0.86),
+                &objective_line,
+                top_left,
+                if dense_hud {
+                    2.9 * hud_scale
+                } else {
+                    3.35 * hud_scale
+                },
+                Color::rgb(0.73, 1.15, 1.08),
                 8.0,
             );
-        }
-        if controls_hint_visible && dense_hud {
-            self.draw_text(
-                ctx.renderer,
-                "F1 FOR CONTROL HINT",
-                top_left + Vec2::new(0.0, -25.0) * hud_scale,
-                1.45 * hud_scale,
-                Color::rgba(0.55, 0.7, 0.8, 0.9),
-                8.0,
-            );
-        }
-        let income = active_relays * self.relay_income() as usize;
-        let cargo: u32 = self.harvest_jobs.values().map(|job| job.cargo).sum();
-        let resource_line = match (cargo > 0, self.lumen_cores > 0) {
-            (false, false) => format!(
-                "SALVAGE {}  FLUX {}",
-                self.simulation.resources.amount(),
-                self.simulation.flux
-            ),
-            (true, false) => format!(
-                "SALVAGE {}  FLUX {}  CARGO {cargo}",
-                self.simulation.resources.amount(),
-                self.simulation.flux
-            ),
-            (false, true) => format!(
-                "SALVAGE {}  FLUX {}  CORES {}",
-                self.simulation.resources.amount(),
-                self.simulation.flux,
-                self.lumen_cores
-            ),
-            (true, true) => format!(
-                "SALVAGE {}  FLUX {}  CARGO {cargo}  CORES {}",
-                self.simulation.resources.amount(),
-                self.simulation.flux,
-                self.lumen_cores
-            ),
-        };
-        if dense_hud {
-            self.draw_text(
-                ctx.renderer,
-                &format!(
-                    "{}  IN +{income}/S  RELAYS {}/{}",
-                    resource_line,
-                    active_relays + 1,
-                    self.simulation.relays.len() + 1
-                ),
-                top_left + Vec2::new(0.0, -52.0) * hud_scale,
-                2.15 * hud_scale,
-                Color::rgb(0.96, 0.72, 0.28),
-                8.0,
-            );
-        } else {
-            self.draw_text(
-                ctx.renderer,
-                &resource_line,
-                top_left + Vec2::new(0.0, -50.0) * hud_scale,
-                2.8 * hud_scale,
-                Color::rgb(0.96, 0.72, 0.28),
-                8.0,
-            );
-            self.draw_text(
-                ctx.renderer,
-                &format!(
-                    "IN +{income}/S  POWER {}/{}  SUPPLY {}/{}",
-                    active_relays + 1,
-                    self.simulation.relays.len() + 1,
-                    self.simulation.supply.used(),
-                    self.simulation.supply.capacity()
-                ),
-                top_left + Vec2::new(0.0, -75.0) * hud_scale,
-                2.35 * hud_scale,
-                Color::rgb(0.96, 0.72, 0.28),
-                8.0,
-            );
-        }
-        if !self.briefing && !self.victory && !self.defeat && !dense_hud {
-            if let Some(idle_copy) = self.idle_surveyor_hud_copy() {
-                // This chip lives in the unused right side of the telemetry
-                // panel. Its bounded copy keeps the global resource line
-                // readable and makes the alert disappear as soon as a route
-                // is assigned.
-                let chip_origin = top_left + Vec2::new(366.0, -49.0) * hud_scale;
+            if let Some(raid_copy) = Self::raid_hud_copy(self.simulation.raid_state()) {
+                // Keep the warning in the open top-center lane. Anchoring it from
+                // the title's left edge made long mission names collide with the
+                // alert at the compact 1280px native viewport.
+                let top_center = ctx
+                    .renderer
+                    .camera
+                    .world_from_viewport_fraction(Vec2::new(0.5, 1.0));
+                let chip_origin = top_center + Vec2::new(-95.0, -44.0) * hud_scale;
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
                     Sprite::new(
-                        chip_origin + Vec2::new(105.0, 0.0) * hud_scale,
-                        Vec2::new(218.0, 24.0) * hud_scale,
+                        chip_origin + Vec2::new(95.0, 0.0) * hud_scale,
+                        Vec2::new(190.0, 25.0) * hud_scale,
                     )
-                    .with_color(Color::rgba(0.34, 0.15, 0.055, 0.92))
+                    .with_color(Color::rgba(0.34, 0.045, 0.11, 0.92))
                     .with_z(8.05),
                 );
                 self.draw_text(
                     ctx.renderer,
-                    &idle_copy,
+                    &raid_copy,
                     chip_origin + Vec2::new(8.0, -5.0) * hud_scale,
-                    1.25 * hud_scale,
-                    Color::rgb(1.2, 0.72, 0.28),
+                    1.28 * hud_scale,
+                    Color::rgb(1.25, 0.52, 0.55),
                     8.1,
                 );
             }
-            if let Some((_target, objective_copy, accent)) = self.resource_objective_hud_copy() {
-                // Resource objectives use a second, lower exception lane so
-                // progress never collides with the global salvage/income
-                // readout. The fixed 252px shell matches the formatter's
-                // 32-character cap at the compact HUD text scale.
-                let chip_origin = top_left + Vec2::new(338.0, -100.0) * hud_scale;
-                ctx.renderer.draw_sprite(
-                    self.tex_ui,
-                    Sprite::new(
-                        chip_origin + Vec2::new(126.0, 0.0) * hud_scale,
-                        Vec2::new(252.0, 24.0) * hud_scale,
-                    )
-                    .with_color(Color::rgba(0.025, 0.07, 0.09, 0.94))
-                    .with_z(8.05),
+            if controls_hint_visible && !dense_hud {
+                let selection_count = self.simulation.world.selection().ids().len();
+                let control_hint = if selection_count == 0 {
+                    "DRAG SELECT  •  TERRAIN MOVE  •  F1 HELP"
+                } else if selection_count == 1
+                    && self.selected_single_unit_kind() == Some(UnitKind::Surveyor)
+                {
+                    "G HARVEST  •  RIGHT CLICK MOVE  •  Y SCAN  •  F1 HELP"
+                } else {
+                    "RIGHT CLICK MOVE  •  SHIFT QUEUE  •  Y SPECIAL  •  F1 HELP"
+                };
+                self.draw_text(
+                    ctx.renderer,
+                    control_hint,
+                    top_left + Vec2::new(0.0, -25.0) * hud_scale,
+                    1.9 * hud_scale,
+                    Color::rgba(0.58, 0.7, 0.78, 0.86),
+                    8.0,
                 );
-                ctx.renderer.draw_sprite(
-                    self.tex_ui,
-                    Sprite::new(
-                        chip_origin + Vec2::new(3.0, 0.0) * hud_scale,
-                        Vec2::new(5.0, 18.0) * hud_scale,
-                    )
-                    .with_color(accent)
-                    .with_z(8.1),
+            }
+            if controls_hint_visible && dense_hud {
+                self.draw_text(
+                    ctx.renderer,
+                    "F1 FOR CONTROL HINT",
+                    top_left + Vec2::new(0.0, -25.0) * hud_scale,
+                    1.45 * hud_scale,
+                    Color::rgba(0.55, 0.7, 0.8, 0.9),
+                    8.0,
+                );
+            }
+            let income = active_relays * self.relay_income() as usize;
+            let cargo: u32 = self.harvest_jobs.values().map(|job| job.cargo).sum();
+            let resource_line = match (cargo > 0, self.lumen_cores > 0) {
+                (false, false) => format!(
+                    "SALVAGE {}  FLUX {}",
+                    self.simulation.resources.amount(),
+                    self.simulation.flux
+                ),
+                (true, false) => format!(
+                    "SALVAGE {}  FLUX {}  CARGO {cargo}",
+                    self.simulation.resources.amount(),
+                    self.simulation.flux
+                ),
+                (false, true) => format!(
+                    "SALVAGE {}  FLUX {}  CORES {}",
+                    self.simulation.resources.amount(),
+                    self.simulation.flux,
+                    self.lumen_cores
+                ),
+                (true, true) => format!(
+                    "SALVAGE {}  FLUX {}  CARGO {cargo}  CORES {}",
+                    self.simulation.resources.amount(),
+                    self.simulation.flux,
+                    self.lumen_cores
+                ),
+            };
+            if dense_hud {
+                self.draw_text(
+                    ctx.renderer,
+                    &format!(
+                        "{}  IN +{income}/S  RELAYS {}/{}",
+                        resource_line,
+                        active_relays + 1,
+                        self.simulation.relays.len() + 1
+                    ),
+                    top_left + Vec2::new(0.0, -52.0) * hud_scale,
+                    2.15 * hud_scale,
+                    Color::rgb(0.96, 0.72, 0.28),
+                    8.0,
+                );
+            } else {
+                self.draw_text(
+                    ctx.renderer,
+                    &resource_line,
+                    top_left + Vec2::new(0.0, -50.0) * hud_scale,
+                    2.8 * hud_scale,
+                    Color::rgb(0.96, 0.72, 0.28),
+                    8.0,
                 );
                 self.draw_text(
                     ctx.renderer,
-                    &objective_copy,
-                    chip_origin + Vec2::new(14.0, -5.0) * hud_scale,
-                    1.2 * hud_scale,
-                    accent,
-                    8.15,
+                    &format!(
+                        "IN +{income}/S  POWER {}/{}  SUPPLY {}/{}",
+                        active_relays + 1,
+                        self.simulation.relays.len() + 1,
+                        self.simulation.supply.used(),
+                        self.simulation.supply.capacity()
+                    ),
+                    top_left + Vec2::new(0.0, -75.0) * hud_scale,
+                    2.35 * hud_scale,
+                    Color::rgb(0.96, 0.72, 0.28),
+                    8.0,
                 );
+            }
+            if !dense_hud {
+                if let Some(idle_copy) = self.idle_surveyor_hud_copy() {
+                    // This chip lives in the unused right side of the telemetry
+                    // panel. Its bounded copy keeps the global resource line
+                    // readable and makes the alert disappear as soon as a route
+                    // is assigned.
+                    let chip_origin = top_left + Vec2::new(366.0, -49.0) * hud_scale;
+                    ctx.renderer.draw_sprite(
+                        self.tex_ui,
+                        Sprite::new(
+                            chip_origin + Vec2::new(105.0, 0.0) * hud_scale,
+                            Vec2::new(218.0, 24.0) * hud_scale,
+                        )
+                        .with_color(Color::rgba(0.34, 0.15, 0.055, 0.92))
+                        .with_z(8.05),
+                    );
+                    self.draw_text(
+                        ctx.renderer,
+                        &idle_copy,
+                        chip_origin + Vec2::new(8.0, -5.0) * hud_scale,
+                        1.25 * hud_scale,
+                        Color::rgb(1.2, 0.72, 0.28),
+                        8.1,
+                    );
+                }
+                if let Some((_target, objective_copy, accent)) = self.resource_objective_hud_copy()
+                {
+                    // Resource objectives use a second, lower exception lane so
+                    // progress never collides with the global salvage/income
+                    // readout. The fixed 252px shell matches the formatter's
+                    // 32-character cap at the compact HUD text scale.
+                    let chip_origin = top_left + Vec2::new(338.0, -100.0) * hud_scale;
+                    ctx.renderer.draw_sprite(
+                        self.tex_ui,
+                        Sprite::new(
+                            chip_origin + Vec2::new(126.0, 0.0) * hud_scale,
+                            Vec2::new(252.0, 24.0) * hud_scale,
+                        )
+                        .with_color(Color::rgba(0.025, 0.07, 0.09, 0.94))
+                        .with_z(8.05),
+                    );
+                    ctx.renderer.draw_sprite(
+                        self.tex_ui,
+                        Sprite::new(
+                            chip_origin + Vec2::new(3.0, 0.0) * hud_scale,
+                            Vec2::new(5.0, 18.0) * hud_scale,
+                        )
+                        .with_color(accent)
+                        .with_z(8.1),
+                    );
+                    self.draw_text(
+                        ctx.renderer,
+                        &objective_copy,
+                        chip_origin + Vec2::new(14.0, -5.0) * hud_scale,
+                        1.2 * hud_scale,
+                        accent,
+                        8.15,
+                    );
+                }
             }
         }
         if let Some(selected) = self.simulation.world.selection().ids().first() {
@@ -6547,7 +6602,7 @@ impl Game for LastLight {
             && !self.defeat
             && self.command_card_visible()
         {
-            let compact_card = self.command_card_compact || dense_hud;
+            let compact_card = self.command_card_compact || self.minimal_hud || dense_hud;
             let card_text = Self::command_card_text_origin(ctx.renderer);
             let visible_rows = self.visible_command_card_rows_for_display(ctx.renderer);
             let panel_size = if compact_card {
