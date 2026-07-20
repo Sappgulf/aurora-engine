@@ -7,6 +7,7 @@
 use aurora_engine::{Aabb, TerrainZone};
 use glam::Vec2;
 
+use crate::assets::TextureAsset;
 use crate::mission_state::{
     EngineerRepairObjective, ResourceObjective, SpecialistObjective, SpecialistObjectiveKind,
     TerrainControlObjective,
@@ -153,6 +154,8 @@ pub struct MissionDef {
     /// Campaign decision recorded automatically on victory (independent of
     /// any mid-mission choice like `lumen_console`).
     pub unlock_decision: Option<&'static str>,
+    /// Mission-specific environment plate used by the renderer.
+    pub environment_plate: TextureAsset,
     /// Minimum `CampaignProgress::unlocked_mission` tier required to select
     /// this mission from the mission-select screen.
     pub required_tier: u32,
@@ -547,6 +550,7 @@ pub fn reclaim_the_reactor() -> MissionDef {
         unlock_next: 3,
         reward_lumen: 80,
         unlock_decision: Some("lumen-contact-established"),
+        environment_plate: TextureAsset::ReactorSectorReclaim,
         required_tier: 1,
     }
 }
@@ -673,6 +677,7 @@ pub fn voice_in_conduit_twelve() -> MissionDef {
         unlock_next: 4,
         reward_lumen: 90,
         unlock_decision: None,
+        environment_plate: TextureAsset::ReactorSectorVoice,
         required_tier: 3,
     }
 }
@@ -814,6 +819,7 @@ pub fn terms_of_salvage() -> MissionDef {
         unlock_next: 5,
         reward_lumen: 100,
         unlock_decision: Some("meridian-allied"),
+        environment_plate: TextureAsset::ReactorSectorTerms,
         required_tier: 4,
     }
     .expanded(1.28)
@@ -1011,6 +1017,7 @@ pub fn garden_below() -> MissionDef {
         unlock_next: 6,
         reward_lumen: 120,
         unlock_decision: Some("verdant-cultivated"),
+        environment_plate: TextureAsset::ReactorSectorGarden,
         required_tier: 5,
     }
     .expanded(1.12)
@@ -1196,6 +1203,7 @@ pub fn choir_invisible() -> MissionDef {
         unlock_next: 7,
         reward_lumen: 140,
         unlock_decision: Some("choir-invisible-cleared"),
+        environment_plate: TextureAsset::ReactorSectorChoir,
         required_tier: 6,
     }
     .expanded(1.16)
@@ -1374,6 +1382,7 @@ pub fn vesper_gate() -> MissionDef {
         unlock_next: 8,
         reward_lumen: 160,
         unlock_decision: Some("vesper-gate-open"),
+        environment_plate: TextureAsset::ReactorSectorVesper,
         required_tier: 7,
     }
     .expanded(1.08)
@@ -1579,6 +1588,7 @@ pub fn hollow_orbit() -> MissionDef {
         unlock_next: 9,
         reward_lumen: 190,
         unlock_decision: Some("hollow-orbit-anchored"),
+        environment_plate: TextureAsset::ReactorSectorHollow,
         required_tier: 8,
     }
     .expanded(1.18)

@@ -164,6 +164,7 @@ enum RallyHarvestOutcome {
 
 struct LastLight {
     tex_environment: TextureHandle,
+    environment_textures: HashMap<TextureAsset, TextureHandle>,
     tex_units: TextureHandle,
     tex_warden_move: TextureHandle,
     tex_warden_attack: TextureHandle,
@@ -328,6 +329,7 @@ impl LastLight {
 
         Self {
             tex_environment: TextureHandle::default(),
+            environment_textures: HashMap::default(),
             tex_units: TextureHandle::default(),
             tex_warden_move: TextureHandle::default(),
             tex_warden_attack: TextureHandle::default(),
@@ -1297,13 +1299,13 @@ impl LastLight {
         ))
     }
 
-    /// Returns a cover-sized world sprite for the authored sector plate.
+    /// Returns a cover-sized world sprite for the active mission's authored sector plate.
     ///
     /// The PNG is wider than the tactical map, so stretching it to `MAP_SIZE`
     /// bends floor lanes and perspective cues. Cover scaling keeps the source
     /// aspect ratio and lets the camera crop the harmless outer edge.
-    fn environment_sprite_size() -> Vec2 {
-        let (width, height) = TextureAsset::ReactorSector.spec().pixel_size;
+    fn environment_sprite_size(&self) -> Vec2 {
+        let (width, height) = self.mission.environment_plate.spec().pixel_size;
         let source_ratio = width as f32 / height as f32;
         let map_ratio = MAP_SIZE.x / MAP_SIZE.y;
         if source_ratio >= map_ratio {
@@ -1311,6 +1313,13 @@ impl LastLight {
         } else {
             Vec2::new(MAP_SIZE.x, MAP_SIZE.x / source_ratio)
         }
+    }
+
+    fn environment_texture(&self) -> TextureHandle {
+        self.environment_textures
+            .get(&self.mission.environment_plate)
+            .copied()
+            .unwrap_or(self.tex_environment)
     }
 
     /// Static command-card text prevents per-frame row/vector allocation.
@@ -4695,10 +4704,11 @@ impl LastLight {
     fn draw_full_screen_backdrop(&self, ctx: &mut FrameCtx<'_>, tint: Color) {
         let center = ctx.renderer.camera.position;
         let view = ctx.renderer.camera.visible_world_size();
+        let texture = self.environment_texture();
         // Oversize slightly so panning/aspect changes never show a seam.
         let cover = view * 1.05;
         ctx.renderer.draw_sprite(
-            self.tex_environment,
+            texture,
             Sprite::new(center, cover)
                 .with_color(Color::rgba(0.5, 0.5, 0.55, 1.0))
                 .with_z(9.0),
@@ -4959,7 +4969,6 @@ impl Game for LastLight {
     fn on_start(&mut self, renderer: &mut Renderer) {
         debug_assert_eq!(assets::manifest().len(), TextureAsset::ALL.len());
         let (
-            environment,
             units,
             warden_move,
             warden_attack,
@@ -4984,7 +4993,6 @@ impl Game for LastLight {
         ) = {
             let gpu = renderer.gpu();
             (
-                assets::load_texture(&gpu, TextureAsset::ReactorSector),
                 assets::load_texture(&gpu, TextureAsset::Units),
                 assets::load_texture(&gpu, TextureAsset::WardenMove),
                 assets::load_texture(&gpu, TextureAsset::WardenAttack),
@@ -5013,7 +5021,27 @@ impl Game for LastLight {
                 .expect("cover texture should decode"),
             )
         };
-        self.tex_environment = renderer.add_texture(environment);
+        let environment_plates = [
+            TextureAsset::ReactorSector,
+            TextureAsset::ReactorSectorReclaim,
+            TextureAsset::ReactorSectorVoice,
+            TextureAsset::ReactorSectorTerms,
+            TextureAsset::ReactorSectorGarden,
+            TextureAsset::ReactorSectorChoir,
+            TextureAsset::ReactorSectorVesper,
+            TextureAsset::ReactorSectorHollow,
+        ]
+        .into_iter()
+        .map(|asset| {
+            let texture = assets::load_texture(&renderer.gpu(), asset);
+            (asset, renderer.add_texture(texture))
+        })
+        .collect::<HashMap<_, _>>();
+        self.tex_environment = environment_plates
+            .get(&TextureAsset::ReactorSector)
+            .copied()
+            .expect("default environment plate must be loaded");
+        self.environment_textures = environment_plates;
         self.tex_units = renderer.add_texture(units);
         self.tex_warden_move = renderer.add_texture(warden_move);
         self.tex_warden_attack = renderer.add_texture(warden_attack);
@@ -5218,8 +5246,8 @@ impl Game for LastLight {
             return;
         }
         ctx.renderer.draw_sprite(
-            self.tex_environment,
-            Sprite::new(Vec2::ZERO, Self::environment_sprite_size()).with_z(-10.0),
+            self.environment_texture(),
+            Sprite::new(Vec2::ZERO, self.environment_sprite_size()).with_z(-10.0),
         );
         self.draw_terrain_zones(ctx.renderer);
         self.draw_mission_obstacles(ctx.renderer);
@@ -7404,7 +7432,9 @@ mod tests {
 
     #[test]
     fn environment_plate_covers_map_without_stretching_source_art() {
-        let size = LastLight::environment_sprite_size();
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        let size = game.environment_sprite_size();
         let (width, height) = TextureAsset::ReactorSector.spec().pixel_size;
         let source_ratio = width as f32 / height as f32;
         let rendered_ratio = size.x / size.y;

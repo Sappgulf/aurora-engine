@@ -13,6 +13,13 @@ use glam::Vec2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextureAsset {
     ReactorSector,
+    ReactorSectorReclaim,
+    ReactorSectorVoice,
+    ReactorSectorTerms,
+    ReactorSectorGarden,
+    ReactorSectorChoir,
+    ReactorSectorVesper,
+    ReactorSectorHollow,
     Units,
     WardenMove,
     WardenAttack,
@@ -471,8 +478,15 @@ impl TextureSpec {
 }
 
 impl TextureAsset {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 26] = [
         Self::ReactorSector,
+        Self::ReactorSectorReclaim,
+        Self::ReactorSectorVoice,
+        Self::ReactorSectorTerms,
+        Self::ReactorSectorGarden,
+        Self::ReactorSectorChoir,
+        Self::ReactorSectorVesper,
+        Self::ReactorSectorHollow,
         Self::Units,
         Self::WardenMove,
         Self::WardenAttack,
@@ -495,6 +509,13 @@ impl TextureAsset {
     pub fn key(self) -> &'static str {
         match self {
             Self::ReactorSector => "sector.reactor.floor",
+            Self::ReactorSectorReclaim => "sector.reactor.reclaim",
+            Self::ReactorSectorVoice => "sector.reactor.voice",
+            Self::ReactorSectorTerms => "sector.reactor.terms",
+            Self::ReactorSectorGarden => "sector.reactor.garden",
+            Self::ReactorSectorChoir => "sector.reactor.choir",
+            Self::ReactorSectorVesper => "sector.reactor.vesper",
+            Self::ReactorSectorHollow => "sector.reactor.hollow",
             Self::Units => "units.idle",
             Self::WardenMove => "lantern.warden.move",
             Self::WardenAttack => "lantern.warden.attack",
@@ -524,6 +545,13 @@ impl TextureAsset {
     pub const fn spec(self) -> TextureSpec {
         let (role, pixel_size, grid) = match self {
             Self::ReactorSector => (TextureRole::EnvironmentPlate, (1672, 941), (1, 1)),
+            Self::ReactorSectorReclaim
+            | Self::ReactorSectorVoice
+            | Self::ReactorSectorTerms
+            | Self::ReactorSectorGarden
+            | Self::ReactorSectorChoir
+            | Self::ReactorSectorVesper
+            | Self::ReactorSectorHollow => (TextureRole::EnvironmentPlate, (1672, 941), (1, 1)),
             Self::Units => (TextureRole::UnitAtlas, (1536, 1024), (3, 2)),
             Self::WardenMove => (TextureRole::AnimationStrip, (2172, 724), (6, 1)),
             Self::WardenAttack => (TextureRole::AnimationStrip, (1280, 256), (5, 1)),
@@ -593,6 +621,13 @@ impl TextureAsset {
     pub fn path(self) -> &'static str {
         match self {
             Self::ReactorSector => "reactor-sector-v001.png",
+            Self::ReactorSectorReclaim => "reactor-sector-reclaim-v001.png",
+            Self::ReactorSectorVoice => "reactor-sector-voice-v001.png",
+            Self::ReactorSectorTerms => "reactor-sector-terms-v001.png",
+            Self::ReactorSectorGarden => "reactor-sector-garden-v001.png",
+            Self::ReactorSectorChoir => "reactor-sector-choir-v001.png",
+            Self::ReactorSectorVesper => "reactor-sector-vesper-v001.png",
+            Self::ReactorSectorHollow => "reactor-sector-hollow-v001.png",
             Self::Units => "last-light-units-atlas-v001.png",
             Self::WardenMove => "warden-move-strip-v001.png",
             Self::WardenAttack => "warden-attack-strip-v001.png",
@@ -616,6 +651,15 @@ impl TextureAsset {
     fn bytes(self) -> &'static [u8] {
         match self {
             Self::ReactorSector => include_bytes!("../assets/reactor-sector-v001.png"),
+            Self::ReactorSectorReclaim => {
+                include_bytes!("../assets/reactor-sector-reclaim-v001.png")
+            }
+            Self::ReactorSectorVoice => include_bytes!("../assets/reactor-sector-voice-v001.png"),
+            Self::ReactorSectorTerms => include_bytes!("../assets/reactor-sector-terms-v001.png"),
+            Self::ReactorSectorGarden => include_bytes!("../assets/reactor-sector-garden-v001.png"),
+            Self::ReactorSectorChoir => include_bytes!("../assets/reactor-sector-choir-v001.png"),
+            Self::ReactorSectorVesper => include_bytes!("../assets/reactor-sector-vesper-v001.png"),
+            Self::ReactorSectorHollow => include_bytes!("../assets/reactor-sector-hollow-v001.png"),
             Self::Units => include_bytes!("../assets/last-light-units-atlas-v001.png"),
             Self::WardenMove => include_bytes!("../assets/warden-move-strip-v001.png"),
             Self::WardenAttack => include_bytes!("../assets/warden-attack-strip-v001.png"),
