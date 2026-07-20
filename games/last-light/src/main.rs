@@ -7835,6 +7835,28 @@ mod tests {
     }
 
     #[test]
+    fn disabled_fabricator_command_row_cannot_queue_or_spend() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        game.selected_structure = Some(StructureKind::Fabricator);
+
+        game.simulation.power.set_online(FABRICATOR_NODE, false);
+        assert!(!game.command_card_available(0));
+
+        let before_status = game.status.clone();
+        let before_queue = game.simulation.production.items().len();
+        let before_resource = game.simulation.resources.amount();
+        let before_flux = game.simulation.flux;
+
+        game.apply_command_action(KeyCode::KeyQ);
+
+        assert_eq!(game.status, before_status);
+        assert_eq!(game.simulation.production.items().len(), before_queue);
+        assert_eq!(game.simulation.resources.amount(), before_resource);
+        assert_eq!(game.simulation.flux, before_flux);
+    }
+
+    #[test]
     fn fabricator_title_reports_front_build_progress_and_offline_cancel() {
         let mut game = LastLight::new();
         game.start_mission(missions::reclaim_the_reactor());
@@ -8913,6 +8935,67 @@ mod tests {
         assert_eq!(game.command_card_key(5), Some(KeyCode::KeyB));
         assert_eq!(game.command_card_label(5), "B  FIELD BEACON");
         assert!(!game.command_card_label(0).contains("SURGE"));
+    }
+
+    #[test]
+    fn same_kind_squad_key_y_does_not_trigger_singleton_ability() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+
+        let modifiers = game.simulation_modifiers();
+        let spawn_point = Vec2::new(-120.0, -80.0);
+        game.simulation.spawn(
+            UnitKind::Warden,
+            PLAYER,
+            spawn_point,
+            90.0,
+            210.0,
+            modifiers,
+        );
+        game.simulation.spawn(
+            UnitKind::Warden,
+            PLAYER,
+            spawn_point + Vec2::new(18.0, 0.0),
+            90.0,
+            210.0,
+            modifiers,
+        );
+
+        let warden_ids: Vec<UnitId> = game
+            .simulation
+            .kinds
+            .iter()
+            .filter_map(|(id, kind)| (*kind == UnitKind::Warden).then_some(*id))
+            .collect();
+        game.simulation.world.clear_selection();
+        for (index, id) in warden_ids.iter().take(2).enumerate() {
+            let position = game
+                .simulation
+                .world
+                .unit(*id)
+                .map(|unit| unit.position)
+                .expect("selected warden should still exist");
+            game.simulation
+                .world
+                .select_point(position, PLAYER, index != 0);
+        }
+
+        assert_eq!(game.command_row_for_key(KeyCode::KeyY), None);
+
+        let before_status = game.status.clone();
+        let before_queue = game.simulation.production.items().len();
+        let before_resource = game.simulation.resources.amount();
+        let before_flux = game.simulation.flux;
+        let before_cooldown = game.simulation.ability_cooldown(warden_ids[0]);
+
+        game.apply_command_action(KeyCode::KeyY);
+
+        assert_eq!(game.command_row_for_key(KeyCode::KeyY), None);
+        assert_eq!(game.status, before_status);
+        assert_eq!(game.simulation.production.items().len(), before_queue);
+        assert_eq!(game.simulation.resources.amount(), before_resource);
+        assert_eq!(game.simulation.flux, before_flux);
+        assert_eq!(game.simulation.ability_cooldown(warden_ids[0]), before_cooldown);
     }
 
     #[test]
