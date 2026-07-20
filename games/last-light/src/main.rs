@@ -41,8 +41,10 @@ const BEACON_COST: u32 = 50;
 /// promising a rate that differs from the fixed-step harvest loop.
 const HARVEST_RATE_PER_SECOND: f32 = 18.0;
 const ENEMY_CLICK_RADIUS_SCALE: f32 = 3.55;
-const FRIENDLY_CLICK_RADIUS_SCALE: f32 = 1.9;
-const FRIENDLY_HOVER_RADIUS_SCALE: f32 = 1.6;
+const FRIENDLY_CLICK_RADIUS_SCALE: f32 = 1.8;
+const FRIENDLY_CLICK_RADIUS_MIN: f32 = 44.0;
+const FRIENDLY_HOVER_RADIUS_SCALE: f32 = 1.3;
+const FRIENDLY_HOVER_RADIUS_MIN: f32 = 28.0;
 const RESOURCE_CLICK_RADIUS: f32 = 130.0;
 /// The shipped unit strips are authored facing the lower edge of the screen
 /// (world-space -Y). Keep that art convention explicit so movement rotation
@@ -64,7 +66,10 @@ const HUD_SCALE_MIN: f32 = 0.5;
 const HUD_SCALE_MAX: f32 = 0.95;
 /// At dense zoom levels the HUD should prioritize command clarity over
 /// always-showing telemetry, so command and info overlays compress.
-const HUD_DENSE_SCALE: f32 = 0.84;
+const HUD_DENSE_SCALE: f32 = 0.8;
+const COMMAND_CARD_PANEL_WIDTH: f32 = 310.0;
+const COMMAND_CARD_PANEL_HEADER: f32 = 104.0;
+const COMMAND_CARD_ROW_SPACING: f32 = 30.0;
 const COMMAND_CARD_LABELS: [&str; 5] = [
     "Q  WARDEN  90",
     "E  ENGINEER  70",
@@ -1832,6 +1837,33 @@ impl LastLight {
         Aabb::from_center_size(center, Vec2::new(250.0, 26.0) * scale)
     }
 
+    fn command_card_panel_bounds(renderer: &Renderer, compact: bool, visible_rows: usize) -> Aabb {
+        let scale = Self::hud_scale(renderer);
+        let rows = visible_rows.max(1) as f32;
+        let card_text = Self::command_card_text_origin(renderer);
+        let panel_size = Vec2::new(
+            COMMAND_CARD_PANEL_WIDTH,
+            COMMAND_CARD_PANEL_HEADER + rows * COMMAND_CARD_ROW_SPACING,
+        );
+        let card_center = card_text
+            + Vec2::new(
+                COMMAND_CARD_PANEL_WIDTH * 0.5,
+                if compact { -132.0 } else { -132.5 },
+            ) * scale;
+        Aabb::from_center_size(card_center, panel_size * scale)
+    }
+
+    fn point_over_command_card(&self, renderer: &Renderer, point: Vec2) -> bool {
+        if !self.command_card_visible() {
+            return false;
+        }
+        let compact =
+            self.command_card_compact || self.minimal_hud || Self::hud_dense_layout(renderer);
+        let rows = self.visible_command_card_rows_for_display(renderer).len();
+        let bounds = Self::command_card_panel_bounds(renderer, compact, rows);
+        bounds.contains_point(point)
+    }
+
     fn apply_command_action(&mut self, key: KeyCode) {
         let Some(row) = self.command_row_for_key(key) else {
             return;
@@ -2844,7 +2876,7 @@ impl LastLight {
             unit.faction == PLAYER
                 && unit.alive()
                 && unit.position.distance(point)
-                    <= (unit.radius * FRIENDLY_HOVER_RADIUS_SCALE).max(58.0)
+                    <= (unit.radius * FRIENDLY_HOVER_RADIUS_SCALE).max(FRIENDLY_HOVER_RADIUS_MIN)
         })
     }
 
@@ -2856,7 +2888,8 @@ impl LastLight {
             .filter(|unit| unit.faction == PLAYER && unit.alive())
             .filter_map(|unit| {
                 let distance = unit.position.distance(point);
-                let radius = (unit.radius * FRIENDLY_CLICK_RADIUS_SCALE).max(60.0);
+                let radius =
+                    (unit.radius * FRIENDLY_CLICK_RADIUS_SCALE).max(FRIENDLY_CLICK_RADIUS_MIN);
                 (distance <= radius).then_some((unit.id, distance))
             })
             .min_by(|left, right| left.1.total_cmp(&right.1))
@@ -3246,7 +3279,11 @@ impl LastLight {
             .renderer
             .camera
             .screen_to_world(ctx.input.mouse_position);
+        let pointer_over_command_card = self.point_over_command_card(ctx.renderer, mouse_world);
         if ctx.input.mouse_pressed(MouseButton::Left) {
+            if pointer_over_command_card {
+                return;
+            }
             if let Some(destination) = self
                 .minimap_transform(ctx.renderer)
                 .panel_to_world(mouse_world)
@@ -3300,6 +3337,9 @@ impl LastLight {
             drag.update(mouse_world);
         }
         if ctx.input.mouse_released(MouseButton::Left) {
+            if pointer_over_command_card {
+                return;
+            }
             if let Some(drag) = self.drag.take() {
                 if drag.start.distance(drag.current) < 18.0 {
                     if let Some(structure) = self.structure_at(mouse_world) {
@@ -3365,6 +3405,7 @@ impl LastLight {
             }
         }
         if ctx.input.mouse_pressed(MouseButton::Right)
+            && !pointer_over_command_card
             && matches!(self.selected_structure, Some(StructureKind::Fabricator))
             && !self.attack_move_mode
             && !self.patrol_mode
@@ -3376,6 +3417,7 @@ impl LastLight {
             ctx.audio.collect();
         }
         if ctx.input.mouse_pressed(MouseButton::Right)
+            && !pointer_over_command_card
             && !self.simulation.world.selection().ids().is_empty()
         {
             let selected_ids = self.simulation.world.selection().ids().to_vec();
@@ -6708,13 +6750,16 @@ impl Game for LastLight {
             let compact_card = self.command_card_compact || self.minimal_hud || dense_hud;
             let card_text = Self::command_card_text_origin(ctx.renderer);
             let visible_rows = self.visible_command_card_rows_for_display(ctx.renderer);
-            let panel_size = if compact_card {
-                Vec2::new(310.0, (visible_rows.len().max(1) as f32 * 30.0) + 104.0)
-            } else {
-                Vec2::new(310.0, (visible_rows.len().max(1) as f32 * 30.0) + 104.0)
-            };
+            let panel_size = Vec2::new(
+                COMMAND_CARD_PANEL_WIDTH,
+                (visible_rows.len().max(1) as f32 * COMMAND_CARD_ROW_SPACING)
+                    + COMMAND_CARD_PANEL_HEADER,
+            );
             let card_center = card_text
-                + Vec2::new(155.0, if compact_card { -132.0 } else { -132.5 }) * hud_scale;
+                + Vec2::new(
+                    COMMAND_CARD_PANEL_WIDTH * 0.5,
+                    if compact_card { -132.0 } else { -132.5 },
+                ) * hud_scale;
             ctx.renderer.draw_sprite(
                 self.tex_ui,
                 Sprite::new(card_center, panel_size * hud_scale)
