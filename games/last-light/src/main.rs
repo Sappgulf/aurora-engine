@@ -964,6 +964,10 @@ impl LastLight {
         Self::hud_scale(renderer) >= HUD_DENSE_SCALE
     }
 
+    fn should_auto_minimize_hud(renderer: &Renderer) -> bool {
+        Self::hud_dense_layout(renderer)
+    }
+
     fn hud_scale(renderer: &Renderer) -> f32 {
         Self::hud_scale_for_view(renderer.camera.visible_world_size(), renderer.camera.zoom)
     }
@@ -5725,7 +5729,7 @@ impl Game for LastLight {
             }
         }
 
-        let hud_minimal = self.minimal_hud;
+        let hud_minimal = self.minimal_hud || Self::should_auto_minimize_hud(ctx.renderer);
         if !self.briefing && !self.paused && !self.victory && !self.defeat && !hud_minimal {
             let hud_scale = Self::hud_scale(ctx.renderer);
             let minimap = self.minimap_transform(ctx.renderer);
