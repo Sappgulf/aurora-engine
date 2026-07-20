@@ -4964,7 +4964,7 @@ impl Game for LastLight {
                 Texture::solid(&gpu, Color::WHITE),
                 Texture::from_bytes(
                     &gpu,
-                    include_bytes!("../assets/cover/aurora-last-light-cover-v001.png"),
+                    include_bytes!("../assets/cover/aurora-last-light-cover-v002.png"),
                     "menu.cover.aurora-last-light",
                 )
                 .expect("cover texture should decode"),

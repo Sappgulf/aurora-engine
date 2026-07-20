@@ -5,6 +5,15 @@ use glam::Vec2;
 use crate::renderer::TextureHandle;
 use crate::sprite::Sprite;
 
+/// Whether frame 0 in a sprite atlas maps to the top row or bottom row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtlasRowOrigin {
+    /// Source image row 0 is the top row.
+    TopLeft,
+    /// Source image row 0 is the bottom row.
+    BottomLeft,
+}
+
 /// Grid atlas over a texture (row-major frames).
 #[derive(Debug, Clone)]
 pub struct TextureAtlas {
@@ -14,15 +23,33 @@ pub struct TextureAtlas {
     pub rows: u32,
     /// Full texture pixel size (for docs / tooling).
     pub texture_size: Vec2,
+    pub row_origin: AtlasRowOrigin,
 }
 
 impl TextureAtlas {
     pub fn new(texture: TextureHandle, columns: u32, rows: u32, texture_size: Vec2) -> Self {
         Self {
             texture,
-            columns: columns.max(1),
-            rows: rows.max(1),
+            columns: if columns == 0 { 1 } else { columns },
+            rows: if rows == 0 { 1 } else { rows },
             texture_size,
+            row_origin: AtlasRowOrigin::TopLeft,
+        }
+    }
+
+    pub const fn new_with_row_origin(
+        texture: TextureHandle,
+        columns: u32,
+        rows: u32,
+        texture_size: Vec2,
+        row_origin: AtlasRowOrigin,
+    ) -> Self {
+        Self {
+            texture,
+            columns: if columns == 0 { 1 } else { columns },
+            rows: if rows == 0 { 1 } else { rows },
+            texture_size,
+            row_origin,
         }
     }
 
@@ -30,14 +57,15 @@ impl TextureAtlas {
         self.columns * self.rows
     }
 
-    /// UV min/max for frame index (wraps), using the source image's top row
-    /// as atlas row zero. The renderer maps this image-space rectangle onto
-    /// the engine's Y-up world quad in `sprite_corner_uvs`.
+    /// UV min/max for frame index (wraps), using the catalogued row origin.
     pub fn uv_rect(&self, frame: u32) -> (Vec2, Vec2) {
         let count = self.frame_count();
         let frame = frame % count;
         let col = frame % self.columns;
-        let row = frame / self.columns;
+        let row = match self.row_origin {
+            AtlasRowOrigin::TopLeft => frame / self.columns,
+            AtlasRowOrigin::BottomLeft => (self.rows - 1) - (frame / self.columns),
+        };
         let fw = 1.0 / self.columns as f32;
         let fh = 1.0 / self.rows as f32;
         // Image rows top→bottom; V increases down in UV.
@@ -261,6 +289,29 @@ mod tests {
                 Vec2::new(inset, 0.5 + inset),
                 Vec2::new(0.5 - inset, 1.0 - inset)
             )
+        );
+    }
+
+    #[test]
+    fn atlas_rows_are_bottom_origin_before_world_uv_mapping() {
+        let atlas = TextureAtlas::new_with_row_origin(
+            TextureHandle::default(),
+            2,
+            2,
+            Vec2::splat(64.0),
+            AtlasRowOrigin::BottomLeft,
+        );
+        let inset = 0.5 / 64.0;
+        assert_eq!(
+            atlas.uv_rect(0),
+            (
+                Vec2::new(inset, 0.5 + inset),
+                Vec2::new(0.5 - inset, 1.0 - inset)
+            )
+        );
+        assert_eq!(
+            atlas.uv_rect(2),
+            (Vec2::new(inset, inset), Vec2::new(0.5 - inset, 0.5 - inset))
         );
     }
 

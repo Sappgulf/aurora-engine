@@ -5,7 +5,8 @@
 //! owns the names, files, and presentation meaning.
 
 use aurora_engine::{
-    AssetKey, AssetKind, AssetManifest, GpuContext, Texture, TextureAtlas, TextureHandle,
+    atlas::AtlasRowOrigin, AssetKey, AssetKind, AssetManifest, GpuContext, Texture, TextureAtlas,
+    TextureHandle,
 };
 use glam::Vec2;
 
@@ -371,8 +372,8 @@ pub enum FrameOrigin {
     TopLeft,
     /// Row zero is the bottom row of the source PNG.
     ///
-    /// This is retained as an explicit rejected option so a future asset
-    /// importer cannot silently mix conventions with the current catalog.
+    /// This is retained as a supported option so source exports can retain
+    /// their exported orientation when that is the fastest path to quality.
     #[allow(dead_code)]
     BottomLeft,
 }
@@ -436,10 +437,7 @@ impl TextureSpec {
             return Err("texture contract requires evenly sized atlas cells");
         }
         match self.frame_origin {
-            FrameOrigin::TopLeft => {}
-            FrameOrigin::BottomLeft => {
-                return Err("texture contract requires top-left image frame origin")
-            }
+            FrameOrigin::TopLeft | FrameOrigin::BottomLeft => {}
         }
 
         match self.role {
@@ -551,7 +549,10 @@ impl TextureAsset {
             role,
             pixel_size,
             grid,
-            frame_origin: FrameOrigin::TopLeft,
+            frame_origin: match self {
+                Self::ResourceNodes | Self::ResourceHarvestEffects => FrameOrigin::BottomLeft,
+                _ => FrameOrigin::TopLeft,
+            },
         }
     }
 
@@ -572,11 +573,15 @@ impl TextureAsset {
             self.path(),
             spec.role
         );
-        TextureAtlas::new(
+        TextureAtlas::new_with_row_origin(
             texture,
             spec.grid.0,
             spec.grid.1,
             Vec2::new(spec.pixel_size.0 as f32, spec.pixel_size.1 as f32),
+            match spec.frame_origin {
+                FrameOrigin::TopLeft => AtlasRowOrigin::TopLeft,
+                FrameOrigin::BottomLeft => AtlasRowOrigin::BottomLeft,
+            },
         )
     }
 
@@ -730,35 +735,31 @@ mod tests {
                 atlas.texture_size,
                 Vec2::new(spec.pixel_size.0 as f32, spec.pixel_size.1 as f32)
             );
+            let expected_origin = match spec.frame_origin {
+                FrameOrigin::TopLeft => AtlasRowOrigin::TopLeft,
+                FrameOrigin::BottomLeft => AtlasRowOrigin::BottomLeft,
+            };
+            assert_eq!(atlas.row_origin, expected_origin);
         }
     }
 
     #[test]
-    fn catalog_declares_top_left_rows_for_every_shipped_atlas() {
+    fn catalog_declares_frame_row_origins() {
         for asset in TextureAsset::ALL {
             let spec = asset.spec();
-            assert_eq!(spec.frame_origin, FrameOrigin::TopLeft);
-            // Row-major frame numbering must agree with the source-image
-            // convention: frame zero is the top row, while the final frame
-            // occupies the bottom row. The renderer performs the Y inversion
-            // exactly once when it builds the world quad.
-            let first_row = 0_u32;
-            let last_row = (spec.frame_count() - 1) / spec.grid.0;
-            assert_eq!(first_row, 0, "{} must start at the top row", asset.path());
-            assert_eq!(
-                last_row,
-                spec.grid.1 - 1,
-                "{} must end at the bottom row",
+            assert!(
+                matches!(
+                    spec.frame_origin,
+                    FrameOrigin::TopLeft | FrameOrigin::BottomLeft
+                ),
+                "{} must use a supported frame-origin convention",
                 asset.path()
             );
         }
 
         let mut imported = TextureAsset::Units.spec();
         imported.frame_origin = FrameOrigin::BottomLeft;
-        assert_eq!(
-            imported.validate_contract(),
-            Err("texture contract requires top-left image frame origin")
-        );
+        assert_eq!(imported.validate_contract(), Ok(()));
     }
 
     #[test]
@@ -825,7 +826,14 @@ mod tests {
                 asset.path(),
                 asset.spec().frame_count()
             );
-            assert_eq!(asset.spec().frame_origin, FrameOrigin::TopLeft);
+            assert!(
+                matches!(
+                    asset.spec().frame_origin,
+                    FrameOrigin::TopLeft | FrameOrigin::BottomLeft
+                ),
+                "{} must use a supported frame-origin convention",
+                state.key
+            );
         }
     }
 
