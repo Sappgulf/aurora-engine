@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP="$ROOT/dist/Aurora Last Light.app"
 BIN="$ROOT/target/release/last_light"
 PLIST="$ROOT/tools/macos/LastLight-Info.plist"
-COVER="$ROOT/games/last-light/assets/cover/aurora-last-light-cover-v001.png"
+COVER="$ROOT/games/last-light/assets/cover/aurora-last-light-cover-v002.png"
 
 if [[ ! -x "$BIN" ]]; then
   echo "missing release binary: $BIN" >&2

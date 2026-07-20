@@ -604,8 +604,8 @@ impl TextureAsset {
             Self::DownReactions => "unit-down-reactions-atlas-v001.png",
             Self::Structures => "last-light-structures-atlas-v001.png",
             Self::CommandPortraits => "portraits/lantern-command-portrait-sheet-v001.png",
-            Self::ResourceNodes => "resource-node-atlas-v001.png",
-            Self::ResourceHarvestEffects => "resource-harvest-effects-v001.png",
+            Self::ResourceNodes => "resource-node-atlas-v002.png",
+            Self::ResourceHarvestEffects => "resource-harvest-effects-v002.png",
         }
     }
     fn bytes(self) -> &'static [u8] {
@@ -629,9 +629,9 @@ impl TextureAsset {
             Self::CommandPortraits => {
                 include_bytes!("../assets/portraits/lantern-command-portrait-sheet-v001.png")
             }
-            Self::ResourceNodes => include_bytes!("../assets/resource-node-atlas-v001.png"),
+            Self::ResourceNodes => include_bytes!("../assets/resource-node-atlas-v002.png"),
             Self::ResourceHarvestEffects => {
-                include_bytes!("../assets/resource-harvest-effects-v001.png")
+                include_bytes!("../assets/resource-harvest-effects-v002.png")
             }
         }
     }
