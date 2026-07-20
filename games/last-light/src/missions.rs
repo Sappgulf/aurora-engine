@@ -431,8 +431,18 @@ pub fn reclaim_the_reactor() -> MissionDef {
                 trigger: DialogueTrigger::Time(9.0),
             },
             RadioLine {
+                speaker: "MARA VEY",
+                text: "WARDEN, TAKE RELAY ALPHA HIGHGROUND; HOLD COVER UNTIL THE CHOIR CLOSES.",
+                trigger: DialogueTrigger::Time(15.0),
+            },
+            RadioLine {
+                speaker: "IVO RENN",
+                text: "ENGINEER, KEEP RELAY KITS IN REACH. BELL MINES WILL HIT HARD OUT OF COVER.",
+                trigger: DialogueTrigger::Time(19.0),
+            },
+            RadioLine {
                 speaker: "SENA QUILL",
-                text: "FIRST RELAY IS SINGING BACK. THE DARK JUST GOT SMALLER.",
+                text: "SURVEYOR, TAKE NODE ONE AND ROUTE SALVAGE HOME. TWO MORE NODES STAY COLD.",
                 trigger: DialogueTrigger::RelaysOnline(1),
             },
             RadioLine {
@@ -577,9 +587,21 @@ pub fn voice_in_conduit_twelve() -> MissionDef {
                 trigger: DialogueTrigger::Time(16.0),
             },
             RadioLine {
+                speaker: "MARA VEY",
+                text:
+                    "WARDEN, HOLD THE NARROW DECK. SURVEYOR, MOVE THE LAST NODE WHEN COVER OPENS.",
+                trigger: DialogueTrigger::Time(20.0),
+            },
+            RadioLine {
                 speaker: "LUMEN",
                 text: "SENA QUILL. YOUR SIGNAL FITS THE EMPTY PLACE IN ME.",
                 trigger: DialogueTrigger::Time(24.0),
+            },
+            RadioLine {
+                speaker: "IVO RENN",
+                text:
+                    "ENGINEER, KEEP THE GROUP STACKED. REPAIR ANY DAMAGED GROUND COVERS ON THE WAY.",
+                trigger: DialogueTrigger::Time(28.0),
             },
             RadioLine {
                 speaker: "MARA VEY",
@@ -1604,6 +1626,76 @@ mod tests {
         assert!(mission.terrain_zones.iter().any(|zone| {
             zone.elevation == 0 && zone.cover >= 0.22 && zone.bounds.contains_point(opening_node)
         }));
+    }
+
+    #[test]
+    fn reclaim_radio_lines_set_clear_role_jobs_early() {
+        let mission = reclaim_the_reactor();
+        let intro_cutoff = mission
+            .radio_lines
+            .iter()
+            .position(|line| !matches!(line.trigger, DialogueTrigger::Time(time) if time <= 24.0))
+            .unwrap_or(mission.radio_lines.len());
+
+        let intro_slice = &mission.radio_lines[..intro_cutoff];
+        let has_warden_verb = intro_slice.iter().any(|line| line.text.contains("WARDEN"));
+        let has_engineer_verb = intro_slice
+            .iter()
+            .any(|line| line.text.contains("ENGINEER"));
+        let has_surveyor_verb = intro_slice
+            .iter()
+            .any(|line| line.text.contains("SURVEYOR"));
+
+        assert!(
+            has_warden_verb,
+            "reclaim should teach the Warden job before the relay phase"
+        );
+        assert!(
+            has_engineer_verb,
+            "reclaim should teach the Engineer job before the relay phase"
+        );
+        assert!(
+            has_surveyor_verb,
+            "reclaim should teach the Surveyor job before the relay phase"
+        );
+    }
+
+    #[test]
+    fn voice_in_conduit_radio_lines_teach_escort_job_distribution() {
+        let mission = voice_in_conduit_twelve();
+        let has_warden_verb = mission
+            .radio_lines
+            .iter()
+            .any(|line| line.text.contains("WARDEN"));
+        let has_engineer_verb = mission
+            .radio_lines
+            .iter()
+            .any(|line| line.text.contains("ENGINEER"));
+        let has_surveyor_verb = mission
+            .radio_lines
+            .iter()
+            .any(|line| line.text.contains("SURVEYOR"));
+        let has_escort_line = mission
+            .radio_lines
+            .iter()
+            .any(|line| line.text.contains("ESCORT"));
+
+        assert!(
+            has_warden_verb,
+            "escort mission should assign Warden behavior"
+        );
+        assert!(
+            has_engineer_verb,
+            "escort mission should assign Engineer repair behavior"
+        );
+        assert!(
+            has_surveyor_verb,
+            "escort mission should assign Surveyor behavior"
+        );
+        assert!(
+            has_escort_line,
+            "escort mission should explicitly use the escort role"
+        );
     }
 
     #[test]
