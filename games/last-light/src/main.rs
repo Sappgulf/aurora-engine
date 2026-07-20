@@ -63,10 +63,10 @@ const COMMAND_CARD_KEYS: [KeyCode; 6] = [
 /// surface has more than this many actions.
 const COMMAND_CARD_COMPACT_ROWS: usize = 3;
 const HUD_SCALE_MIN: f32 = 0.5;
-const HUD_SCALE_MAX: f32 = 0.95;
+const HUD_SCALE_MAX: f32 = 0.82;
 /// At dense zoom levels the HUD should prioritize command clarity over
 /// always-showing telemetry, so command and info overlays compress.
-const HUD_DENSE_SCALE: f32 = 0.8;
+const HUD_DENSE_SCALE: f32 = 0.68;
 const COMMAND_CARD_PANEL_WIDTH: f32 = 310.0;
 const COMMAND_CARD_PANEL_HEADER: f32 = 104.0;
 const COMMAND_CARD_ROW_SPACING: f32 = 30.0;
@@ -967,7 +967,8 @@ impl LastLight {
     fn hud_scale_for_view(view: Vec2, zoom: f32) -> f32 {
         const REFERENCE_VIEW: Vec2 = Vec2::from_array([1164.0, 654.0]);
         let zoom_scale = zoom.max(f32::EPSILON).recip();
-        let view_scale = (view.x / REFERENCE_VIEW.x).min(view.y / REFERENCE_VIEW.y);
+        let normalized_view = (view.x / REFERENCE_VIEW.x).min(view.y / REFERENCE_VIEW.y);
+        let view_scale = normalized_view.clamp(0.55, 1.0);
         (zoom_scale * view_scale).clamp(HUD_SCALE_MIN, HUD_SCALE_MAX)
     }
 
@@ -9356,7 +9357,7 @@ mod tests {
     #[test]
     fn hud_scale_tracks_logical_viewport_without_overgrowing_cards() {
         let reference = LastLight::hud_scale_for_view(Vec2::new(1164.0, 654.0), 1.1);
-        assert!((reference - (1.0 / 1.1)).abs() < 1e-5);
+        assert!((reference - 0.82).abs() < 1e-5);
         assert_eq!(
             LastLight::hud_scale_for_view(Vec2::new(640.0, 360.0), 1.1),
             0.5
