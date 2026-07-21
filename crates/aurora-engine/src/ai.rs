@@ -57,6 +57,7 @@ struct AiUnitMemory {
 struct PathCacheKey {
     from: IVec2,
     to: IVec2,
+    nav_version: u64,
 }
 
 /// Per-attacker-faction memory (assigned target, retreat timers, rally
@@ -275,6 +276,7 @@ fn approach_order(
             let key = PathCacheKey {
                 from: nav.world_to_cell(from),
                 to: nav.world_to_cell(target_position),
+                nav_version: nav.version(),
             };
             let maybe_waypoint = path_cache
                 .entry(key)

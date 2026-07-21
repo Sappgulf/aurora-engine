@@ -1622,6 +1622,7 @@ pub struct NavGrid {
     origin: Vec2,
     cell_size: f32,
     blocked: Vec<bool>,
+    version: u64,
 }
 
 impl NavGrid {
@@ -1632,6 +1633,7 @@ impl NavGrid {
             origin,
             cell_size: cell_size.max(1.0),
             blocked: vec![false; width.max(1) * height.max(1)],
+            version: 0,
         }
     }
 
@@ -1645,8 +1647,16 @@ impl NavGrid {
 
     pub fn set_blocked(&mut self, cell: IVec2, blocked: bool) {
         if let Some(index) = self.index(cell) {
+            if self.blocked[index] == blocked {
+                return;
+            }
             self.blocked[index] = blocked;
+            self.version = self.version.saturating_add(1);
         }
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     pub fn is_blocked_at(&self, world: Vec2) -> bool {
