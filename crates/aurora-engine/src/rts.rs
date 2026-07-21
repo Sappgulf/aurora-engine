@@ -5,7 +5,8 @@
 //! therefore run deterministically in fixed update and be saved or tested.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use glam::{IVec2, Vec2};
 
@@ -1879,11 +1880,38 @@ impl NavGrid {
     }
 
     pub fn world_to_cell(&self, world: Vec2) -> IVec2 {
+        if !world.x.is_finite() || !world.y.is_finite() {
+            return IVec2::ZERO;
+        }
         ((world - self.origin) / self.cell_size).floor().as_ivec2()
+    }
+
+    pub fn world_to_cell_clamped(&self, world: Vec2) -> IVec2 {
+        self.clamp_cell(self.world_to_cell(world))
+    }
+
+    pub fn snap_to_cell_center(&self, world: Vec2) -> Vec2 {
+        self.cell_center(self.world_to_cell_clamped(world))
     }
 
     pub fn cell_center(&self, cell: IVec2) -> Vec2 {
         self.origin + (cell.as_vec2() + Vec2::splat(0.5)) * self.cell_size
+    }
+
+    pub fn set_blocked_many<I: IntoIterator<Item = IVec2>>(&mut self, cells: I, blocked: bool) {
+        let mut changed = false;
+        for cell in cells {
+            if let Some(index) = self.index(cell) {
+                if self.blocked[index] == blocked {
+                    continue;
+                }
+                self.blocked[index] = blocked;
+                changed = true;
+            }
+        }
+        if changed {
+            self.version = self.version.saturating_add(1);
+        }
     }
 
     pub fn set_blocked(&mut self, cell: IVec2, blocked: bool) {
@@ -1896,11 +1924,36 @@ impl NavGrid {
         }
     }
 
+    pub fn set_blocked_rect(&mut self, first: IVec2, second: IVec2, blocked: bool) {
+        let min_x = first.x.min(second.x);
+        let max_x = first.x.max(second.x);
+        let min_y = first.y.min(second.y);
+        let max_y = first.y.max(second.y);
+        let mut changed = false;
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                if let Some(index) = self.index(IVec2::new(x, y)) {
+                    if self.blocked[index] == blocked {
+                        continue;
+                    }
+                    self.blocked[index] = blocked;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.version = self.version.saturating_add(1);
+        }
+    }
+
     pub fn version(&self) -> u64 {
         self.version
     }
 
     pub fn is_blocked_at(&self, world: Vec2) -> bool {
+        if !world.x.is_finite() || !world.y.is_finite() {
+            return false;
+        }
         self.index(self.world_to_cell(world))
             .map(|index| self.blocked[index])
             .unwrap_or(false)
@@ -1910,45 +1963,144 @@ impl NavGrid {
     /// any sampled point falls in a blocked cell. Used to decide whether a
     /// direct approach needs to fall back to `find_path`.
     pub fn segment_blocked(&self, start: Vec2, end: Vec2) -> bool {
+        if !start.x.is_finite() || !start.y.is_finite() || !end.x.is_finite() || !end.y.is_finite() {
+            return false;
+        }
         let distance = start.distance(end);
         if distance <= f32::EPSILON {
             return self.is_blocked_at(start);
         }
-        let steps = (distance / (self.cell_size * 0.5)).ceil().max(1.0) as u32;
+        let step_size = (self.cell_size * 0.5).max(f32::EPSILON);
+        let steps = (distance / step_size).ceil().max(1.0) as u32;
         (0..=steps).any(|step| self.is_blocked_at(start.lerp(end, step as f32 / steps as f32)))
     }
 
     pub fn find_path(&self, start_world: Vec2, goal_world: Vec2) -> Vec<Vec2> {
+        if !start_world.x.is_finite()
+            || !start_world.y.is_finite()
+            || !goal_world.x.is_finite()
+            || !goal_world.y.is_finite()
+        {
+            return Vec::new();
+        }
         let start = self.world_to_cell(start_world);
         let goal = self.world_to_cell(goal_world);
         let (Some(start_index), Some(goal_index)) = (self.index(start), self.index(goal)) else {
             return Vec::new();
         };
+        if self.blocked[start_index] {
+            return Vec::new();
+        }
         if self.blocked[goal_index] {
             return Vec::new();
         }
 
-        let mut frontier = VecDeque::from([start]);
+        #[derive(Debug, Clone, Copy)]
+        struct SearchState {
+            estimated: f32,
+            cost: f32,
+            cell: IVec2,
+        }
+
+        impl PartialEq for SearchState {
+            fn eq(&self, other: &Self) -> bool {
+                self.estimated == other.estimated && self.cost == other.cost && self.cell == other.cell
+            }
+        }
+        impl Eq for SearchState {}
+        impl PartialOrd for SearchState {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl Ord for SearchState {
+            fn cmp(&self, other: &Self) -> Ordering {
+                // Reverse for min-heap behavior (BinaryHeap pops max first).
+                other
+                    .estimated
+                    .partial_cmp(&self.estimated)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| {
+                        other
+                            .cost
+                            .partial_cmp(&self.cost)
+                            .unwrap_or(Ordering::Equal)
+                    })
+                    .then_with(|| self.cell.y.cmp(&other.cell.y))
+                    .then_with(|| self.cell.x.cmp(&other.cell.x))
+            }
+        }
+
+        fn heuristic(a: IVec2, b: IVec2) -> f32 {
+            let dx = (a.x - b.x).abs() as f32;
+            let dy = (a.y - b.y).abs() as f32;
+            let (dx, dy) = if dx < dy { (dx, dy) } else { (dy, dx) };
+            (1.414_213_6 - 2.0) * dx + (dx + dy)
+        }
+
+        let mut frontier = BinaryHeap::new();
         let mut came_from = vec![None; self.blocked.len()];
+        let mut cost_so_far = vec![f32::INFINITY; self.blocked.len()];
         came_from[start_index] = Some(start);
-        while let Some(cell) = frontier.pop_front() {
+        cost_so_far[start_index] = 0.0;
+        frontier.push(SearchState {
+            estimated: heuristic(start, goal),
+            cost: 0.0,
+            cell: start,
+        });
+
+        let neighbors: [(IVec2, f32); 8] = [
+            (IVec2::new(1, 0), 1.0),
+            (IVec2::new(-1, 0), 1.0),
+            (IVec2::new(0, 1), 1.0),
+            (IVec2::new(0, -1), 1.0),
+            (IVec2::new(1, 1), 1.414_213_6),
+            (IVec2::new(1, -1), 1.414_213_6),
+            (IVec2::new(-1, 1), 1.414_213_6),
+            (IVec2::new(-1, -1), 1.414_213_6),
+        ];
+        while let Some(SearchState { estimated: _, cost, cell }) = frontier.pop() {
+            let Some(cell_index) = self.index(cell) else {
+                continue;
+            };
+            if cost > cost_so_far[cell_index] {
+                continue;
+            }
             if cell == goal {
                 break;
             }
-            for neighbor in [
-                cell + IVec2::X,
-                cell - IVec2::X,
-                cell + IVec2::Y,
-                cell - IVec2::Y,
-            ] {
-                let Some(index) = self.index(neighbor) else {
+            for (offset, step_cost) in neighbors {
+                let neighbor = cell + offset;
+                let Some(neighbor_index) = self.index(neighbor) else {
                     continue;
                 };
-                if self.blocked[index] || came_from[index].is_some() {
+                if self.blocked[neighbor_index] {
                     continue;
                 }
-                came_from[index] = Some(cell);
-                frontier.push_back(neighbor);
+                if offset.x != 0 && offset.y != 0 {
+                    let side_a = cell + IVec2::new(offset.x, 0);
+                    let side_b = cell + IVec2::new(0, offset.y);
+                    let Some(side_a_index) = self.index(side_a) else {
+                        continue;
+                    };
+                    let Some(side_b_index) = self.index(side_b) else {
+                        continue;
+                    };
+                    if self.blocked[side_a_index] || self.blocked[side_b_index] {
+                        continue;
+                    }
+                }
+                let next_cost = cost + step_cost;
+                if next_cost >= cost_so_far[neighbor_index] {
+                    continue;
+                }
+                cost_so_far[neighbor_index] = next_cost;
+                came_from[neighbor_index] = Some(cell);
+                frontier.push(SearchState {
+                    cost: next_cost,
+                    estimated: next_cost + heuristic(neighbor, goal),
+                    cell: neighbor,
+                });
             }
         }
         if came_from[goal_index].is_none() {
@@ -2007,6 +2159,12 @@ impl NavGrid {
             return None;
         }
         Some(cell.y as usize * self.width + cell.x as usize)
+    }
+
+    fn clamp_cell(&self, cell: IVec2) -> IVec2 {
+        let max_x = (self.width as i32) - 1;
+        let max_y = (self.height as i32) - 1;
+        IVec2::new(cell.x.clamp(0, max_x), cell.y.clamp(0, max_y))
     }
 }
 
@@ -2248,6 +2406,30 @@ mod tests {
             assert!(!grid.segment_blocked(anchor, waypoint));
             anchor = waypoint;
         }
+    }
+
+    #[test]
+    fn navigation_supports_diagonal_corner_cutting_prevention() {
+        let mut grid = NavGrid::new(4, 4, Vec2::ZERO, 10.0);
+        grid.set_blocked(IVec2::new(1, 0), true);
+        grid.set_blocked(IVec2::new(0, 1), true);
+        let path = grid.find_path(Vec2::new(5.0, 5.0), Vec2::new(25.0, 25.0));
+        assert!(
+            path.is_empty(),
+            "blocked adjacent corner should not allow diagonal corner cutting"
+        );
+
+        grid.set_blocked(IVec2::new(1, 0), false);
+        let path = grid.find_path(Vec2::new(5.0, 5.0), Vec2::new(25.0, 25.0));
+        assert!(!path.is_empty(), "clearing the corner should reveal a route");
+    }
+
+    #[test]
+    fn segment_blocked_is_robust_to_non_finite_inputs() {
+        let grid = NavGrid::new(8, 8, Vec2::ZERO, 10.0);
+        assert!(!grid.segment_blocked(Vec2::NAN, Vec2::new(10.0, 10.0)));
+        assert!(!grid.segment_blocked(Vec2::new(10.0, 10.0), Vec2::INFINITY));
+        assert!(!grid.segment_blocked(Vec2::INFINITY, Vec2::NEG_INFINITY));
     }
 
     #[test]

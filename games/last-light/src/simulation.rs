@@ -3,11 +3,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use aurora_engine::{
-    mark_obstacles, Aabb, BuildId, BuildQueue, BuildRecipe, CooldownBook, DeterministicSimulation,
-    FactionId, NavGrid, PowerGrid, PowerNode, PowerNodeId,
+    mark_obstacles, Aabb, BuildId, BuildQueue, BuildRecipe, CombatProfile as EngineCombatProfile,
+    CooldownBook, DeterministicSimulation, FactionId, NavGrid, PowerGrid, PowerNode, PowerNodeId,
     ProductionCancelError as EngineProductionCancelError, ProductionQueue, QueueError,
-    ResourceBank, ResourceSet, RtsWorld, SemanticCommand, StableStateHasher, StateHash,
-    SupplyLedger, SupplyQueueError, TechGraph, TechId, TerrainZone, UnitId, UnitOrder,
+    ResourceBank, ResourceSet, RtsCombatResolver, RtsWorld, SemanticCommand, StableStateHasher,
+    StateHash, SupplyLedger, SupplyQueueError, TechGraph, TechId, TerrainZone, UnitId, UnitOrder,
 };
 use glam::Vec2;
 use serde::Serialize;
@@ -401,6 +401,10 @@ pub struct MissionSimulation {
     attack_move_paths: HashSet<UnitId>,
     combat_snapshot: Vec<(UnitId, Vec2, bool)>,
     combat_attacks: Vec<(UnitId, UnitId, f32)>,
+    /// Renderer-independent cadence/range/damage resolver used for ordinary
+    /// weapon pulses. Game-specific target acquisition, telegraphs, and mine
+    /// detonation remain in this simulation layer.
+    combat_resolver: RtsCombatResolver,
     combat_detonations: Vec<UnitId>,
     /// Last target selected by combat resolution. Keeping this separate from
     /// `UnitOrder` also covers attack-move acquisition and gives the HUD a
@@ -536,6 +540,7 @@ impl MissionSimulation {
             attack_move_paths: HashSet::new(),
             combat_snapshot: Vec::with_capacity(COMBAT_BUFFER_CAPACITY),
             combat_attacks: Vec::with_capacity(COMBAT_BUFFER_CAPACITY),
+            combat_resolver: RtsCombatResolver::new(),
             combat_detonations: Vec::with_capacity(COMBAT_BUFFER_CAPACITY),
             combat_targets: HashMap::new(),
             attack_telegraph_timers: HashMap::new(),
@@ -578,6 +583,36 @@ impl MissionSimulation {
         simulation
     }
 
+    /// Converts Last Light's presentation/balance profile into the engine's
+    /// renderer-independent combat contract. Last Light still authors armor
+    /// as a small flat tuning value; the engine consumes a normalized
+    /// reduction fraction, so this bridge keeps the existing balance readable
+    /// while making range, damage type, and terrain resolution shared.
+    fn engine_profile(kind: UnitKind, damage: f32) -> EngineCombatProfile {
+        let profile = kind.combat();
+        EngineCombatProfile::new(
+            damage.max(0.0),
+            0.0,
+            profile.range,
+            profile.damage_type,
+            profile.armor_class,
+        )
+        .with_armor((profile.armor * 0.03).clamp(0.0, 0.5))
+    }
+
+    fn engine_profile_for_unit(&self, id: UnitId, dt: f32) -> Option<EngineCombatProfile> {
+        let unit = self.world.unit(id)?;
+        let kind = self.kinds.get(&id).copied()?;
+        let mut damage = kind.combat().damage_per_second * dt.max(0.0);
+        if unit.faction == PLAYER {
+            damage *= self.modifiers.player_damage_scale;
+            if self.command_surge_remaining(id) > 0.0 {
+                damage *= COMMAND_SURGE_DAMAGE_SCALE;
+            }
+        }
+        Some(Self::engine_profile(kind, damage))
+    }
+
     pub fn spawn(
         &mut self,
         kind: UnitKind,
@@ -603,6 +638,12 @@ impl MissionSimulation {
             unit.max_health = health;
             unit.speed = speed;
             unit.radius = kind.scale() * 0.27;
+            // Keep the shared engine profile populated even when a caller
+            // drives the world directly (for example a headless playtest).
+            // `update_combat` refreshes the pulse damage for variable-dt
+            // callers before invoking the resolver.
+            unit.combat =
+                Self::engine_profile(kind, kind.combat().damage_per_second * self.fixed_dt);
             // Keep movement and combat on the same authored contract: an
             // explicit Attack order stops just inside the profile's range so
             // the squad forms a readable firing line instead of overlapping
@@ -1516,6 +1557,45 @@ impl MissionSimulation {
         });
     }
 
+    fn apply_combat_damage(&mut self, attacker: UnitId, target: UnitId, amount: f32) {
+        let Some(target_faction) = self.world.unit(target).map(|unit| unit.faction) else {
+            return;
+        };
+        let amount = if target_faction == PLAYER {
+            amount
+                * self.modifiers.player_damage_taken_scale
+                * if self.command_surge_remaining(target) > 0.0 {
+                    COMMAND_SURGE_DAMAGE_TAKEN_SCALE
+                } else {
+                    1.0
+                }
+        } else {
+            amount
+        };
+        let destroyed = if let Some(unit) = self.world.unit_mut(target) {
+            let was_alive = unit.alive();
+            unit.health = (unit.health - amount.max(0.0)).max(0.0);
+            was_alive && !unit.alive()
+        } else {
+            false
+        };
+        self.record(SimulationEventKind::AttackLanded {
+            attacker: attacker.0,
+            target: target.0,
+        });
+        if destroyed {
+            let Some(kind) = self.kinds.get(&target).copied() else {
+                return;
+            };
+            self.release_supply_and_record(target);
+            *self.destroyed_by_kind.entry(kind).or_insert(0) += 1;
+            self.record(SimulationEventKind::UnitDestroyed {
+                unit_id: target.0,
+                kind,
+            });
+        }
+    }
+
     fn update_combat(&mut self, dt: f32) {
         self.combat_snapshot.clear();
         self.combat_snapshot.extend(
@@ -1528,6 +1608,19 @@ impl MissionSimulation {
         self.combat_detonations.clear();
         self.combat_target_updates.clear();
         self.combat_telegraph_candidates.clear();
+        // Target acquisition is intentionally authored in Last Light (it
+        // understands attack-move, hold-position, and Bell Mines), while the
+        // actual ordinary weapon pulse is resolved by the engine contract.
+        // A preview world lets us pass transient acquired Attack orders to the
+        // resolver without mutating the player's visible order state.
+        let mut engine_world = self.world.clone();
+        for preview in engine_world.units_mut() {
+            preview.order = UnitOrder::Idle;
+            if let Some(kind) = self.kinds.get(&preview.id).copied() {
+                preview.combat =
+                    Self::engine_profile(kind, kind.combat().damage_per_second * dt.max(0.0));
+            }
+        }
         for unit in self.world.units() {
             if !unit.alive() {
                 self.combat_target_updates.push((unit.id, None));
@@ -1654,34 +1747,13 @@ impl MissionSimulation {
                         self.combat_attacks.push((unit.id, candidate.id, amount));
                     }
                 } else {
-                    let target_kind = self.kinds.get(&target).copied().unwrap_or(UnitKind::Warden);
-                    let target_profile = target_kind.combat();
-                    let target_terrain_scale = self
-                        .terrain_zones
-                        .iter()
-                        .find(|zone| zone.contains(target_position))
-                        .map(|zone| zone.damage_multiplier(attacker_elevation))
-                        .unwrap_or(1.0);
-                    self.combat_attacks.push((
-                        unit.id,
-                        target,
-                        (profile.damage_per_second
-                            * profile.damage_type.multiplier(target_profile.armor_class)
-                            * target_terrain_scale
-                            - target_profile.armor * 0.45)
-                            .max(0.0)
-                            * dt.max(0.0)
-                            * if unit.faction == PLAYER {
-                                self.modifiers.player_damage_scale
-                                    * if self.command_surge_remaining(unit.id) > 0.0 {
-                                        COMMAND_SURGE_DAMAGE_SCALE
-                                    } else {
-                                        1.0
-                                    }
-                            } else {
-                                1.0
-                            },
-                    ));
+                    if let (Some(preview), Some(engine_profile)) = (
+                        engine_world.unit_mut(unit.id),
+                        self.engine_profile_for_unit(unit.id, dt),
+                    ) {
+                        preview.combat = engine_profile;
+                        preview.order = UnitOrder::Attack(target);
+                    }
                 }
             }
         }
@@ -1737,42 +1809,19 @@ impl MissionSimulation {
         }
         self.combat_telegraph_candidates = telegraph_candidates;
 
+        // Resolve ordinary attacks through the shared engine seam. Bell Mine
+        // damage remains in `combat_attacks` because it is an authored
+        // one-shot AoE rather than a normal weapon pulse.
+        let engine_events = self
+            .combat_resolver
+            .update(&mut engine_world, dt, &self.terrain_zones);
+        for event in engine_events {
+            self.apply_combat_damage(event.attacker, event.target, event.damage);
+        }
+
         for index in 0..self.combat_attacks.len() {
             let (attacker, target, amount) = self.combat_attacks[index];
-            let Some(target_faction) = self.world.unit(target).map(|unit| unit.faction) else {
-                continue;
-            };
-            let amount = if target_faction == PLAYER {
-                amount
-                    * self.modifiers.player_damage_taken_scale
-                    * if self.command_surge_remaining(target) > 0.0 {
-                        COMMAND_SURGE_DAMAGE_TAKEN_SCALE
-                    } else {
-                        1.0
-                    }
-            } else {
-                amount
-            };
-            let destroyed = if let Some(unit) = self.world.unit_mut(target) {
-                let was_alive = unit.alive();
-                unit.health = (unit.health - amount).max(0.0);
-                was_alive && !unit.alive()
-            } else {
-                false
-            };
-            self.record(SimulationEventKind::AttackLanded {
-                attacker: attacker.0,
-                target: target.0,
-            });
-            if destroyed {
-                let kind = self.kinds[&target];
-                self.release_supply_and_record(target);
-                *self.destroyed_by_kind.entry(kind).or_insert(0) += 1;
-                self.record(SimulationEventKind::UnitDestroyed {
-                    unit_id: target.0,
-                    kind,
-                });
-            }
+            self.apply_combat_damage(attacker, target, amount);
         }
 
         let mut detonations = std::mem::take(&mut self.combat_detonations);
@@ -2186,6 +2235,7 @@ impl DeterministicSimulation for MissionSimulation {
             }
             hasher.write_u64(u64::from(self.ability_cooldown(unit.id).to_bits()));
             hasher.write_u64(u64::from(self.command_surge_remaining(unit.id).to_bits()));
+            hasher.write_u64(u64::from(self.combat_resolver.cooldown(unit.id).to_bits()));
         }
         let mut combat_targets: Vec<_> = self.combat_targets.iter().collect();
         combat_targets.sort_by_key(|(attacker, _)| attacker.0);
@@ -3060,6 +3110,50 @@ mod tests {
             needle_unit.health < needle_unit.max_health,
             "the attack must resolve after the movement clamp"
         );
+    }
+
+    #[test]
+    fn ordinary_weapon_pulses_use_the_engine_combat_profile_bridge() {
+        let mission = crate::missions::reclaim_the_reactor();
+        let mut simulation =
+            MissionSimulation::from_mission(&mission, SimulationModifiers::default());
+        let warden = simulation
+            .kinds
+            .iter()
+            .find_map(|(id, kind)| (*kind == UnitKind::Warden).then_some(*id))
+            .expect("mission includes a Warden");
+        let origin = Vec2::new(-1_500.0, 850.0);
+        simulation.world.unit_mut(warden).unwrap().position = origin;
+        simulation.world.unit_mut(warden).unwrap().speed = 0.0;
+        let needle = simulation.spawn(
+            UnitKind::Needle,
+            CHOIR,
+            origin + Vec2::X * 100.0,
+            200.0,
+            0.0,
+            SimulationModifiers::default(),
+        );
+        simulation.world.unit_mut(warden).unwrap().order = UnitOrder::Attack(needle);
+
+        let profile = simulation.world.unit(warden).unwrap().combat;
+        assert_eq!(profile.range, UnitKind::Warden.combat().range);
+        assert!(
+            profile.damage > 0.0,
+            "spawned units expose engine combat data"
+        );
+        let before = simulation.world.unit(needle).unwrap().health;
+
+        simulation.fixed_step_with_dt(0.5);
+
+        let after = simulation.world.unit(needle).unwrap().health;
+        // Warden DPS (32) * 0.5s pulse, reduced by the Needle's normalized
+        // engine armor bridge (1 authored armor * 0.03).
+        assert!((before - after - 15.52).abs() < 0.001);
+        assert!(simulation.events().iter().any(|event| matches!(
+            event.kind,
+            SimulationEventKind::AttackLanded { attacker, target }
+                if attacker == warden.0 && target == needle.0
+        )));
     }
 
     #[test]

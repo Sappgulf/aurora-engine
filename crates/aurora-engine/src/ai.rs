@@ -4,7 +4,7 @@
 //! skirmish-mode opponent, ...) — behavior is driven entirely by
 //! [`AiParams`], not by any specific game's unit kinds.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 
 use glam::{IVec2, Vec2};
 
@@ -31,6 +31,12 @@ pub struct AiParams {
     /// attackers strongly prefer a less-covered target if one exists in
     /// range, spreading damage instead of dogpiling.
     pub max_attackers_per_target: usize,
+    /// Base strength of pressure carried over across retarget events.
+    /// Higher values make units spread across previously saturated targets
+    /// more aggressively.
+    pub pressure_weight: f32,
+    /// Time in seconds for pressure to halve.
+    pub pressure_half_life_secs: f32,
 }
 
 impl Default for AiParams {
@@ -41,6 +47,8 @@ impl Default for AiParams {
             retreat_health_fraction: 0.25,
             retreat_duration: 4.0,
             max_attackers_per_target: 2,
+            pressure_weight: 2_200.0,
+            pressure_half_life_secs: 1.6,
         }
     }
 }
@@ -60,17 +68,41 @@ struct PathCacheKey {
     nav_version: u64,
 }
 
+#[derive(Debug, Clone)]
+struct CachedPath {
+    waypoints: Vec<Vec2>,
+    last_used_at: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PathingStats {
+    pub segment_block_checks: u64,
+    pub path_cache_hits: u64,
+    pub path_cache_misses: u64,
+    pub paths_planned: u64,
+    pub path_segments_returned: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TargetPressure {
+    value: f32,
+    updated_at: f64,
+}
+
 /// Per-attacker-faction memory (assigned target, retreat timers, rally
 /// point) driving a simple aggro-and-retreat behavior each tick.
 #[derive(Debug, Clone, Default)]
 pub struct SimpleAggroAi {
     memory: HashMap<UnitId, AiUnitMemory>,
-    path_cache: HashMap<PathCacheKey, Option<Vec2>>,
+    path_cache: HashMap<PathCacheKey, CachedPath>,
+    target_pressure: HashMap<UnitId, TargetPressure>,
     cached_nav_version: Option<u64>,
+    pathing_stats: PathingStats,
 }
 
 impl SimpleAggroAi {
     const PATH_CACHE_MAX_ENTRIES: usize = 2048;
+    const PATH_CACHE_TTL_SECONDS: f64 = 6.0;
 
     pub fn new() -> Self {
         Self::default()
@@ -92,6 +124,7 @@ impl SimpleAggroAi {
         nav: Option<&NavGrid>,
     ) {
         self.sync_path_cache(nav);
+        self.evict_stale_path_cache_entries(elapsed);
         if self.path_cache.len() > Self::PATH_CACHE_MAX_ENTRIES {
             self.path_cache.clear();
         }
@@ -119,6 +152,7 @@ impl SimpleAggroAi {
         self.memory.retain(|id, _| attacker_set.contains(id));
 
         let candidate_ids: HashSet<UnitId> = candidates.iter().map(|(id, _, _)| *id).collect();
+        self.prune_and_decay_pressure(elapsed, params, &candidate_ids);
         let mut assigned_counts: HashMap<UnitId, usize> = HashMap::new();
         for memory in self.memory.values() {
             if let Some(target) = memory.target {
@@ -145,7 +179,10 @@ impl SimpleAggroAi {
                 .get(&id)
                 .map(|memory| memory.rally_point)
                 .unwrap_or(position);
-            let memory = self.memory.entry(id).or_insert(AiUnitMemory {
+            // Work on a local copy so target scoring can borrow pressure state
+            // without overlapping a mutable entry borrow. The updated memory
+            // is written back on every exit path below.
+            let mut memory = self.memory.get(&id).copied().unwrap_or(AiUnitMemory {
                 target: None,
                 target_since: elapsed,
                 retreat_until: f32::MIN,
@@ -163,6 +200,7 @@ impl SimpleAggroAi {
                 if let Some(unit) = world.unit_mut(id) {
                     unit.order = UnitOrder::Move(memory.rally_point);
                 }
+                self.memory.insert(id, memory);
                 continue;
             }
 
@@ -195,10 +233,18 @@ impl SimpleAggroAi {
                     })
                     .copied()
                     .min_by(|a, b| {
-                        score(position, *a, &assigned_counts, params).total_cmp(&score(
+                        score(
+                            position,
+                            *a,
+                            &assigned_counts,
+                            self.target_pressure.get(&a.0).map_or(0.0, |pressure| pressure.value),
+                            params,
+                        )
+                        .total_cmp(&score(
                             position,
                             *b,
                             &assigned_counts,
+                            self.target_pressure.get(&b.0).map_or(0.0, |pressure| pressure.value),
                             params,
                         ))
                     })
@@ -211,6 +257,7 @@ impl SimpleAggroAi {
                 if let Some(unit) = world.unit_mut(id) {
                     unit.order = UnitOrder::Idle;
                 }
+                self.memory.insert(id, memory);
                 continue;
             };
 
@@ -220,6 +267,7 @@ impl SimpleAggroAi {
             }
             if should_retarget {
                 *assigned_counts.entry(target_id).or_insert(0) += 1;
+                self.note_target_pressure(target_id, elapsed, params);
             }
 
             let order = approach_order(
@@ -227,22 +275,94 @@ impl SimpleAggroAi {
                 position,
                 target_position,
                 target_id,
+                elapsed,
                 &mut self.path_cache,
+                &mut self.pathing_stats,
             );
             if let Some(unit) = world.unit_mut(id) {
                 unit.order = order;
             }
+            self.memory.insert(id, memory);
         }
     }
 }
 
 impl SimpleAggroAi {
+    pub fn pathing_stats(&self) -> PathingStats {
+        self.pathing_stats
+    }
+
+    pub fn clear_pathing_stats(&mut self) {
+        self.pathing_stats = PathingStats::default();
+    }
+
     fn sync_path_cache(&mut self, nav: Option<&NavGrid>) {
         let current_nav_version = nav.map(|nav| nav.version());
         if self.cached_nav_version != current_nav_version {
             self.path_cache.clear();
             self.cached_nav_version = current_nav_version;
         }
+    }
+
+    fn evict_stale_path_cache_entries(&mut self, elapsed: f32) {
+        if !elapsed.is_finite() {
+            self.path_cache.clear();
+            return;
+        }
+        let cutoff = f64::from(elapsed) - Self::PATH_CACHE_TTL_SECONDS;
+        self.path_cache
+            .retain(|_, path| path.last_used_at >= cutoff);
+    }
+
+    fn prune_and_decay_pressure(
+        &mut self,
+        elapsed: f32,
+        params: &AiParams,
+        targets: &HashSet<UnitId>,
+    ) {
+        if !elapsed.is_finite() {
+            return;
+        }
+        let now = f64::from(elapsed);
+        self.target_pressure
+            .retain(|target_id, _| targets.contains(target_id));
+
+        if params.pressure_half_life_secs <= f32::EPSILON {
+            return;
+        }
+        let decay_base = 0.5_f32;
+        let half_life = params.pressure_half_life_secs;
+        for pressure in self.target_pressure.values_mut() {
+            let age = (now - pressure.updated_at) as f32;
+            if age <= 0.0 {
+                continue;
+            }
+            let decay = decay_base.powf(age / half_life);
+            pressure.value *= decay;
+            pressure.updated_at = now;
+        }
+        self.target_pressure
+            .retain(|_, pressure| pressure.value > 0.000_1);
+    }
+
+    fn note_target_pressure(&mut self, target_id: UnitId, elapsed: f32, params: &AiParams) {
+        if !elapsed.is_finite() {
+            return;
+        }
+        let now = f64::from(elapsed);
+        let entry = self.target_pressure.entry(target_id).or_insert(TargetPressure {
+            value: 0.0,
+            updated_at: now,
+        });
+        entry.value += 1.0;
+        entry.updated_at = now;
+    }
+
+    fn target_pressure_for(&self, target_id: UnitId) -> f32 {
+        self.target_pressure
+            .get(&target_id)
+            .map(|pressure| pressure.value)
+            .unwrap_or(0.0)
     }
 }
 
@@ -261,6 +381,7 @@ fn score(
     from: Vec2,
     candidate: (UnitId, Vec2, f32),
     assigned: &HashMap<UnitId, usize>,
+    pressure: f32,
     params: &AiParams,
 ) -> f32 {
     let (id, position, health_fraction) = candidate;
@@ -271,9 +392,10 @@ fn score(
     } else {
         attacker_count as f32 * 220.0
     };
+    let pressure_penalty = pressure * params.pressure_weight;
     // Lower is better: prefer close, low-health (near-kill), lightly-covered
     // targets.
-    distance + health_fraction * 260.0 + coverage_penalty
+    distance + health_fraction * 260.0 + coverage_penalty + pressure_penalty
 }
 
 fn approach_order(
@@ -281,24 +403,60 @@ fn approach_order(
     from: Vec2,
     target_position: Vec2,
     target_id: UnitId,
-    path_cache: &mut HashMap<PathCacheKey, Option<Vec2>>,
+    elapsed: f32,
+    path_cache: &mut HashMap<PathCacheKey, CachedPath>,
+    path_stats: &mut PathingStats,
 ) -> UnitOrder {
     if let Some(nav) = nav {
+        path_stats.segment_block_checks = path_stats.segment_block_checks.saturating_add(1);
         if nav.segment_blocked(from, target_position) {
+            let start = nav.snap_to_cell_center(from);
+            let goal = nav.snap_to_cell_center(target_position);
             let key = PathCacheKey {
-                from: nav.world_to_cell(from),
-                to: nav.world_to_cell(target_position),
+                from: nav.world_to_cell(start),
+                to: nav.world_to_cell(goal),
                 nav_version: nav.version(),
             };
-            let maybe_waypoint = path_cache
-                .entry(key)
-                .or_insert_with(|| nav.find_path(from, target_position).first().copied());
-            if let Some(waypoint) = maybe_waypoint {
+            let path = match path_cache.entry(key) {
+                Entry::Occupied(mut entry) => {
+                    path_stats.path_cache_hits = path_stats.path_cache_hits.saturating_add(1);
+                    entry.get_mut().last_used_at = f64::from(elapsed);
+                    &entry.get().waypoints[..]
+                }
+                Entry::Vacant(entry) => {
+                    path_stats.path_cache_misses = path_stats.path_cache_misses.saturating_add(1);
+                    let waypoints = nav.find_path(start, goal);
+                    path_stats.paths_planned = path_stats.paths_planned.saturating_add(1);
+                    entry.insert(CachedPath {
+                        waypoints,
+                        last_used_at: f64::from(elapsed),
+                    });
+                    if let Some(cached) = path_cache.get(&key) {
+                        &cached.waypoints[..]
+                    } else {
+                        &[]
+                    }
+                }
+            };
+            let next_waypoint = next_waypoint(from, path);
+            if let Some(waypoint) = next_waypoint {
+                path_stats.path_segments_returned =
+                    path_stats.path_segments_returned.saturating_add(1);
                 return UnitOrder::Move(*waypoint);
             }
         }
     }
     UnitOrder::Attack(target_id)
+}
+
+fn next_waypoint(from: Vec2, path: &[Vec2]) -> Option<&Vec2> {
+    let reach_threshold = 1.0_f32;
+    for waypoint in path {
+        if from.distance(*waypoint) > reach_threshold {
+            return Some(waypoint);
+        }
+    }
+    None
 }
 
 /// Marks every `NavGrid` cell overlapping any of `obstacles` as blocked.
@@ -308,11 +466,7 @@ pub fn mark_obstacles(grid: &mut NavGrid, obstacles: &[Aabb]) {
     for obstacle in obstacles {
         let min_cell = grid.world_to_cell(obstacle.min);
         let max_cell = grid.world_to_cell(obstacle.max);
-        for y in min_cell.y..=max_cell.y {
-            for x in min_cell.x..=max_cell.x {
-                grid.set_blocked(IVec2::new(x, y), true);
-            }
-        }
+        grid.set_blocked_rect(min_cell, max_cell, true);
     }
 }
 
@@ -444,6 +598,7 @@ mod tests {
     fn approach_routes_around_blocked_segment() {
         let mut grid = NavGrid::new(5, 3, Vec2::ZERO, 10.0);
         let mut path_cache = std::collections::HashMap::new();
+        let mut pathing_stats = PathingStats::default();
         mark_obstacles(
             &mut grid,
             &[Aabb::from_center_size(
@@ -456,7 +611,9 @@ mod tests {
             Vec2::new(5.0, 15.0),
             Vec2::new(45.0, 15.0),
             UnitId(0),
+            0.0,
             &mut path_cache,
+            &mut pathing_stats,
         );
         assert!(matches!(order, UnitOrder::Move(_)));
 
@@ -465,7 +622,9 @@ mod tests {
             Vec2::new(5.0, 5.0),
             Vec2::new(45.0, 5.0),
             UnitId(0),
+            0.0,
             &mut path_cache,
+            &mut pathing_stats,
         );
         assert!(matches!(clear_order, UnitOrder::Attack(_)));
     }
@@ -474,18 +633,35 @@ mod tests {
     fn cached_path_recomputed_after_nav_update() {
         let mut grid = NavGrid::new(7, 3, Vec2::ZERO, 10.0);
         let mut path_cache = std::collections::HashMap::new();
+        let mut pathing_stats = PathingStats::default();
         let from = Vec2::new(5.0, 15.0);
         let to = Vec2::new(65.0, 15.0);
 
         grid.set_blocked(IVec2::new(3, 1), true);
-        let first = approach_order(Some(&grid), from, to, UnitId(1), &mut path_cache);
+        let first = approach_order(
+            Some(&grid),
+            from,
+            to,
+            UnitId(1),
+            0.0,
+            &mut path_cache,
+            &mut pathing_stats,
+        );
         assert!(matches!(first, UnitOrder::Move(_)));
 
         // Tighten the choke point to a solid wall and verify cached path
         // entries from the previous nav version are not reused.
         grid.set_blocked(IVec2::new(3, 0), true);
         grid.set_blocked(IVec2::new(3, 2), true);
-        let second = approach_order(Some(&grid), from, to, UnitId(1), &mut path_cache);
+        let second = approach_order(
+            Some(&grid),
+            from,
+            to,
+            UnitId(1),
+            1.0,
+            &mut path_cache,
+            &mut pathing_stats,
+        );
         assert!(matches!(second, UnitOrder::Attack(_)));
     }
 

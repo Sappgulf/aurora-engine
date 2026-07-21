@@ -82,6 +82,14 @@ const COMMAND_CARD_LABELS: [&str; 5] = [
     "T  STOP",
 ];
 
+/// Edge-triggered input may be consumed once per rendered frame even when the
+/// fixed-step loop catches up with several simulation ticks. Continuous
+/// movement, combat, and economy deliberately do not use this gate.
+#[inline]
+fn edge_input_allowed(input_handled_this_frame: bool) -> bool {
+    !input_handled_this_frame
+}
+
 /// Source atlas for a tactical unit card portrait.
 ///
 /// Lantern specialists use the character portrait sheet because their named
@@ -199,6 +207,8 @@ struct LastLight {
     tex_mission_cover: TextureHandle,
     tex_resources: TextureHandle,
     tex_resource_effects: TextureHandle,
+    tex_terrain_details: TextureHandle,
+    tex_map_props: TextureHandle,
     tex_glow: TextureHandle,
     tex_ui: TextureHandle,
     unit_atlas: TextureAtlas,
@@ -220,6 +230,8 @@ struct LastLight {
     portrait_atlas: TextureAtlas,
     resource_atlas: TextureAtlas,
     resource_effects_atlas: TextureAtlas,
+    terrain_detail_atlas: TextureAtlas,
+    map_props_atlas: TextureAtlas,
     simulation: MissionSimulation,
     attack_flash: HashMap<UnitId, f32>,
     damage_flash: HashMap<UnitId, f32>,
@@ -365,6 +377,8 @@ impl LastLight {
             tex_mission_cover: TextureHandle::default(),
             tex_resources: TextureHandle::default(),
             tex_resource_effects: TextureHandle::default(),
+            tex_terrain_details: TextureHandle::default(),
+            tex_map_props: TextureHandle::default(),
             tex_glow: TextureHandle::default(),
             tex_ui: TextureHandle::default(),
             unit_atlas: TextureAsset::Units.runtime_atlas(TextureHandle::default()),
@@ -391,6 +405,9 @@ impl LastLight {
             resource_atlas: TextureAsset::ResourceNodes.runtime_atlas(TextureHandle::default()),
             resource_effects_atlas: TextureAsset::ResourceHarvestEffects
                 .runtime_atlas(TextureHandle::default()),
+            terrain_detail_atlas: TextureAsset::TerrainDetails
+                .runtime_atlas(TextureHandle::default()),
+            map_props_atlas: TextureAsset::MapProps.runtime_atlas(TextureHandle::default()),
             simulation,
             attack_flash: HashMap::new(),
             damage_flash: HashMap::new(),
@@ -725,16 +742,26 @@ impl LastLight {
             let next = (cursor_slot + 1) % unlocked.len();
             self.mission_cursor = unlocked[next];
         }
+        // Pointer hover moves the same focus cursor used by the keyboard.
+        // This gives mouse users a preview before committing, while leaving
+        // locked rows inert and preserving the row hitboxes for confirmation.
+        let menu_scale = Self::mission_select_scale(ctx.renderer.camera.visible_world_size());
+        let mouse_world = ctx
+            .renderer
+            .camera
+            .screen_to_world(ctx.input.mouse_position);
+        for &index in &unlocked {
+            if Self::mission_entry_rect(ctx.renderer.camera.position, index, menu_scale)
+                .contains_point(mouse_world)
+            {
+                self.mission_cursor = index;
+                break;
+            }
+        }
         let mut confirmed =
             ctx.input.key_pressed(KeyCode::Space) || ctx.input.key_pressed(KeyCode::Enter);
         if ctx.input.mouse_pressed(MouseButton::Left) {
-            let mouse_world = ctx
-                .renderer
-                .camera
-                .screen_to_world(ctx.input.mouse_position);
             for &index in &unlocked {
-                let menu_scale =
-                    Self::mission_select_scale(ctx.renderer.camera.visible_world_size());
                 if Self::mission_entry_rect(ctx.renderer.camera.position, index, menu_scale)
                     .contains_point(mouse_world)
                 {
@@ -1565,6 +1592,31 @@ impl LastLight {
             .find_map(|index| (self.command_card_key(index) == Some(key)).then_some(index))
     }
 
+    /// Resolve a command key against the current context, including rows that
+    /// are intentionally hidden while unavailable.  The visible card stays
+    /// quiet, but keyboard input can still explain the first blocking gate
+    /// instead of silently eating a familiar RTS shortcut.
+    fn command_context_row_for_key(&self, key: KeyCode) -> Option<usize> {
+        (0..COMMAND_CARD_KEYS.len()).find(|&index| self.command_card_key(index) == Some(key))
+    }
+
+    /// Return the compact blocker copy for an unavailable contextual action.
+    /// This is deliberately presentation-only; the simulation remains the
+    /// authority for every spend and admission decision.
+    fn blocked_command_feedback(&self, key: KeyCode) -> Option<String> {
+        let index = self.command_context_row_for_key(key)?;
+        (!self.command_card_available(index))
+            .then(|| format!("COMMAND BLOCKED // {}", self.command_card_display(index)))
+    }
+
+    fn report_blocked_command(&mut self, key: KeyCode) -> bool {
+        let Some(copy) = self.blocked_command_feedback(key) else {
+            return false;
+        };
+        self.status = Some((copy, 2.0));
+        true
+    }
+
     /// The Fabricator's final row intentionally contains two compact actions.
     /// Keyboard input stays explicit (`B`/`D`), while pointer input resolves
     /// the left or right half of that row to the matching action.
@@ -2152,6 +2204,8 @@ impl LastLight {
                     if visible_rows.contains(&row) {
                         self.apply_command_action(key);
                     }
+                } else {
+                    self.report_blocked_command(key);
                 }
             }
         }
@@ -2191,6 +2245,9 @@ impl LastLight {
                         .contains_point(mouse_world)
                     {
                         if !self.command_card_available(index) {
+                            if let Some(key) = self.command_card_key(index) {
+                                self.report_blocked_command(key);
+                            }
                             return;
                         }
                         if let Some(key) =
@@ -2203,6 +2260,13 @@ impl LastLight {
                                 )
                             {
                                 self.upgrade_supply_module();
+                            } else if key == KeyCode::KeyR && self.selected_resource_node.is_some()
+                            {
+                                // R is a camera/context action rather than a
+                                // simulation command. Resolve it here so a
+                                // pointer click on the resource card performs
+                                // the same focus behavior as the keyboard.
+                                self.focus_resource_node(ctx);
                             } else {
                                 self.apply_command_action(key);
                             }
@@ -4657,6 +4721,13 @@ impl LastLight {
         lines
     }
 
+    /// Normalize the six-second comms lifetime for the in-card countdown rail.
+    /// Keeping this as a pure formatter makes the transient feedback easy to
+    /// test without constructing a renderer or frame context.
+    fn radio_progress(remaining: f32) -> f32 {
+        (remaining / 6.0).clamp(0.0, 1.0)
+    }
+
     /// The mission briefing stores a speaker prefix in its authored copy
     /// (`"SENA QUILL: ..."`). Splitting that prefix here lets the briefing
     /// render a proper comms card while preserving the authored sentence as
@@ -4853,6 +4924,74 @@ impl LastLight {
         Vec2::new(view.x * 0.38, view.y * 0.38 * 9.0 / 16.0)
     }
 
+    /// A compact, fixed rail for the currently focused mission. Keeping the
+    /// preview below the rows means the authored list does not reflow when a
+    /// later campaign mission has a longer title or briefing hook.
+    fn mission_select_preview_rect(camera_position: Vec2, scale: f32) -> Aabb {
+        Aabb::from_center_size(
+            camera_position + Vec2::new(0.0, -272.0) * scale,
+            Vec2::new(780.0, 48.0) * scale,
+        )
+    }
+
+    /// Shared footer hitbox/render anchor for the menu's explicit deploy
+    /// affordance. Mission rows remain the only confirmation targets; this
+    /// helper is a visual layout primitive and keeps the footer clear of the
+    /// selected-mission rail.
+    fn mission_select_footer_rect(camera_position: Vec2, scale: f32) -> Aabb {
+        Aabb::from_center_size(
+            camera_position + Vec2::new(0.0, -323.0) * scale,
+            Vec2::new(780.0, 34.0) * scale,
+        )
+    }
+
+    /// Explain the mission's primary win condition in the same vocabulary as
+    /// the tactical objective HUD. This is deliberately derived from the
+    /// data contract instead of duplicating mission-specific copy in the UI.
+    fn mission_select_objective(mission: &MissionDef) -> String {
+        match mission.victory {
+            VictoryCondition::RestoreRelaysAndDefeatBoss { boss_kind } => format!(
+                "RESTORE {} RELAYS  //  DEFEAT {}",
+                mission.relays.len(),
+                boss_kind.label()
+            ),
+            VictoryCondition::EscortToExtraction { .. } => {
+                let escort = mission
+                    .player_spawns
+                    .iter()
+                    .find(|spawn| spawn.escort)
+                    .map(|spawn| spawn.kind.label())
+                    .unwrap_or("SPECIALIST");
+                format!("ESCORT {}  //  REACH EXTRACTION", escort)
+            }
+        }
+    }
+
+    /// Small second-line hook for the preview rail. It calls out the first
+    /// distinct player decision without exposing a wall of briefing text.
+    fn mission_select_role_hint(mission: &MissionDef) -> &'static str {
+        if mission.resource_objective.is_some() {
+            "SECURE A RESOURCE POCKET"
+        } else if mission.terrain_control_objective.is_some() {
+            "CLAIM THE HIGH GROUND"
+        } else if mission.specialist_objective.is_some() {
+            "COMMIT THE SPECIALIST ROLE"
+        } else if mission.relays.len() > 1 {
+            "SPLIT RELAYS, HOLD THE RETURN LANE"
+        } else {
+            "READ THE MAP, THEN MOVE AS ONE"
+        }
+    }
+
+    /// The briefing deploy rail is deliberately separate from upgrade rows:
+    /// clicking a CTA cannot accidentally purchase an adjacent upgrade.
+    fn briefing_deploy_rect(camera_position: Vec2, scale: f32) -> Aabb {
+        Aabb::from_center_size(
+            camera_position + Vec2::new(0.0, -273.0) * scale,
+            Vec2::new(440.0, 40.0) * scale,
+        )
+    }
+
     fn mission_entry_rect(camera_position: Vec2, index: usize, scale: f32) -> Aabb {
         // Six authored missions now fit with a deliberate footer gap at the
         // reference 1280x720 viewport. Keeping this in the shared hit-test
@@ -4889,31 +5028,88 @@ impl LastLight {
             Color::rgba(0.7, 0.85, 0.9, 0.95),
             11.0,
         );
-        for (index, mission) in missions::all().iter().enumerate() {
+        let catalog = missions::all();
+        let mouse_world = ctx
+            .renderer
+            .camera
+            .screen_to_world(ctx.input.mouse_position);
+        let focused_mission = catalog.get(self.mission_cursor);
+        let unlocked_count = catalog
+            .iter()
+            .filter(|mission| self.save_data.campaign.unlocked_mission >= mission.required_tier)
+            .count();
+        let focus_slot = catalog
+            .iter()
+            .take(self.mission_cursor.saturating_add(1))
+            .filter(|mission| self.save_data.campaign.unlocked_mission >= mission.required_tier)
+            .count()
+            .max(1);
+        self.draw_text_shadowed(
+            ctx.renderer,
+            &format!(
+                "FOCUS  {:02} / {:02}  //  ARROWS OR POINTER",
+                focus_slot,
+                unlocked_count.max(1)
+            ),
+            center + Vec2::new(90.0, 210.0) * menu_scale,
+            1.55 * menu_scale,
+            Color::rgba(0.52, 0.78, 0.84, 0.9),
+            11.0,
+        );
+        for (index, mission) in catalog.iter().enumerate() {
             let unlocked = self.save_data.campaign.unlocked_mission >= mission.required_tier;
             let rect = Self::mission_entry_rect(center, index, menu_scale);
-            let hovered = index == self.mission_cursor;
-            if unlocked {
+            let focused = unlocked && index == self.mission_cursor;
+            let hovered = unlocked && rect.contains_point(mouse_world);
+            let active = focused || hovered;
+            ctx.renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(rect.center(), rect.size())
+                    .with_color(if !unlocked {
+                        Color::rgba(0.025, 0.04, 0.07, 0.34)
+                    } else if focused && hovered {
+                        Color::rgba(0.18, 0.65, 0.68, 0.72)
+                    } else if focused {
+                        Color::rgba(0.12, 0.4, 0.48, 0.62)
+                    } else if hovered {
+                        Color::rgba(0.1, 0.3, 0.36, 0.58)
+                    } else {
+                        Color::rgba(0.05, 0.09, 0.14, 0.55)
+                    })
+                    .with_z(10.0),
+            );
+            if focused {
+                // A narrow rail remains visible even when the label is dimmed
+                // by a small viewport, making keyboard focus unambiguous.
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
-                    Sprite::new(rect.center(), rect.size())
-                        .with_color(if hovered {
-                            Color::rgba(0.16, 0.55, 0.6, 0.55)
-                        } else {
-                            Color::rgba(0.05, 0.09, 0.14, 0.55)
-                        })
-                        .with_z(10.0),
+                    Sprite::new(
+                        rect.min + Vec2::new(5.0 * menu_scale, rect.size().y * 0.5),
+                        Vec2::new(5.0 * menu_scale, rect.size().y - 10.0 * menu_scale),
+                    )
+                    .with_color(Color::rgb(1.2, 0.78, 0.28))
+                    .with_z(10.1),
                 );
             }
             let color = if !unlocked {
                 Color::rgba(0.4, 0.42, 0.46, 0.6)
-            } else if hovered {
+            } else if active {
                 Color::rgb(1.3, 0.95, 0.35)
             } else {
                 Color::rgb(0.8, 0.9, 0.92)
             };
-            let marker = if hovered { ">" } else { " " };
-            let label = if unlocked { mission.title } else { "LOCKED" };
+            let marker = if focused {
+                "▶"
+            } else if hovered {
+                "·"
+            } else {
+                " "
+            };
+            let label = if unlocked {
+                mission.title.to_owned()
+            } else {
+                format!("LOCKED  //  CLEAR TIER {}", mission.required_tier)
+            };
             self.draw_text_shadowed(
                 ctx.renderer,
                 &format!("{marker} {label}"),
@@ -4923,12 +5119,55 @@ impl LastLight {
                 11.0,
             );
         }
+        if let Some(mission) = focused_mission {
+            let preview = Self::mission_select_preview_rect(center, menu_scale);
+            ctx.renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(preview.center(), preview.size())
+                    .with_color(Color::rgba(0.035, 0.11, 0.15, 0.9))
+                    .with_z(10.0),
+            );
+            let preview_line = format!(
+                "MISSION {:02}  //  TIER {}  //  +{} LUMEN",
+                self.mission_cursor + 1,
+                mission.required_tier,
+                mission.reward_lumen
+            );
+            self.draw_text_shadowed(
+                ctx.renderer,
+                &preview_line,
+                preview.min + Vec2::new(18.0, 27.0) * menu_scale,
+                1.55 * menu_scale,
+                Color::rgba(0.4, 1.12, 1.08, 0.98),
+                10.4,
+            );
+            let objective_line = format!(
+                "{}  //  {}",
+                Self::mission_select_objective(mission),
+                Self::mission_select_role_hint(mission)
+            );
+            self.draw_text_shadowed(
+                ctx.renderer,
+                &objective_line,
+                preview.min + Vec2::new(18.0, 11.0) * menu_scale,
+                1.28 * menu_scale,
+                Color::rgba(0.78, 0.86, 0.9, 0.94),
+                10.4,
+            );
+        }
+        let footer = Self::mission_select_footer_rect(center, menu_scale);
+        ctx.renderer.draw_sprite(
+            self.tex_ui,
+            Sprite::new(footer.center(), footer.size())
+                .with_color(Color::rgba(0.07, 0.14, 0.18, 0.9))
+                .with_z(10.0),
+        );
         self.draw_text_shadowed(
             ctx.renderer,
-            "CLICK A MISSION   OR  UP/DOWN + SPACE/ENTER",
-            center + Vec2::new(-320.0, -306.0) * menu_scale,
-            2.4 * menu_scale,
-            Color::rgb(0.6, 0.7, 0.78),
+            "DEPLOY SELECTED  //  CLICK A ROW  OR  SPACE / ENTER",
+            footer.min + Vec2::new(18.0, 11.0) * menu_scale,
+            2.05 * menu_scale,
+            Color::rgb(1.25, 0.78, 0.28),
             11.0,
         );
     }
@@ -5006,6 +5245,29 @@ impl LastLight {
                 self.tex_ui,
                 Sprite::new(center, size).with_color(fill).with_z(-7.7),
             );
+            // The decal atlas is a separate visual layer: its contour/thermal
+            // language makes a terrain choice readable at a glance, while the
+            // authored zone still remains the sole source of combat bonuses.
+            // Frame 0 is high ground, frame 1 is a covered pocket, and frame
+            // 2 is a restrained thermal seam for a low-cover zone.
+            let detail_frame = if zone.elevation > 0 {
+                0
+            } else if cover >= 0.12 {
+                1
+            } else {
+                2
+            };
+            let detail_size = size.min_element().clamp(120.0, 300.0);
+            let mut detail =
+                self.terrain_detail_atlas
+                    .sprite(center, Vec2::splat(detail_size), detail_frame);
+            detail.color = if onboarding {
+                Color::rgba(0.72, 0.92, 0.96, 0.18)
+            } else {
+                Color::rgba(0.72, 0.92, 0.96, 0.065)
+            };
+            detail.z = -7.65;
+            renderer.draw_sprite(self.tex_terrain_details, detail);
             let edge = if zone.elevation > 0 {
                 // Keep the band readable without competing with units, alerts,
                 // and the command card when a large ridge crosses the camera.
@@ -5061,6 +5323,57 @@ impl LastLight {
                     );
                 }
             }
+        }
+    }
+
+    /// Selects a presentation-only prop for each authored landmark kind. The
+    /// mission data still owns the landmark's objective, collision, and fog
+    /// semantics; this mapping only gives the map a readable silhouette.
+    fn map_prop_frame(kind: MissionLandmarkKind) -> u32 {
+        match kind {
+            MissionLandmarkKind::Objective | MissionLandmarkKind::Resource => 0,
+            MissionLandmarkKind::Fabricator => 1,
+            MissionLandmarkKind::Reactor => 2,
+            MissionLandmarkKind::LumenConsole => 3,
+            MissionLandmarkKind::Relay => 4,
+            MissionLandmarkKind::EnemyThreat => 5,
+        }
+    }
+
+    fn map_prop_size(kind: MissionLandmarkKind) -> f32 {
+        match kind {
+            MissionLandmarkKind::Objective => 166.0,
+            MissionLandmarkKind::Resource => 190.0,
+            MissionLandmarkKind::Fabricator => 176.0,
+            MissionLandmarkKind::Reactor => 214.0,
+            MissionLandmarkKind::LumenConsole => 164.0,
+            MissionLandmarkKind::Relay => 174.0,
+            MissionLandmarkKind::EnemyThreat => 184.0,
+        }
+    }
+
+    /// Draws transparent landmarks beneath the tactical fog layer. This
+    /// preserves the authored map's discovery contract while making resource
+    /// pockets, relay junctions, and Choir routes feel like places rather
+    /// than isolated glowing markers.
+    fn draw_map_props(&self, renderer: &mut Renderer) {
+        for landmark in &self.mission.landmarks {
+            let fog_alpha = match self.fog.state_at(landmark.position) {
+                FogState::Visible => 0.68,
+                FogState::Explored => 0.24,
+                FogState::Hidden => continue,
+            };
+            let mut prop = self.map_props_atlas.sprite(
+                landmark.position,
+                Vec2::splat(Self::map_prop_size(landmark.kind)),
+                Self::map_prop_frame(landmark.kind),
+            );
+            prop.color = Color::rgba(0.92, 1.0, 1.0, fog_alpha);
+            // The fog pass is z -3.0; keeping props just below it means hidden
+            // space is occluded while visible landmarks sit above the floor
+            // and below structures, units, and objective brackets.
+            prop.z = -3.2;
+            renderer.draw_sprite(self.tex_map_props, prop);
         }
     }
 
@@ -5189,6 +5502,8 @@ impl Game for LastLight {
             portraits,
             resources,
             resource_effects,
+            terrain_details,
+            map_props,
             glow,
             ui,
             mission_cover,
@@ -5213,6 +5528,8 @@ impl Game for LastLight {
                 assets::load_texture(&gpu, TextureAsset::CommandPortraits),
                 assets::load_texture(&gpu, TextureAsset::ResourceNodes),
                 assets::load_texture(&gpu, TextureAsset::ResourceHarvestEffects),
+                assets::load_texture(&gpu, TextureAsset::TerrainDetails),
+                assets::load_texture(&gpu, TextureAsset::MapProps),
                 Texture::soft_circle(&gpu, 64, Color::WHITE),
                 Texture::solid(&gpu, Color::WHITE),
                 Texture::from_bytes(
@@ -5263,6 +5580,8 @@ impl Game for LastLight {
         self.tex_mission_cover = renderer.add_texture(mission_cover);
         self.tex_resources = renderer.add_texture(resources);
         self.tex_resource_effects = renderer.add_texture(resource_effects);
+        self.tex_terrain_details = renderer.add_texture(terrain_details);
+        self.tex_map_props = renderer.add_texture(map_props);
         self.tex_glow = renderer.add_texture(glow);
         self.tex_ui = renderer.add_texture(ui);
         self.unit_atlas = TextureAsset::Units.runtime_atlas(self.tex_units);
@@ -5288,6 +5607,9 @@ impl Game for LastLight {
         self.resource_atlas = TextureAsset::ResourceNodes.runtime_atlas(self.tex_resources);
         self.resource_effects_atlas =
             TextureAsset::ResourceHarvestEffects.runtime_atlas(self.tex_resource_effects);
+        self.terrain_detail_atlas =
+            TextureAsset::TerrainDetails.runtime_atlas(self.tex_terrain_details);
+        self.map_props_atlas = TextureAsset::MapProps.runtime_atlas(self.tex_map_props);
         renderer.camera.position = Vec2::new(-700.0, -260.0);
         renderer.camera.zoom = 1.1;
         renderer.camera.zoom_min = 0.9;
@@ -5305,7 +5627,7 @@ impl Game for LastLight {
         // edge-triggered input (see field doc on `input_handled_this_frame`).
         // Continuous simulation below still runs every fixed step so the
         // catch-up loop can still catch up after a hitch.
-        let handle_input = !self.input_handled_this_frame;
+        let handle_input = edge_input_allowed(self.input_handled_this_frame);
         self.input_handled_this_frame = true;
 
         if self.mission_select {
@@ -5316,8 +5638,19 @@ impl Game for LastLight {
         }
         if self.briefing {
             if handle_input {
+                let overlay_scale = Self::hud_scale(ctx.renderer);
+                let deploy_clicked = ctx.input.mouse_pressed(MouseButton::Left)
+                    && Self::briefing_deploy_rect(ctx.renderer.camera.position, overlay_scale)
+                        .contains_point(
+                            ctx.renderer
+                                .camera
+                                .screen_to_world(ctx.input.mouse_position),
+                        );
                 self.handle_briefing_upgrades(ctx);
-                if ctx.input.key_pressed(KeyCode::Space) || ctx.input.key_pressed(KeyCode::Enter) {
+                if deploy_clicked
+                    || ctx.input.key_pressed(KeyCode::Space)
+                    || ctx.input.key_pressed(KeyCode::Enter)
+                {
                     self.briefing = false;
                     self.focus_player_roster(ctx);
                     ctx.audio.start();
@@ -5415,12 +5748,14 @@ impl Game for LastLight {
             }
         }
 
-        if let Some(console) = self.mission.lumen_console {
-            if !self.save_data.campaign.has_decision(LUMEN_AWAKENED)
-                && ctx.input.key_pressed(KeyCode::KeyK)
-                && self.selected_engineer_near(console)
-            {
-                self.awaken_lumen_console();
+        if handle_input {
+            if let Some(console) = self.mission.lumen_console {
+                if !self.save_data.campaign.has_decision(LUMEN_AWAKENED)
+                    && ctx.input.key_pressed(KeyCode::KeyK)
+                    && self.selected_engineer_near(console)
+                {
+                    self.awaken_lumen_console();
+                }
             }
         }
 
@@ -5454,6 +5789,7 @@ impl Game for LastLight {
         );
         self.draw_terrain_zones(ctx.renderer);
         self.draw_mission_obstacles(ctx.renderer);
+        self.draw_map_props(ctx.renderer);
 
         for y in 0..15 {
             for x in 0..26 {
@@ -5584,6 +5920,23 @@ impl Game for LastLight {
             resource_sprite.z = -0.05;
             ctx.renderer
                 .draw_sprite(self.tex_resources, resource_sprite);
+            if self.selected_resource_node == Some(node_index) || worker_count > 0 {
+                // Frame 3 is the resource-beacon decal. Keep it subtle during
+                // normal harvesting, then strengthen it for the selected
+                // node so the card's G/R actions have a visible world anchor.
+                let selected = self.selected_resource_node == Some(node_index);
+                let mut beacon =
+                    self.terrain_detail_atlas
+                        .sprite(node.position, Vec2::splat(176.0), 3);
+                beacon.color = Color::rgba(
+                    0.72,
+                    0.92,
+                    0.96,
+                    if selected { 0.34 } else { 0.09 + pulse * 0.04 },
+                );
+                beacon.z = 0.04;
+                ctx.renderer.draw_sprite(self.tex_terrain_details, beacon);
+            }
             if worker_count > 0 {
                 let extracting = self.harvest_jobs.values().any(|job| {
                     job.node == node_index && matches!(job.phase, HarvestPhase::Extracting)
@@ -6860,7 +7213,7 @@ impl Game for LastLight {
             }
         }
 
-        if let Some((speaker, line, _)) = self.radio_message {
+        if let Some((speaker, line, remaining)) = self.radio_message {
             let top_right = ctx
                 .renderer
                 .camera
@@ -6942,6 +7295,32 @@ impl Game for LastLight {
                 Color::rgba(0.55, 0.78, 0.82, 0.88),
                 8.8,
             );
+            // A thin countdown rail makes the transient nature of a line
+            // legible without adding another persistent panel.  The rail is
+            // anchored to the same card origin as the copy, so it remains
+            // readable when the HUD shrinks for a tight viewport/zoom.
+            let progress = Self::radio_progress(remaining);
+            let rail_origin = origin + Vec2::new(88.0, -84.0) * hud_scale;
+            ctx.renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(
+                    rail_origin + Vec2::new(195.0, 0.0) * hud_scale,
+                    Vec2::new(390.0, 4.0) * hud_scale,
+                )
+                .with_color(Color::rgba(0.08, 0.15, 0.18, 0.92))
+                .with_z(8.82),
+            );
+            if progress > 0.0 {
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(
+                        rail_origin + Vec2::new(195.0 * progress, 0.0) * hud_scale,
+                        Vec2::new(390.0 * progress, 3.0) * hud_scale,
+                    )
+                    .with_color(accent)
+                    .with_z(8.83),
+                );
+            }
         }
 
         // Action feedback is a transient toast, not a second permanent
@@ -7212,7 +7591,7 @@ impl Game for LastLight {
             Some((
                 self.mission.title,
                 self.mission.briefing_story,
-                "SPACE / CLICK A ROW TO DEPLOY".to_owned(),
+                "SPACE / ENTER  //  DEPLOY MISSION".to_owned(),
                 Color::rgb(0.32, 1.55, 1.35),
             ))
         } else if self.paused {
@@ -7246,7 +7625,18 @@ impl Game for LastLight {
         };
         if let Some((title, story, prompt, title_color)) = overlay {
             let overlay_scale = Self::hud_scale(ctx.renderer);
-            self.draw_full_screen_backdrop(ctx, Color::rgba(0.01, 0.02, 0.045, 0.8));
+            self.draw_full_screen_backdrop(
+                ctx,
+                if self.briefing {
+                    // The briefing is a deliberate reading surface. Keep the
+                    // authored floor plate visible, but fully cover the
+                    // tactical HUD underneath so portraits and upgrade rows
+                    // never compete with stale unit cards or status toasts.
+                    Color::rgba(0.01, 0.02, 0.045, 0.985)
+                } else {
+                    Color::rgba(0.01, 0.02, 0.045, 0.8)
+                },
+            );
             let center = ctx.renderer.camera.position;
             self.draw_text_shadowed(
                 ctx.renderer,
@@ -7368,14 +7758,16 @@ impl Game for LastLight {
                     11.0,
                 );
             }
-            self.draw_text_shadowed(
-                ctx.renderer,
-                &prompt,
-                center + Vec2::new(-view.x * 0.42, -view.y * 0.4),
-                3.2 * overlay_scale,
-                Color::rgb(1.25, 0.78, 0.28),
-                11.0,
-            );
+            if !self.briefing {
+                self.draw_text_shadowed(
+                    ctx.renderer,
+                    &prompt,
+                    center + Vec2::new(-view.x * 0.42, -view.y * 0.4),
+                    3.2 * overlay_scale,
+                    Color::rgb(1.25, 0.78, 0.28),
+                    11.0,
+                );
+            }
             if self.briefing {
                 self.draw_text_shadowed(
                     ctx.renderer,
@@ -7427,6 +7819,39 @@ impl Game for LastLight {
                         11.0,
                     );
                 }
+                let deploy = Self::briefing_deploy_rect(center, overlay_scale);
+                let deploy_hovered = deploy.contains_point(mouse_world);
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(deploy.center(), deploy.size())
+                        .with_color(if deploy_hovered {
+                            Color::rgba(0.18, 0.62, 0.64, 0.82)
+                        } else {
+                            Color::rgba(0.08, 0.24, 0.29, 0.86)
+                        })
+                        .with_z(10.0),
+                );
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(
+                        deploy.min + Vec2::new(5.0 * overlay_scale, deploy.size().y * 0.5),
+                        Vec2::new(5.0 * overlay_scale, deploy.size().y - 10.0 * overlay_scale),
+                    )
+                    .with_color(Color::rgb(1.2, 0.78, 0.28))
+                    .with_z(10.1),
+                );
+                self.draw_text_shadowed(
+                    ctx.renderer,
+                    "DEPLOY TO FIELD  //  SPACE / ENTER",
+                    deploy.min + Vec2::new(18.0, 12.0) * overlay_scale,
+                    1.85 * overlay_scale,
+                    if deploy_hovered {
+                        Color::rgb(1.35, 1.0, 0.42)
+                    } else {
+                        Color::rgb(1.18, 0.82, 0.3)
+                    },
+                    10.3,
+                );
             }
         }
     }
@@ -8129,6 +8554,25 @@ mod tests {
         }
         assert_eq!(game.command_card_display(0), "Q  WARDEN // QUEUE FULL");
         assert!(!game.command_card_available(0));
+    }
+
+    #[test]
+    fn hidden_contextual_command_reports_why_the_action_is_blocked() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        game.selected_structure = Some(StructureKind::Fabricator);
+        game.simulation.power.set_online(FABRICATOR_NODE, false);
+
+        assert_eq!(
+            game.blocked_command_feedback(KeyCode::KeyQ).as_deref(),
+            Some("COMMAND BLOCKED // Q  WARDEN // OFFLINE")
+        );
+        assert!(game.report_blocked_command(KeyCode::KeyQ));
+        assert_eq!(
+            game.status.as_ref().map(|(copy, _)| copy.as_str()),
+            Some("COMMAND BLOCKED // Q  WARDEN // OFFLINE")
+        );
+        assert!(game.simulation.production.items().is_empty());
     }
 
     #[test]
@@ -9560,6 +10004,14 @@ mod tests {
     }
 
     #[test]
+    fn radio_progress_stays_bounded_for_the_countdown_rail() {
+        assert_eq!(LastLight::radio_progress(7.0), 1.0);
+        assert!((LastLight::radio_progress(3.0) - 0.5).abs() < 1e-5);
+        assert_eq!(LastLight::radio_progress(0.0), 0.0);
+        assert_eq!(LastLight::radio_progress(-1.0), 0.0);
+    }
+
+    #[test]
     fn briefing_copy_wraps_and_preserves_the_authored_speaker() {
         let mut game = LastLight::new();
         game.start_mission(missions::garden_below());
@@ -9604,11 +10056,50 @@ mod tests {
         let last = LastLight::mission_entry_rect(Vec2::ZERO, 6, compact);
         assert!(first.center().y > last.center().y);
         assert!(first.size().y < 62.0);
-        let footer = Aabb::from_center_size(
-            Vec2::new(-320.0, -306.0 * compact),
-            Vec2::new(780.0, 28.0) * compact,
-        );
+        let preview = LastLight::mission_select_preview_rect(Vec2::ZERO, compact);
+        let footer = LastLight::mission_select_footer_rect(Vec2::ZERO, compact);
+        assert!(!last.intersects(preview));
+        assert!(!preview.intersects(footer));
         assert!(!last.intersects(footer));
+    }
+
+    #[test]
+    fn mission_preview_explains_the_data_driven_win_condition() {
+        let reactor = missions::reclaim_the_reactor();
+        let escort = missions::voice_in_conduit_twelve();
+        assert!(LastLight::mission_select_objective(&reactor).contains("RESTORE 3 RELAYS"));
+        assert!(LastLight::mission_select_objective(&reactor).contains("CHOIR CANTICLE"));
+        assert!(LastLight::mission_select_objective(&escort).contains("ESCORT SURVEYOR"));
+        assert_eq!(
+            LastLight::mission_select_role_hint(&missions::terms_of_salvage()),
+            "CLAIM THE HIGH GROUND"
+        );
+    }
+
+    #[test]
+    fn map_props_keep_landmark_roles_distinct() {
+        assert_eq!(LastLight::map_prop_frame(MissionLandmarkKind::Resource), 0);
+        assert_eq!(
+            LastLight::map_prop_frame(MissionLandmarkKind::Fabricator),
+            1
+        );
+        assert_eq!(LastLight::map_prop_frame(MissionLandmarkKind::Relay), 4);
+        assert_eq!(
+            LastLight::map_prop_frame(MissionLandmarkKind::EnemyThreat),
+            5
+        );
+        assert!(
+            LastLight::map_prop_size(MissionLandmarkKind::Reactor)
+                > LastLight::map_prop_size(MissionLandmarkKind::LumenConsole)
+        );
+    }
+
+    #[test]
+    fn briefing_deploy_rail_stays_clear_of_upgrade_rows() {
+        let deploy = LastLight::briefing_deploy_rect(Vec2::ZERO, 1.0);
+        for index in 0..10 {
+            assert!(!deploy.intersects(LastLight::briefing_row_rect(Vec2::ZERO, index, 1.0)));
+        }
     }
 
     #[test]
@@ -9627,6 +10118,12 @@ mod tests {
         assert!(!LastLight::hud_dense_for_zoom(HUD_DENSE_ZOOM - 0.01));
         assert!(LastLight::hud_dense_for_zoom(HUD_DENSE_ZOOM));
         assert!(LastLight::hud_dense_for_zoom(1.75));
+    }
+
+    #[test]
+    fn edge_input_gate_consumes_a_key_once_per_rendered_frame() {
+        assert!(edge_input_allowed(false));
+        assert!(!edge_input_allowed(true));
     }
 
     #[test]

@@ -38,6 +38,8 @@ pub enum TextureAsset {
     CommandPortraits,
     ResourceNodes,
     ResourceHarvestEffects,
+    TerrainDetails,
+    MapProps,
 }
 
 /// How a player-visible state is currently rendered.
@@ -366,6 +368,8 @@ pub enum TextureRole {
     PortraitSheet,
     ResourceAtlas,
     ResourceEffectAtlas,
+    TerrainDetailAtlas,
+    MapPropsAtlas,
 }
 
 /// Pixel-space row origin used when authoring an atlas.
@@ -423,7 +427,9 @@ impl TextureSpec {
             | TextureRole::StructureAtlas
             | TextureRole::PortraitSheet
             | TextureRole::ResourceAtlas
-            | TextureRole::ResourceEffectAtlas => AssetKind::SpriteAtlas,
+            | TextureRole::ResourceEffectAtlas
+            | TextureRole::TerrainDetailAtlas
+            | TextureRole::MapPropsAtlas => AssetKind::SpriteAtlas,
         }
     }
 
@@ -472,13 +478,19 @@ impl TextureSpec {
             TextureRole::ResourceEffectAtlas if self.grid.0 != 2 || self.grid.1 != 2 => {
                 Err("resource effect atlases must use the 2x2 VFX grid")
             }
+            TextureRole::TerrainDetailAtlas if self.grid.0 != 2 || self.grid.1 != 2 => {
+                Err("terrain detail atlases must use the 2x2 decal grid")
+            }
+            TextureRole::MapPropsAtlas if self.grid.0 != 3 || self.grid.1 != 2 => {
+                Err("map prop atlases must use the 3x2 prop grid")
+            }
             _ => Ok(()),
         }
     }
 }
 
 impl TextureAsset {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 28] = [
         Self::ReactorSector,
         Self::ReactorSectorReclaim,
         Self::ReactorSectorVoice,
@@ -505,6 +517,8 @@ impl TextureAsset {
         Self::CommandPortraits,
         Self::ResourceNodes,
         Self::ResourceHarvestEffects,
+        Self::TerrainDetails,
+        Self::MapProps,
     ];
     pub fn key(self) -> &'static str {
         match self {
@@ -534,6 +548,8 @@ impl TextureAsset {
             Self::CommandPortraits => "portraits.command",
             Self::ResourceNodes => "resources.nodes",
             Self::ResourceHarvestEffects => "resources.harvest_fx",
+            Self::TerrainDetails => "terrain.details",
+            Self::MapProps => "map.props",
         }
     }
 
@@ -571,6 +587,8 @@ impl TextureAsset {
             Self::CommandPortraits => (TextureRole::PortraitSheet, (768, 512), (3, 2)),
             Self::ResourceNodes => (TextureRole::ResourceAtlas, (512, 512), (2, 2)),
             Self::ResourceHarvestEffects => (TextureRole::ResourceEffectAtlas, (512, 512), (2, 2)),
+            Self::TerrainDetails => (TextureRole::TerrainDetailAtlas, (512, 512), (2, 2)),
+            Self::MapProps => (TextureRole::MapPropsAtlas, (768, 512), (3, 2)),
         };
         TextureSpec {
             asset: self,
@@ -646,6 +664,8 @@ impl TextureAsset {
             Self::CommandPortraits => "portraits/lantern-command-portrait-sheet-v001.png",
             Self::ResourceNodes => "resource-node-atlas-v002.png",
             Self::ResourceHarvestEffects => "resource-harvest-effects-v002.png",
+            Self::TerrainDetails => "terrain-detail-atlas-v001.png",
+            Self::MapProps => "map-props-atlas-v001.png",
         }
     }
     fn bytes(self) -> &'static [u8] {
@@ -682,6 +702,8 @@ impl TextureAsset {
             Self::ResourceHarvestEffects => {
                 include_bytes!("../assets/resource-harvest-effects-v002.png")
             }
+            Self::TerrainDetails => include_bytes!("../assets/terrain-detail-atlas-v001.png"),
+            Self::MapProps => include_bytes!("../assets/map-props-atlas-v001.png"),
         }
     }
 }
@@ -826,6 +848,67 @@ mod tests {
                 .unwrap()
                 .kind,
             AssetKind::SpriteAtlas
+        );
+    }
+
+    #[test]
+    fn terrain_detail_atlas_is_overlay_safe_and_reproducible() {
+        let asset = TextureAsset::TerrainDetails;
+        let spec = asset.spec();
+        assert_eq!(asset.key(), "terrain.details");
+        assert_eq!(asset.path(), "terrain-detail-atlas-v001.png");
+        assert_eq!(spec.role, TextureRole::TerrainDetailAtlas);
+        assert_eq!(spec.pixel_size, (512, 512));
+        assert_eq!(spec.grid, (2, 2));
+        assert_eq!(spec.frame_size(), (256, 256));
+        assert_eq!(spec.frame_count(), 4);
+        assert_eq!(spec.frame_origin, FrameOrigin::TopLeft);
+        assert_eq!(spec.validate_contract(), Ok(()));
+
+        // The generator intentionally emits a transparent RGBA background so
+        // each decal can sit over any environment plate without hiding units.
+        // The PNG header's bit-depth/color-type bytes keep that alpha-capable
+        // format stable; the decode and dimension gate above is shared with
+        // every embedded texture.
+        let bytes = asset.bytes_for_validation();
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(bytes.get(24), Some(&8), "terrain atlas must stay 8-bit");
+        assert_eq!(
+            bytes.get(25),
+            Some(&6),
+            "terrain atlas must retain RGBA alpha"
+        );
+        assert!(
+            bytes.len() > 512,
+            "terrain atlas should contain authored pixels"
+        );
+    }
+
+    #[test]
+    fn map_props_atlas_declares_six_alpha_safe_landmarks() {
+        let asset = TextureAsset::MapProps;
+        let spec = asset.spec();
+        assert_eq!(asset.key(), "map.props");
+        assert_eq!(asset.path(), "map-props-atlas-v001.png");
+        assert_eq!(spec.role, TextureRole::MapPropsAtlas);
+        assert_eq!(spec.pixel_size, (768, 512));
+        assert_eq!(spec.grid, (3, 2));
+        assert_eq!(spec.frame_size(), (256, 256));
+        assert_eq!(spec.frame_count(), 6);
+        assert_eq!(spec.frame_origin, FrameOrigin::TopLeft);
+        assert_eq!(spec.validate_contract(), Ok(()));
+
+        // Each prop is composited over a live map plate, so a transparent
+        // RGBA surface is part of the shipped contract rather than an art
+        // suggestion. The per-cell padding is reviewed in the generator's
+        // Pillow inspection pass; this gate catches accidental format drift.
+        let bytes = asset.bytes_for_validation();
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(bytes.get(24), Some(&8), "map props must stay 8-bit");
+        assert_eq!(bytes.get(25), Some(&6), "map props must retain RGBA alpha");
+        assert!(
+            bytes.len() > 512,
+            "map prop atlas should contain authored pixels"
         );
     }
 
