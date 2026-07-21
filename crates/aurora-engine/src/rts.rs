@@ -1963,7 +1963,8 @@ impl NavGrid {
     /// any sampled point falls in a blocked cell. Used to decide whether a
     /// direct approach needs to fall back to `find_path`.
     pub fn segment_blocked(&self, start: Vec2, end: Vec2) -> bool {
-        if !start.x.is_finite() || !start.y.is_finite() || !end.x.is_finite() || !end.y.is_finite() {
+        if !start.x.is_finite() || !start.y.is_finite() || !end.x.is_finite() || !end.y.is_finite()
+        {
             return false;
         }
         let distance = start.distance(end);
@@ -2004,7 +2005,9 @@ impl NavGrid {
 
         impl PartialEq for SearchState {
             fn eq(&self, other: &Self) -> bool {
-                self.estimated == other.estimated && self.cost == other.cost && self.cell == other.cell
+                self.estimated == other.estimated
+                    && self.cost == other.cost
+                    && self.cell == other.cell
             }
         }
         impl Eq for SearchState {}
@@ -2059,7 +2062,12 @@ impl NavGrid {
             (IVec2::new(-1, 1), 1.414_213_6),
             (IVec2::new(-1, -1), 1.414_213_6),
         ];
-        while let Some(SearchState { estimated: _, cost, cell }) = frontier.pop() {
+        while let Some(SearchState {
+            estimated: _,
+            cost,
+            cell,
+        }) = frontier.pop()
+        {
             let Some(cell_index) = self.index(cell) else {
                 continue;
             };
@@ -2421,7 +2429,10 @@ mod tests {
 
         grid.set_blocked(IVec2::new(1, 0), false);
         let path = grid.find_path(Vec2::new(5.0, 5.0), Vec2::new(25.0, 25.0));
-        assert!(!path.is_empty(), "clearing the corner should reveal a route");
+        assert!(
+            !path.is_empty(),
+            "clearing the corner should reveal a route"
+        );
     }
 
     #[test]

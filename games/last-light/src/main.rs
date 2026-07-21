@@ -3753,6 +3753,7 @@ impl LastLight {
                 retreat_health_fraction: 0.35,
                 retreat_duration: 5.0,
                 max_attackers_per_target: 1,
+                ..AiParams::default()
             }
         } else {
             AiParams::default()

@@ -345,10 +345,8 @@ impl SimpleAggroAi {
 
         for (_, key) in keys.into_iter().take(over_capacity) {
             if self.path_cache.remove(&key).is_some() {
-                self.pathing_stats.path_cache_evictions = self
-                    .pathing_stats
-                    .path_cache_evictions
-                    .saturating_add(1);
+                self.pathing_stats.path_cache_evictions =
+                    self.pathing_stats.path_cache_evictions.saturating_add(1);
             }
         }
     }
@@ -800,23 +798,26 @@ mod tests {
             );
         }
 
-        ai.think(&mut world, ATTACKERS, TARGETS, 1.0, &AiParams::default(), None);
+        ai.think(
+            &mut world,
+            ATTACKERS,
+            TARGETS,
+            1.0,
+            &AiParams::default(),
+            None,
+        );
 
         assert_eq!(ai.path_cache.len(), cap);
-        assert!(!ai
-            .path_cache
-            .contains_key(&PathCacheKey {
-                    from: IVec2::new(0, 0),
-                    to: IVec2::new(1, 0),
-                    nav_version: 0,
-                }));
-        assert!(ai
-            .path_cache
-            .contains_key(&PathCacheKey {
-                from: IVec2::new(cap as i32 + 6, 0),
-                to: IVec2::new(cap as i32 + 7, 0),
-                nav_version: 0,
-            }));
+        assert!(!ai.path_cache.contains_key(&PathCacheKey {
+            from: IVec2::new(0, 0),
+            to: IVec2::new(1, 0),
+            nav_version: 0,
+        }));
+        assert!(ai.path_cache.contains_key(&PathCacheKey {
+            from: IVec2::new(cap as i32 + 6, 0),
+            to: IVec2::new(cap as i32 + 7, 0),
+            nav_version: 0,
+        }));
         assert_eq!(ai.pathing_stats.path_cache_evictions, 7);
     }
 
