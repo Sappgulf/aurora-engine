@@ -162,6 +162,7 @@ unrelated images.
 | `resource-harvest-effects-v001.png` | 512×512 | 2×2 | Extraction beams, cargo lift, and depleted-node pulse |
 | `terrain-detail-atlas-v001.png` | 512×512 | 2×2 | High-ground, cover, fissure, and resource-beacon overlays |
 | `map-props-atlas-v001.png` | 768×512 | 3×2 | Cargo, Engineer, conduit, support, relay, and Choir route landmarks |
+| `specialist-module-atlas-v001.png` | 1024×512 | 4×2 | Mara, Ivo, Sena, and Olan loadout icons (base and alternate modules) |
 | `reactor-sector-v001.png` | 1672×941 | 1×1 | Authored mission floor plate |
 | `portraits/lantern-command-portrait-sheet-v001.png` | 768×512 | 3×2 | Mara, Ivo, Sena, Olan, Vale, and Lumen comms portraits |
 
@@ -188,6 +189,20 @@ python3 tools/asset-sources/last-light/generate_map_props_atlas.py
 
 The script retains a 4× source preview in `tools/asset-sources/last-light/`
 and writes the 768×512 RGBA runtime atlas under `games/last-light/assets/`.
+
+The specialist-module atlas follows the same local, deterministic production
+rule, but uses four columns and two rows: Mara rescue/rapid, Ivo rigger/smith,
+Sena deep-scan/ghost-mark, and Olan lattice/decoder. The campaign briefing
+selects the matching frame from the persisted loadout, so the icon and label
+change together when a player cycles a module. Rebuild both the 4× runtime PNG
+and its 4× source review with:
+
+```bash
+python3 tools/asset-sources/last-light/generate_specialist_module_atlas.py
+```
+
+The source preview is intentionally retained beside the generator for art
+review; only the normalized runtime atlas is embedded in the Rust binary.
 
 The harvest-effects atlas is ordered as Salvage extraction, Flux extraction,
 returning cargo, and depleted pulse. These are state-driven overlays rather

@@ -141,6 +141,29 @@ fn unit_sprite_rotation(velocity: Vec2) -> f32 {
     }
 }
 
+/// Clamp a live value into the normalized range used by HUD rails. The
+/// renderer should never be able to draw a health/cooldown fill outside its
+/// backing track, even when a replay or a large fixed-step jump hands it an
+/// out-of-range value.
+#[inline]
+fn normalized_fraction(value: f32, maximum: f32) -> f32 {
+    if maximum <= f32::EPSILON {
+        0.0
+    } else {
+        (value / maximum).clamp(0.0, 1.0)
+    }
+}
+
+#[inline]
+fn health_fraction(health: f32, max_health: f32) -> f32 {
+    normalized_fraction(health.max(0.0), max_health.max(0.0))
+}
+
+#[inline]
+fn ability_cooldown_fraction(ability: SpecialAbility, remaining: f32) -> f32 {
+    normalized_fraction(remaining.max(0.0), ability.cooldown_seconds())
+}
+
 /// Presentation state shared by animation playback and atlas selection.
 /// Keeping one decision tree for both paths prevents a stale strip from
 /// surviving a state change (for example, a Surveyor showing its scan fan
@@ -209,6 +232,7 @@ struct LastLight {
     tex_resource_effects: TextureHandle,
     tex_terrain_details: TextureHandle,
     tex_map_props: TextureHandle,
+    tex_specialist_modules: TextureHandle,
     tex_glow: TextureHandle,
     tex_ui: TextureHandle,
     unit_atlas: TextureAtlas,
@@ -232,6 +256,7 @@ struct LastLight {
     resource_effects_atlas: TextureAtlas,
     terrain_detail_atlas: TextureAtlas,
     map_props_atlas: TextureAtlas,
+    specialist_module_atlas: TextureAtlas,
     simulation: MissionSimulation,
     attack_flash: HashMap<UnitId, f32>,
     damage_flash: HashMap<UnitId, f32>,
@@ -379,6 +404,7 @@ impl LastLight {
             tex_resource_effects: TextureHandle::default(),
             tex_terrain_details: TextureHandle::default(),
             tex_map_props: TextureHandle::default(),
+            tex_specialist_modules: TextureHandle::default(),
             tex_glow: TextureHandle::default(),
             tex_ui: TextureHandle::default(),
             unit_atlas: TextureAsset::Units.runtime_atlas(TextureHandle::default()),
@@ -408,6 +434,8 @@ impl LastLight {
             terrain_detail_atlas: TextureAsset::TerrainDetails
                 .runtime_atlas(TextureHandle::default()),
             map_props_atlas: TextureAsset::MapProps.runtime_atlas(TextureHandle::default()),
+            specialist_module_atlas: TextureAsset::SpecialistModules
+                .runtime_atlas(TextureHandle::default()),
             simulation,
             attack_flash: HashMap::new(),
             damage_flash: HashMap::new(),
@@ -916,6 +944,41 @@ impl LastLight {
                 Color::rgba(0.48, 1.15, 0.5, 0.98),
             ),
         ]
+    }
+
+    /// Frame mapping for the authored specialist module atlas. The icon is
+    /// intentionally derived from the same persisted loadout state as the
+    /// row label, so cycling a module updates both pieces of UI together.
+    fn specialist_module_frame(&self, key: KeyCode) -> Option<u32> {
+        match key {
+            KeyCode::KeyV => Some(if self.specialist_module(IVO, IVO_RIGGER) == IVO_RIGGER {
+                1
+            } else {
+                5
+            }),
+            KeyCode::KeyN => Some(
+                if self.specialist_module(SENA, SENA_DEEP_SCAN) == SENA_DEEP_SCAN {
+                    2
+                } else {
+                    6
+                },
+            ),
+            KeyCode::KeyM => Some(
+                if self.specialist_module(MARA, MARA_RESCUE) == MARA_RESCUE {
+                    0
+                } else {
+                    4
+                },
+            ),
+            KeyCode::KeyO => Some(
+                if self.specialist_module(OLAN, OLAN_LATTICE) == OLAN_LATTICE {
+                    3
+                } else {
+                    7
+                },
+            ),
+            _ => None,
+        }
     }
 
     /// Keeps the longest upgrade label inside its fixed two-column row. The
@@ -4150,6 +4213,9 @@ impl LastLight {
                 .simulation
                 .resource_objective_state()
                 .is_some_and(|state| state.completed),
+            DialogueTrigger::SpecialistObjectiveCompleted => {
+                self.specialist_objective_state.completed
+            }
         };
         if ready {
             let position = self.next_objective().map(|(position, _)| position);
@@ -5505,6 +5571,7 @@ impl Game for LastLight {
             resource_effects,
             terrain_details,
             map_props,
+            specialist_modules,
             glow,
             ui,
             mission_cover,
@@ -5531,6 +5598,7 @@ impl Game for LastLight {
                 assets::load_texture(&gpu, TextureAsset::ResourceHarvestEffects),
                 assets::load_texture(&gpu, TextureAsset::TerrainDetails),
                 assets::load_texture(&gpu, TextureAsset::MapProps),
+                assets::load_texture(&gpu, TextureAsset::SpecialistModules),
                 Texture::soft_circle(&gpu, 64, Color::WHITE),
                 Texture::solid(&gpu, Color::WHITE),
                 Texture::from_bytes(
@@ -5583,6 +5651,7 @@ impl Game for LastLight {
         self.tex_resource_effects = renderer.add_texture(resource_effects);
         self.tex_terrain_details = renderer.add_texture(terrain_details);
         self.tex_map_props = renderer.add_texture(map_props);
+        self.tex_specialist_modules = renderer.add_texture(specialist_modules);
         self.tex_glow = renderer.add_texture(glow);
         self.tex_ui = renderer.add_texture(ui);
         self.unit_atlas = TextureAsset::Units.runtime_atlas(self.tex_units);
@@ -5611,6 +5680,8 @@ impl Game for LastLight {
         self.terrain_detail_atlas =
             TextureAsset::TerrainDetails.runtime_atlas(self.tex_terrain_details);
         self.map_props_atlas = TextureAsset::MapProps.runtime_atlas(self.tex_map_props);
+        self.specialist_module_atlas =
+            TextureAsset::SpecialistModules.runtime_atlas(self.tex_specialist_modules);
         renderer.camera.position = Vec2::new(-700.0, -260.0);
         renderer.camera.zoom = 1.1;
         renderer.camera.zoom_min = 0.9;
@@ -7005,6 +7076,40 @@ impl Game for LastLight {
                         Color::rgb(0.72, 0.92, 0.9),
                         8.1,
                     );
+                    // A narrow health rail communicates attrition faster than
+                    // the numeric HP readout, especially while dragging a
+                    // squad through a raid. It shares the card's text column
+                    // and never expands the persistent HUD footprint.
+                    let health = health_fraction(unit.health, unit.max_health);
+                    let health_bar_min = unit_card + Vec2::new(122.0, 60.0) * hud_scale;
+                    let health_bar_width = 174.0 * hud_scale;
+                    ctx.renderer.draw_sprite(
+                        self.tex_ui,
+                        Sprite::new(
+                            health_bar_min + Vec2::new(health_bar_width * 0.5, 0.0),
+                            Vec2::new(health_bar_width, 5.0 * hud_scale),
+                        )
+                        .with_color(Color::rgba(0.04, 0.09, 0.11, 0.95))
+                        .with_z(8.03),
+                    );
+                    if health > 0.0 {
+                        let health_color = if health > 0.6 {
+                            Color::rgb(0.25, 1.1, 0.84)
+                        } else if health > 0.3 {
+                            Color::rgb(1.05, 0.72, 0.24)
+                        } else {
+                            Color::rgb(1.15, 0.28, 0.35)
+                        };
+                        ctx.renderer.draw_sprite(
+                            self.tex_ui,
+                            Sprite::new(
+                                health_bar_min + Vec2::new(health_bar_width * health * 0.5, 0.0),
+                                Vec2::new(health_bar_width * health, 4.0 * hud_scale),
+                            )
+                            .with_color(health_color)
+                            .with_z(8.04),
+                        );
+                    }
                     let role_text = match kind {
                         UnitKind::Warden if count == 1 && compact_unit_card => {
                             format!("{identity} // {}", kind.role().label())
@@ -7088,7 +7193,15 @@ impl Game for LastLight {
                     if count == 1 && !compact_unit_card {
                         if let Some(ability) = MissionSimulation::ability_for_kind(kind) {
                             let cooldown = self.simulation.ability_cooldown(*selected);
-                            let ability_text = if cooldown > 0.0 {
+                            let surge_remaining =
+                                self.simulation.command_surge_remaining(*selected);
+                            let ability_text = if surge_remaining > 0.0 {
+                                format!(
+                                    "Y  {} // ACTIVE {:02}s",
+                                    ability.label(),
+                                    surge_remaining.ceil() as u32
+                                )
+                            } else if cooldown > 0.0 {
                                 format!(
                                     "Y  {} // RECHARGE {:02}s",
                                     ability.label(),
@@ -7102,13 +7215,53 @@ impl Game for LastLight {
                                 &ability_text,
                                 unit_card + Vec2::new(122.0, 24.0) * hud_scale,
                                 1.35 * hud_scale,
-                                if cooldown > 0.0 {
+                                if surge_remaining > 0.0 {
+                                    Color::rgb(1.12, 0.86, 0.28)
+                                } else if cooldown > 0.0 {
                                     Color::rgba(0.58, 0.68, 0.72, 0.9)
                                 } else {
                                     Color::rgb(1.05, 0.76, 0.28)
                                 },
                                 8.1,
                             );
+                            // The text names the action; this rail makes its
+                            // timing legible during combat without requiring
+                            // the player to parse seconds every frame.
+                            let cooldown_fill = if surge_remaining > 0.0 {
+                                1.0
+                            } else {
+                                1.0 - ability_cooldown_fraction(ability, cooldown)
+                            };
+                            let cooldown_min = unit_card + Vec2::new(122.0, 14.0) * hud_scale;
+                            let cooldown_width = 174.0 * hud_scale;
+                            ctx.renderer.draw_sprite(
+                                self.tex_ui,
+                                Sprite::new(
+                                    cooldown_min + Vec2::new(cooldown_width * 0.5, 0.0),
+                                    Vec2::new(cooldown_width, 4.0 * hud_scale),
+                                )
+                                .with_color(Color::rgba(0.04, 0.09, 0.11, 0.95))
+                                .with_z(8.03),
+                            );
+                            if cooldown_fill > 0.0 {
+                                let cooldown_color = if surge_remaining > 0.0 {
+                                    Color::rgb(1.08, 0.72, 0.22)
+                                } else if cooldown > 0.0 {
+                                    Color::rgb(0.34, 0.88, 1.08)
+                                } else {
+                                    Color::rgb(0.34, 1.2, 0.82)
+                                };
+                                ctx.renderer.draw_sprite(
+                                    self.tex_ui,
+                                    Sprite::new(
+                                        cooldown_min
+                                            + Vec2::new(cooldown_width * cooldown_fill * 0.5, 0.0),
+                                        Vec2::new(cooldown_width * cooldown_fill, 3.0 * hud_scale),
+                                    )
+                                    .with_color(cooldown_color)
+                                    .with_z(8.04),
+                                );
+                            }
                         }
                         if let Some((terrain_copy, terrain_accent)) =
                             self.terrain_readout_copy(unit.position)
@@ -7633,7 +7786,7 @@ impl Game for LastLight {
                     // authored floor plate visible, but fully cover the
                     // tactical HUD underneath so portraits and upgrade rows
                     // never compete with stale unit cards or status toasts.
-                    Color::rgba(0.01, 0.02, 0.045, 0.985)
+                    Color::rgba(0.01, 0.02, 0.045, 1.0)
                 } else {
                     Color::rgba(0.01, 0.02, 0.045, 0.8)
                 },
@@ -7798,7 +7951,7 @@ impl Game for LastLight {
                     .renderer
                     .camera
                     .screen_to_world(ctx.input.mouse_position);
-                for (index, (_, label, color)) in self.briefing_rows().iter().enumerate() {
+                for (index, (key, label, color)) in self.briefing_rows().iter().enumerate() {
                     let rect = Self::briefing_row_rect(center, index, overlay_scale);
                     let hovered = rect.contains_point(mouse_world);
                     ctx.renderer.draw_sprite(
@@ -7811,10 +7964,27 @@ impl Game for LastLight {
                             })
                             .with_z(10.0),
                     );
+                    let label_offset = if let Some(frame) = self.specialist_module_frame(*key) {
+                        let icon_center = rect.min
+                            + Vec2::new(27.0, rect.size().y / overlay_scale * 0.5) * overlay_scale;
+                        let icon = self.specialist_module_atlas.sprite(
+                            icon_center,
+                            Vec2::splat(29.0 * overlay_scale),
+                            frame,
+                        );
+                        ctx.renderer.draw_sprite(
+                            self.tex_specialist_modules,
+                            icon.with_color(Color::rgba(0.92, 1.0, 1.0, 0.96))
+                                .with_z(10.15),
+                        );
+                        48.0
+                    } else {
+                        14.0
+                    };
                     self.draw_text_shadowed(
                         ctx.renderer,
                         label,
-                        rect.min + Vec2::new(14.0, 10.0) * overlay_scale,
+                        rect.min + Vec2::new(label_offset, 10.0) * overlay_scale,
                         Self::briefing_label_scale(label, overlay_scale),
                         *color,
                         11.0,
@@ -7879,6 +8049,28 @@ mod tests {
     fn directional_art_turns_away_from_the_old_upside_down_heading() {
         assert!((unit_sprite_rotation(Vec2::new(0.0, 100.0)) - std::f32::consts::PI).abs() < 1e-5);
         assert_eq!(unit_sprite_rotation(Vec2::new(0.2, 0.2)), 0.0);
+    }
+
+    #[test]
+    fn unit_card_health_and_cooldown_rails_stay_normalized() {
+        assert_eq!(health_fraction(50.0, 100.0), 0.5);
+        assert_eq!(health_fraction(-20.0, 100.0), 0.0);
+        assert_eq!(health_fraction(140.0, 100.0), 1.0);
+        assert_eq!(health_fraction(10.0, 0.0), 0.0);
+
+        assert_eq!(SpecialAbility::CommandSurge.cooldown_seconds(), 18.0);
+        assert_eq!(
+            ability_cooldown_fraction(SpecialAbility::CommandSurge, 9.0),
+            0.5
+        );
+        assert_eq!(
+            ability_cooldown_fraction(SpecialAbility::ScanPulse, -1.0),
+            0.0
+        );
+        assert_eq!(
+            ability_cooldown_fraction(SpecialAbility::EmergencyRepair, 99.0),
+            1.0
+        );
     }
 
     #[test]
@@ -8940,6 +9132,35 @@ mod tests {
             .expect("completed resource objective should enter the radio queue");
         assert_eq!(speaker, "SENA QUILL");
         assert!(text.contains("CACHE IS SECURE"));
+        assert_eq!(game.dialogue_cursor, line_index + 1);
+    }
+
+    #[test]
+    fn hollow_engineer_completion_unlocks_authored_radio_handoff() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::hollow_orbit());
+        let line_index = game
+            .mission
+            .radio_lines
+            .iter()
+            .position(|line| matches!(line.trigger, DialogueTrigger::SpecialistObjectiveCompleted))
+            .expect("hollow orbit authors an Engineer completion transmission");
+
+        game.dialogue_cursor = line_index;
+        game.radio_message = None;
+        game.radio_queue.clear();
+        game.radio_priority_queue.clear();
+        game.update_radio_dialogue(0.0);
+        assert!(game.radio_message.is_none());
+        assert_eq!(game.dialogue_cursor, line_index);
+
+        game.specialist_objective_state.completed = true;
+        game.update_radio_dialogue(0.0);
+        let (speaker, text, _) = game
+            .radio_message
+            .expect("Engineer completion should enter the authored radio queue");
+        assert_eq!(speaker, "IVO ROOK");
+        assert!(text.contains("EASTERN BREAK"));
         assert_eq!(game.dialogue_cursor, line_index + 1);
     }
 

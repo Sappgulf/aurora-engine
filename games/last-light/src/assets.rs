@@ -40,6 +40,7 @@ pub enum TextureAsset {
     ResourceHarvestEffects,
     TerrainDetails,
     MapProps,
+    SpecialistModules,
 }
 
 /// How a player-visible state is currently rendered.
@@ -370,6 +371,7 @@ pub enum TextureRole {
     ResourceEffectAtlas,
     TerrainDetailAtlas,
     MapPropsAtlas,
+    SpecialistModuleAtlas,
 }
 
 /// Pixel-space row origin used when authoring an atlas.
@@ -429,7 +431,8 @@ impl TextureSpec {
             | TextureRole::ResourceAtlas
             | TextureRole::ResourceEffectAtlas
             | TextureRole::TerrainDetailAtlas
-            | TextureRole::MapPropsAtlas => AssetKind::SpriteAtlas,
+            | TextureRole::MapPropsAtlas
+            | TextureRole::SpecialistModuleAtlas => AssetKind::SpriteAtlas,
         }
     }
 
@@ -484,13 +487,16 @@ impl TextureSpec {
             TextureRole::MapPropsAtlas if self.grid.0 != 3 || self.grid.1 != 2 => {
                 Err("map prop atlases must use the 3x2 prop grid")
             }
+            TextureRole::SpecialistModuleAtlas if self.grid.0 != 4 || self.grid.1 != 2 => {
+                Err("specialist module atlases must use the 4x2 module grid")
+            }
             _ => Ok(()),
         }
     }
 }
 
 impl TextureAsset {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::ReactorSector,
         Self::ReactorSectorReclaim,
         Self::ReactorSectorVoice,
@@ -519,6 +525,7 @@ impl TextureAsset {
         Self::ResourceHarvestEffects,
         Self::TerrainDetails,
         Self::MapProps,
+        Self::SpecialistModules,
     ];
     pub fn key(self) -> &'static str {
         match self {
@@ -550,6 +557,7 @@ impl TextureAsset {
             Self::ResourceHarvestEffects => "resources.harvest_fx",
             Self::TerrainDetails => "terrain.details",
             Self::MapProps => "map.props",
+            Self::SpecialistModules => "specialists.modules",
         }
     }
 
@@ -589,6 +597,7 @@ impl TextureAsset {
             Self::ResourceHarvestEffects => (TextureRole::ResourceEffectAtlas, (512, 512), (2, 2)),
             Self::TerrainDetails => (TextureRole::TerrainDetailAtlas, (512, 512), (2, 2)),
             Self::MapProps => (TextureRole::MapPropsAtlas, (768, 512), (3, 2)),
+            Self::SpecialistModules => (TextureRole::SpecialistModuleAtlas, (1024, 512), (4, 2)),
         };
         TextureSpec {
             asset: self,
@@ -666,6 +675,7 @@ impl TextureAsset {
             Self::ResourceHarvestEffects => "resource-harvest-effects-v002.png",
             Self::TerrainDetails => "terrain-detail-atlas-v001.png",
             Self::MapProps => "map-props-atlas-v001.png",
+            Self::SpecialistModules => "specialist-module-atlas-v001.png",
         }
     }
     fn bytes(self) -> &'static [u8] {
@@ -704,6 +714,9 @@ impl TextureAsset {
             }
             Self::TerrainDetails => include_bytes!("../assets/terrain-detail-atlas-v001.png"),
             Self::MapProps => include_bytes!("../assets/map-props-atlas-v001.png"),
+            Self::SpecialistModules => {
+                include_bytes!("../assets/specialist-module-atlas-v001.png")
+            }
         }
     }
 }
@@ -909,6 +922,34 @@ mod tests {
         assert!(
             bytes.len() > 512,
             "map prop atlas should contain authored pixels"
+        );
+    }
+
+    #[test]
+    fn specialist_module_atlas_declares_eight_alpha_safe_icons() {
+        let asset = TextureAsset::SpecialistModules;
+        let spec = asset.spec();
+        assert_eq!(asset.key(), "specialists.modules");
+        assert_eq!(asset.path(), "specialist-module-atlas-v001.png");
+        assert_eq!(spec.role, TextureRole::SpecialistModuleAtlas);
+        assert_eq!(spec.pixel_size, (1024, 512));
+        assert_eq!(spec.grid, (4, 2));
+        assert_eq!(spec.frame_size(), (256, 256));
+        assert_eq!(spec.frame_count(), 8);
+        assert_eq!(spec.frame_origin, FrameOrigin::TopLeft);
+        assert_eq!(spec.validate_contract(), Ok(()));
+
+        let bytes = asset.bytes_for_validation();
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(bytes.get(24), Some(&8), "specialist atlas must stay 8-bit");
+        assert_eq!(
+            bytes.get(25),
+            Some(&6),
+            "specialist atlas must retain RGBA alpha"
+        );
+        assert!(
+            bytes.len() > 512,
+            "specialist atlas should contain authored pixels"
         );
     }
 

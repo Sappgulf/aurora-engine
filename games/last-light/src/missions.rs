@@ -101,6 +101,11 @@ pub enum DialogueTrigger {
     /// finished. The renderer consumes this through the normal radio queue;
     /// the trigger stays data-only so headless campaign traces can replay it.
     ResourceObjectiveCompleted,
+    /// Fires once the mission's specialist or Engineer repair contract has
+    /// finished. Keeping this separate from `ResourceObjectiveCompleted`
+    /// lets authored chapters hand off from a role job to the next route
+    /// beat without coupling dialogue to a renderer-specific callback.
+    SpecialistObjectiveCompleted,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1532,6 +1537,16 @@ pub fn vesper_gate() -> MissionDef {
                 "VESPER GATE",
             ),
             MissionLandmark::new(
+                MissionLandmarkKind::Resource,
+                Vec2::new(-90.0, 180.0),
+                "FALSE EXIT CACHE",
+            ),
+            MissionLandmark::new(
+                MissionLandmarkKind::Reactor,
+                Vec2::new(1_080.0, 0.0),
+                "AUXILIARY REACTOR",
+            ),
+            MissionLandmark::new(
                 MissionLandmarkKind::EnemyThreat,
                 Vec2::new(-600.0, -160.0),
                 "FLANK WARNING ROUTE",
@@ -1606,6 +1621,11 @@ pub fn hollow_orbit() -> MissionDef {
                 speaker: "MARA VEY",
                 text: "CLEAR THE MINE LANE, THEN SEND SENA TO THE CACHE. THREE JOBS, ONE RING.",
                 trigger: DialogueTrigger::Time(26.0),
+            },
+            RadioLine {
+                speaker: "IVO ROOK",
+                text: "COOLANT CORE IS HOLDING. THE EASTERN BREAK IS OPEN—KEEP MARA ON THE RIDGE WHILE I CROSS.",
+                trigger: DialogueTrigger::SpecialistObjectiveCompleted,
             },
             RadioLine {
                 speaker: "SENA QUILL",
@@ -1746,8 +1766,18 @@ pub fn hollow_orbit() -> MissionDef {
         landmarks: vec![
             MissionLandmark::new(
                 MissionLandmarkKind::Reactor,
-                Vec2::new(1_100.0, 20.0),
+                Vec2::new(620.0, -420.0),
                 "COOLANT CORE",
+            ),
+            MissionLandmark::new(
+                MissionLandmarkKind::Resource,
+                Vec2::new(-60.0, 160.0),
+                "DEAD-ORBIT CACHE",
+            ),
+            MissionLandmark::new(
+                MissionLandmarkKind::EnemyThreat,
+                Vec2::new(620.0, -180.0),
+                "MINED COOLANT LANE",
             ),
             MissionLandmark::new(
                 MissionLandmarkKind::Objective,
@@ -2298,6 +2328,24 @@ mod tests {
     }
 
     #[test]
+    fn vesper_landmarks_surface_the_cache_and_reactor_route() {
+        let mission = vesper_gate();
+        let cache = mission.salvage_nodes[1];
+        let reactor = mission.reactor_position.expect("vesper reactor");
+
+        assert!(mission.landmarks.iter().any(|landmark| {
+            landmark.kind == MissionLandmarkKind::Resource
+                && landmark.position == cache
+                && landmark.label == "FALSE EXIT CACHE"
+        }));
+        assert!(mission.landmarks.iter().any(|landmark| {
+            landmark.kind == MissionLandmarkKind::Reactor
+                && landmark.position == reactor
+                && landmark.label == "AUXILIARY REACTOR"
+        }));
+    }
+
+    #[test]
     fn hollow_orbit_is_the_next_unlock_after_vesper_gate() {
         let previous = vesper_gate();
         let mission = hollow_orbit();
@@ -2379,6 +2427,43 @@ mod tests {
             line.trigger,
             DialogueTrigger::UnitDestroyed(UnitKind::BellMine)
         )));
+    }
+
+    #[test]
+    fn hollow_orbit_authors_engineer_handoff_and_route_landmarks() {
+        let mission = hollow_orbit();
+        let repair_index = mission
+            .radio_lines
+            .iter()
+            .position(|line| matches!(line.trigger, DialogueTrigger::SpecialistObjectiveCompleted))
+            .expect("hollow orbit needs an Engineer completion handoff");
+        let resource_index = mission
+            .radio_lines
+            .iter()
+            .position(|line| matches!(line.trigger, DialogueTrigger::ResourceObjectiveCompleted))
+            .expect("hollow orbit needs a cache completion handoff");
+        assert!(repair_index < resource_index);
+        assert_eq!(mission.radio_lines[repair_index].speaker, "IVO ROOK");
+        assert!(mission.radio_lines[repair_index]
+            .text
+            .contains("EASTERN BREAK"));
+
+        let reactor = mission.reactor_position.expect("hollow orbit reactor");
+        let cache = mission.salvage_nodes[1];
+        assert!(mission.landmarks.iter().any(|landmark| {
+            landmark.kind == MissionLandmarkKind::Reactor
+                && landmark.position == reactor
+                && landmark.label == "COOLANT CORE"
+        }));
+        assert!(mission.landmarks.iter().any(|landmark| {
+            landmark.kind == MissionLandmarkKind::Resource
+                && landmark.position == cache
+                && landmark.label == "DEAD-ORBIT CACHE"
+        }));
+        assert!(mission.landmarks.iter().any(|landmark| {
+            landmark.kind == MissionLandmarkKind::EnemyThreat
+                && landmark.label == "MINED COOLANT LANE"
+        }));
     }
 
     #[test]

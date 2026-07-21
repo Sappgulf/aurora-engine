@@ -88,6 +88,18 @@ impl SpecialAbility {
             Self::ScanPulse => "SENA QUILL",
         }
     }
+
+    /// Full recharge duration for the signature action. Keeping the authored
+    /// value beside the simulation's activation code gives presentation a
+    /// truthful denominator for cooldown rails without reaching into private
+    /// timer constants.
+    pub const fn cooldown_seconds(self) -> f32 {
+        match self {
+            Self::CommandSurge => 18.0,
+            Self::EmergencyRepair => 20.0,
+            Self::ScanPulse => 16.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
