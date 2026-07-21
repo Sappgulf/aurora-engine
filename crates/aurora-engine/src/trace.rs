@@ -13,7 +13,7 @@ pub const TRACE_FORMAT_VERSION: u32 = 1;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StateHash(pub u64);
 
@@ -182,6 +182,28 @@ impl AuroraTrace {
     }
 }
 
+/// Optional tick-level checkpoint for deterministic replay validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceCheckpoint {
+    /// Tick index after fixed-step simulation has advanced this many times.
+    pub tick: u64,
+    /// Expected stable state hash at this tick.
+    pub expected_hash: StateHash,
+    /// Optional marker shown in checkpoint mismatch diagnostics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl TraceCheckpoint {
+    pub fn new(tick: u64, expected_hash: StateHash, label: Option<&'static str>) -> Self {
+        Self {
+            tick,
+            expected_hash,
+            label: label.map(std::string::ToString::to_string),
+        }
+    }
+}
+
 /// A renderer-free simulation capable of consuming game-owned semantic
 /// commands. Implementations should construct a fresh instance with the
 /// trace's seed before each run.
@@ -198,14 +220,47 @@ pub struct TraceRunReport {
     pub ticks_executed: u64,
     pub commands_applied: usize,
     pub final_state_hash: StateHash,
+    pub checkpoints_checked: usize,
 }
 
 pub fn run_trace<S: DeterministicSimulation>(
     simulation: &mut S,
     trace: &AuroraTrace,
 ) -> Result<TraceRunReport, TraceError> {
+    run_trace_with_checkpoints(simulation, trace, &[])
+}
+
+/// Run a deterministic simulation while optionally checking fixed tick
+/// checkpoints. A checkpoint is validated **after** the fixed-step simulation
+/// for the requested tick has completed.
+pub fn run_trace_with_checkpoints<S: DeterministicSimulation>(
+    simulation: &mut S,
+    trace: &AuroraTrace,
+    checkpoints: &[TraceCheckpoint],
+) -> Result<TraceRunReport, TraceError> {
     trace.validate()?;
+    let mut checkpoints = checkpoints.to_vec();
+    checkpoints.sort_by_key(|checkpoint| checkpoint.tick);
+    if checkpoints
+        .iter()
+        .any(|checkpoint| checkpoint.tick > trace.end_tick)
+    {
+        return Err(TraceError::InvalidTrace(
+            "trace checkpoint tick exceeds end tick".to_owned(),
+        ));
+    }
+
+    for window in checkpoints.windows(2) {
+        if window[0].tick > window[1].tick {
+            return Err(TraceError::InvalidTrace(
+                "trace checkpoints must be sorted by tick".to_owned(),
+            ));
+        }
+    }
+
     let mut cursor = 0;
+    let mut next_checkpoint = 0;
+    let mut checkpoints_checked = 0;
     for tick in 0..trace.end_tick {
         while cursor < trace.commands.len() && trace.commands[cursor].tick == tick {
             let command = &trace.commands[cursor];
@@ -219,6 +274,24 @@ pub fn run_trace<S: DeterministicSimulation>(
             cursor += 1;
         }
         simulation.fixed_step();
+
+        let current_tick = tick + 1;
+        while next_checkpoint < checkpoints.len()
+            && checkpoints[next_checkpoint].tick == current_tick
+        {
+            let checkpoint = &checkpoints[next_checkpoint];
+            let hash = simulation.state_hash();
+            if hash != checkpoint.expected_hash {
+                return Err(TraceError::CheckpointMismatch {
+                    tick: current_tick,
+                    expected: checkpoint.expected_hash.clone(),
+                    actual: hash,
+                    label: checkpoint.label.clone(),
+                });
+            }
+            next_checkpoint += 1;
+            checkpoints_checked += 1;
+        }
     }
     Ok(TraceRunReport {
         scenario_id: trace.scenario_id.clone(),
@@ -226,6 +299,7 @@ pub fn run_trace<S: DeterministicSimulation>(
         ticks_executed: trace.end_tick,
         commands_applied: cursor,
         final_state_hash: simulation.state_hash(),
+        checkpoints_checked,
     })
 }
 
@@ -236,6 +310,12 @@ pub enum TraceError {
         tick: u64,
         action: String,
         message: String,
+    },
+    CheckpointMismatch {
+        tick: u64,
+        expected: StateHash,
+        actual: StateHash,
+        label: Option<String>,
     },
     Encode(serde_json::Error),
     Decode(serde_json::Error),
@@ -253,6 +333,24 @@ impl fmt::Display for TraceError {
                 formatter,
                 "command '{action}' failed at tick {tick}: {message}"
             ),
+            Self::CheckpointMismatch {
+                tick,
+                expected,
+                actual,
+                label,
+            } => {
+                if let Some(label) = label {
+                    write!(
+                        formatter,
+                        "trace checkpoint '{label}' failed at tick {tick}: expected {expected}, got {actual}"
+                    )
+                } else {
+                    write!(
+                        formatter,
+                        "trace checkpoint failed at tick {tick}: expected {expected}, got {actual}"
+                    )
+                }
+            }
             Self::Encode(error) => write!(formatter, "could not encode trace data: {error}"),
             Self::Decode(error) => write!(formatter, "could not decode trace data: {error}"),
         }
@@ -328,6 +426,47 @@ mod tests {
         trace.commands.clear();
         trace.push(SemanticCommand::new(4, "counter.add"));
         assert!(matches!(trace.validate(), Err(TraceError::InvalidTrace(_))));
+    }
+
+    #[test]
+    fn checkpoints_verify_replay_state_at_named_ticks() {
+        let trace = AuroraTrace::new("engine.counter", 7, 60, 4);
+        let mut expected_sim = CounterSimulation { tick: 0, value: 0 };
+        expected_sim.fixed_step();
+        expected_sim.fixed_step();
+        let expected_hash = expected_sim.state_hash();
+
+        let report = run_trace_with_checkpoints(
+            &mut CounterSimulation { tick: 0, value: 0 },
+            &trace,
+            &[TraceCheckpoint::new(
+                2,
+                expected_hash,
+                Some("after two fixed ticks"),
+            )],
+        )
+        .expect("checkpoint should match");
+
+        assert_eq!(report.ticks_executed, 4);
+        assert_eq!(report.checkpoints_checked, 1);
+    }
+
+    #[test]
+    fn checkpoint_mismatch_is_a_diagnostic_error() {
+        let trace = AuroraTrace::new("engine.counter", 7, 60, 4);
+        let bad_checkpoint = TraceCheckpoint::new(1, StateHash(0), None);
+
+        let mismatch = run_trace_with_checkpoints(
+            &mut CounterSimulation { tick: 0, value: 0 },
+            &trace,
+            &[bad_checkpoint],
+        )
+        .expect_err("checkpoint should fail");
+
+        assert!(matches!(
+            mismatch,
+            TraceError::CheckpointMismatch { tick: 1, .. }
+        ));
     }
 
     #[test]

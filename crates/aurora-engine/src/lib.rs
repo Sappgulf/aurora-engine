@@ -73,8 +73,9 @@ pub use texture::Texture;
 pub use tilemap::{TileLayer, TileMap, TileTrigger};
 pub use time::Time;
 pub use trace::{
-    hash_serializable, run_trace, AuroraTrace, DeterministicSimulation, SemanticCommand,
-    StableStateHasher, StateHash, TraceError, TraceRunReport, TRACE_FORMAT_VERSION,
+    hash_serializable, run_trace, run_trace_with_checkpoints, AuroraTrace, DeterministicSimulation,
+    SemanticCommand, StableStateHasher, StateHash, TraceCheckpoint, TraceError, TraceRunReport,
+    TRACE_FORMAT_VERSION,
 };
 pub use ui::{BitmapText, GameFlow, GlyphCell, MenuCommand, MenuInput, MenuScreen, MenuState};
 

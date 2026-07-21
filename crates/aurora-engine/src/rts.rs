@@ -4,7 +4,7 @@
 //! objects: selection, orders, formation destinations, navigation, and fog can
 //! therefore run deterministically in fixed update and be saved or tested.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use glam::{IVec2, Vec2};
 
@@ -712,6 +712,99 @@ pub enum BuildQueueError {
     Full,
 }
 
+#[derive(Debug, Clone)]
+struct SpatialUnitIndex {
+    cell_size: f32,
+    buckets: HashMap<(i32, i32), Vec<UnitId>>,
+    alive_units: HashSet<UnitId>,
+}
+
+impl SpatialUnitIndex {
+    fn new(cell_size: f32) -> Self {
+        Self {
+            cell_size: cell_size.max(1.0),
+            buckets: HashMap::new(),
+            alive_units: HashSet::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.buckets.clear();
+        self.alive_units.clear();
+    }
+
+    fn build(&mut self, units: &[RtsUnit]) {
+        self.buckets.clear();
+        self.alive_units.clear();
+
+        for unit in units {
+            if !unit.alive() {
+                continue;
+            }
+            let cell = self.cell(unit.position);
+            self.buckets.entry(cell).or_default().push(unit.id);
+            self.alive_units.insert(unit.id);
+        }
+
+        for bucket in self.buckets.values_mut() {
+            bucket.sort_by_key(|id| id.0);
+        }
+    }
+
+    fn cell(&self, position: Vec2) -> (i32, i32) {
+        let scaled = position / self.cell_size;
+        (scaled.x.floor() as i32, scaled.y.floor() as i32)
+    }
+
+    fn query_aabb_ids(&self, bounds: Aabb) -> Vec<UnitId> {
+        let min_cell = self.cell(bounds.min);
+        let max_cell = self.cell(bounds.max);
+
+        if min_cell > max_cell {
+            return Vec::new();
+        }
+
+        let mut ids = Vec::new();
+        for y in min_cell.1..=max_cell.1 {
+            for x in min_cell.0..=max_cell.0 {
+                if let Some(bucket) = self.buckets.get(&(x, y)) {
+                    ids.extend_from_slice(bucket);
+                }
+            }
+        }
+        ids
+    }
+
+    fn query_cell_ids(&self, position: Vec2, radius: f32) -> Vec<UnitId> {
+        let radius = radius.max(0.0);
+        if radius.is_infinite() {
+            let mut all: Vec<UnitId> = self.alive_units.iter().copied().collect();
+            all.sort_by_key(|id| id.0);
+            return all;
+        }
+
+        let min = position - Vec2::splat(radius);
+        let max = position + Vec2::splat(radius);
+        let min_cell = self.cell(min);
+        let max_cell = self.cell(max);
+
+        if min_cell > max_cell {
+            return Vec::new();
+        }
+
+        let mut ids = Vec::new();
+        for y in min_cell.1..=max_cell.1 {
+            for x in min_cell.0..=max_cell.0 {
+                if let Some(bucket) = self.buckets.get(&(x, y)) {
+                    ids.extend_from_slice(bucket);
+                }
+            }
+        }
+        ids
+    }
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BuildItem {
     pub build: BuildId,
@@ -1001,6 +1094,8 @@ pub struct RtsWorld {
     selection: Selection,
     control_groups: [Vec<UnitId>; 10],
     next_id: u32,
+    spatial_index: SpatialUnitIndex,
+    spatial_dirty: bool,
 }
 
 impl Default for RtsWorld {
@@ -1010,15 +1105,22 @@ impl Default for RtsWorld {
             selection: Selection::default(),
             control_groups: std::array::from_fn(|_| Vec::new()),
             next_id: 0,
+            spatial_index: SpatialUnitIndex::new(Self::UNIT_SPATIAL_CELL_SIZE),
+            spatial_dirty: true,
         }
     }
 }
 
 impl RtsWorld {
+    const UNIT_SPATIAL_CELL_SIZE: f32 = 160.0;
+    const POINT_SELECT_SEARCH_RADIUS: f32 = 320.0;
+    const BOUNDS_SELECT_PADDING: f32 = 192.0;
+
     pub fn spawn(&mut self, faction: FactionId, position: Vec2) -> UnitId {
         let id = UnitId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
         self.units.push(RtsUnit::new(id, faction, position));
+        self.spatial_dirty = true;
         id
     }
 
@@ -1027,6 +1129,7 @@ impl RtsWorld {
     }
 
     pub fn units_mut(&mut self) -> &mut [RtsUnit] {
+        self.spatial_dirty = true;
         &mut self.units
     }
 
@@ -1035,7 +1138,18 @@ impl RtsWorld {
     }
 
     pub fn unit_mut(&mut self, id: UnitId) -> Option<&mut RtsUnit> {
-        self.units.iter_mut().find(|unit| unit.id == id)
+        if let Some(unit) = self.units.iter_mut().find(|unit| unit.id == id) {
+            self.spatial_dirty = true;
+            return Some(unit);
+        }
+        None
+    }
+
+    fn rebuild_spatial_index_if_dirty(&mut self) {
+        if self.spatial_dirty {
+            self.spatial_index.build(&self.units);
+            self.spatial_dirty = false;
+        }
     }
 
     /// Finds the most critically damaged living ally in range.
@@ -1050,22 +1164,32 @@ impl RtsWorld {
     ) -> Option<UnitId> {
         let origin_position = self.unit(origin)?.position;
         let range = range.max(0.0);
-        self.units
-            .iter()
-            .filter(|unit| {
-                unit.id != origin
+        let mut world = self;
+        world.rebuild_spatial_index_if_dirty();
+        world
+            .spatial_index
+            .query_cell_ids(origin_position, range)
+            .into_iter()
+            .filter_map(|id| {
+                let unit = world.unit(id)?;
+                ((unit.id != origin)
                     && unit.faction == faction
                     && unit.alive()
                     && unit.max_health > 0.0
                     && unit.health < unit.max_health
-                    && unit.position.distance(origin_position) <= range
+                    && unit.position.distance(origin_position) <= range)
+                .then_some(unit.id)
             })
             .min_by(|left, right| {
-                (left.health / left.max_health)
-                    .total_cmp(&(right.health / right.max_health))
-                    .then_with(|| left.id.0.cmp(&right.id.0))
-            })
-            .map(|unit| unit.id)
+                let left = world.unit(*left)?;
+                let right = world.unit(*right)?;
+                Some(
+                    (left.health / left.max_health)
+                        .total_cmp(&(right.health / right.max_health))
+                        .then_with(|| left.id.0.cmp(&right.id.0)),
+                )
+            })?
+            .into()
     }
 
     pub fn selection(&self) -> &Selection {

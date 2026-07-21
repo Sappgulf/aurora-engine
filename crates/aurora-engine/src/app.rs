@@ -42,6 +42,10 @@ pub trait Game: 'static {
     /// Called every frame before render (variable delta).
     fn on_update(&mut self, ctx: &mut FrameCtx<'_>);
 
+    /// Optional post-update hook for deterministic render prep after all
+    /// simulation work has completed for this frame.
+    fn on_post_update(&mut self, _ctx: &mut FrameCtx<'_>) {}
+
     /// Optional: handle raw window events after engine input is updated.
     /// Return `true` if the event was consumed.
     fn on_event(&mut self, _event: &WindowEvent) -> bool {
@@ -358,9 +362,9 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
 
                 // Fixed steps then variable frame update. A bounded catch-up
                 // policy preserves responsive input/rendering after a hitch.
-                const MAX_FIXED_STEPS_PER_FRAME: usize = 5;
                 let mut fixed_steps = 0;
-                while fixed_steps < MAX_FIXED_STEPS_PER_FRAME {
+                let max_fixed_steps = self.time.max_fixed_steps_per_frame();
+                while fixed_steps < max_fixed_steps {
                     if !self.time.step_fixed() {
                         break;
                     }
@@ -373,7 +377,7 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                     game.on_fixed_update(&mut ctx);
                     fixed_steps += 1;
                 }
-                if fixed_steps == MAX_FIXED_STEPS_PER_FRAME {
+                if fixed_steps == max_fixed_steps {
                     self.time.discard_fixed_backlog();
                 }
 
@@ -385,6 +389,7 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                         audio: &mut self.audio,
                     };
                     game.on_update(&mut ctx);
+                    game.on_post_update(&mut ctx);
                 }
 
                 match renderer.render(self.time.elapsed) {

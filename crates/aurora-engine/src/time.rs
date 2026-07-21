@@ -18,6 +18,16 @@ pub struct Time {
     accumulator: f32,
     /// Interpolation alpha after fixed steps: `accumulator / fixed_dt`.
     pub alpha: f32,
+    /// Simulation speed multiplier for `delta` and fixed-step accumulation.
+    /// `1.0` is normal speed, `0.0` is paused.
+    simulation_speed: f32,
+    /// Maximum wall-clock delta sampled each frame before scaling.
+    max_delta: f32,
+    /// Maximum fixed-step backlog accumulated each frame before older time is
+    /// dropped. This keeps long hitches from producing unbounded catch-up.
+    max_accumulator: f32,
+    /// Maximum number of fixed steps executed per rendered frame.
+    max_fixed_steps_per_frame: usize,
 }
 
 impl Default for Time {
@@ -38,17 +48,26 @@ impl Time {
             fixed_dt: 1.0 / 60.0,
             accumulator: 0.0,
             alpha: 0.0,
+            simulation_speed: 1.0,
+            max_delta: 0.1,
+            max_accumulator: 0.25,
+            max_fixed_steps_per_frame: 5,
         }
     }
 
     /// Advance time; call once per frame.
     pub fn tick(&mut self) {
         let now = InstantCompat::now();
-        self.elapsed = now.duration_since(self.start).as_secs_f32();
-        self.delta = now.duration_since(self.last).as_secs_f32().min(0.1);
+        let raw_delta = now
+            .duration_since(self.last)
+            .as_secs_f32()
+            .min(self.max_delta);
         self.last = now;
+        let speed = self.simulation_speed.max(0.0);
+        self.delta = if speed <= 0.0 { 0.0 } else { raw_delta * speed };
+        self.elapsed += self.delta;
         self.frame = self.frame.saturating_add(1);
-        self.accumulator = (self.accumulator + self.delta).min(0.25);
+        self.accumulator = (self.accumulator + self.delta).min(self.max_accumulator);
     }
 
     /// Consume one fixed step if enough time has accumulated.
@@ -76,6 +95,65 @@ impl Time {
 
         self.accumulator %= self.fixed_dt;
         self.alpha = self.accumulator / self.fixed_dt;
+    }
+
+    /// Pause simulation time progression while keeping rendering running.
+    pub fn pause(&mut self) {
+        self.simulation_speed = 0.0;
+    }
+
+    /// Resume simulation at normal speed.
+    pub fn resume(&mut self) {
+        self.set_simulation_speed(1.0);
+    }
+
+    /// Set simulation speed multiplier applied to `delta`.
+    /// Values below `0.0` are clamped to `0.0`.
+    pub fn set_simulation_speed(&mut self, speed: f32) {
+        if speed.is_finite() {
+            self.simulation_speed = speed.max(0.0);
+        } else {
+            self.simulation_speed = 1.0;
+        }
+    }
+
+    /// Current simulation speed multiplier.
+    pub fn simulation_speed(&self) -> f32 {
+        self.simulation_speed
+    }
+
+    /// Set the fixed-step catch-up limit for one rendered frame.
+    pub fn set_max_fixed_steps_per_frame(&mut self, steps: usize) {
+        self.max_fixed_steps_per_frame = steps.max(1);
+    }
+
+    /// Maximum fixed steps executed during a single rendered frame.
+    pub fn max_fixed_steps_per_frame(&self) -> usize {
+        self.max_fixed_steps_per_frame
+    }
+
+    /// Set how much wall-clock delta is sampled each frame.
+    pub fn set_max_delta(&mut self, max_delta: f32) {
+        if max_delta.is_finite() && max_delta > 0.0 {
+            self.max_delta = max_delta;
+        }
+    }
+
+    /// Clamped wall-clock delta sample window used for fixed-step catch-up.
+    pub fn max_delta(&self) -> f32 {
+        self.max_delta
+    }
+
+    /// Set the maximum fixed-step backlog allowed to accumulate.
+    pub fn set_max_accumulator(&mut self, max_accumulator: f32) {
+        if max_accumulator.is_finite() && max_accumulator > 0.0 {
+            self.max_accumulator = max_accumulator;
+        }
+    }
+
+    /// Maximum fixed-step catch-up budget in seconds.
+    pub fn max_accumulator(&self) -> f32 {
+        self.max_accumulator
     }
 }
 
