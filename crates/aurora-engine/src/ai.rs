@@ -457,4 +457,23 @@ mod tests {
         );
         assert!(matches!(clear_order, UnitOrder::Attack(_)));
     }
+
+    #[test]
+    fn cached_path_recomputed_after_nav_update() {
+        let mut grid = NavGrid::new(7, 3, Vec2::ZERO, 10.0);
+        let mut path_cache = std::collections::HashMap::new();
+        let from = Vec2::new(5.0, 15.0);
+        let to = Vec2::new(65.0, 15.0);
+
+        grid.set_blocked(IVec2::new(3, 1), true);
+        let first = approach_order(Some(&grid), from, to, UnitId(1), &mut path_cache);
+        assert!(matches!(first, UnitOrder::Move(_)));
+
+        // Tighten the choke point to a solid wall and verify cached path
+        // entries from the previous nav version are not reused.
+        grid.set_blocked(IVec2::new(3, 0), true);
+        grid.set_blocked(IVec2::new(3, 2), true);
+        let second = approach_order(Some(&grid), from, to, UnitId(1), &mut path_cache);
+        assert!(matches!(second, UnitOrder::Attack(_)));
+    }
 }
