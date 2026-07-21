@@ -4,6 +4,7 @@
 //! objects: selection, orders, formation destinations, navigation, and fog can
 //! therefore run deterministically in fixed update and be saved or tested.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use glam::{IVec2, Vec2};
@@ -1094,8 +1095,8 @@ pub struct RtsWorld {
     selection: Selection,
     control_groups: [Vec<UnitId>; 10],
     next_id: u32,
-    spatial_index: SpatialUnitIndex,
-    spatial_dirty: bool,
+    spatial_index: RefCell<SpatialUnitIndex>,
+    spatial_dirty: Cell<bool>,
 }
 
 impl Default for RtsWorld {
@@ -1105,8 +1106,8 @@ impl Default for RtsWorld {
             selection: Selection::default(),
             control_groups: std::array::from_fn(|_| Vec::new()),
             next_id: 0,
-            spatial_index: SpatialUnitIndex::new(Self::UNIT_SPATIAL_CELL_SIZE),
-            spatial_dirty: true,
+            spatial_index: RefCell::new(SpatialUnitIndex::new(Self::UNIT_SPATIAL_CELL_SIZE)),
+            spatial_dirty: Cell::new(true),
         }
     }
 }
@@ -1120,7 +1121,7 @@ impl RtsWorld {
         let id = UnitId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
         self.units.push(RtsUnit::new(id, faction, position));
-        self.spatial_dirty = true;
+        self.spatial_dirty.set(true);
         id
     }
 
@@ -1129,7 +1130,7 @@ impl RtsWorld {
     }
 
     pub fn units_mut(&mut self) -> &mut [RtsUnit] {
-        self.spatial_dirty = true;
+        self.spatial_dirty.set(true);
         &mut self.units
     }
 
@@ -1139,17 +1140,19 @@ impl RtsWorld {
 
     pub fn unit_mut(&mut self, id: UnitId) -> Option<&mut RtsUnit> {
         if let Some(unit) = self.units.iter_mut().find(|unit| unit.id == id) {
-            self.spatial_dirty = true;
+            self.spatial_dirty.set(true);
             return Some(unit);
         }
         None
     }
 
-    fn rebuild_spatial_index_if_dirty(&mut self) {
-        if self.spatial_dirty {
-            self.spatial_index.build(&self.units);
-            self.spatial_dirty = false;
+    fn rebuild_spatial_index_if_dirty(&self) {
+        if !self.spatial_dirty.get() {
+            return;
         }
+        let mut index = self.spatial_index.borrow_mut();
+        index.build(&self.units);
+        self.spatial_dirty.set(false);
     }
 
     /// Finds the most critically damaged living ally in range.
@@ -1164,14 +1167,16 @@ impl RtsWorld {
     ) -> Option<UnitId> {
         let origin_position = self.unit(origin)?.position;
         let range = range.max(0.0);
-        let mut world = self;
-        world.rebuild_spatial_index_if_dirty();
-        world
-            .spatial_index
-            .query_cell_ids(origin_position, range)
+        self.rebuild_spatial_index_if_dirty();
+        let candidates = {
+            let index = self.spatial_index.borrow();
+            index.query_cell_ids(origin_position, range)
+        };
+
+        candidates
             .into_iter()
             .filter_map(|id| {
-                let unit = world.unit(id)?;
+                let unit = self.unit(id)?;
                 ((unit.id != origin)
                     && unit.faction == faction
                     && unit.alive()
@@ -1181,15 +1186,12 @@ impl RtsWorld {
                 .then_some(unit.id)
             })
             .min_by(|left, right| {
-                let left = world.unit(*left)?;
-                let right = world.unit(*right)?;
-                Some(
-                    (left.health / left.max_health)
-                        .total_cmp(&(right.health / right.max_health))
-                        .then_with(|| left.id.0.cmp(&right.id.0)),
-                )
-            })?
-            .into()
+                let left_unit = self.unit(*left).unwrap();
+                let right_unit = self.unit(*right).unwrap();
+                (left_unit.health / left_unit.max_health)
+                    .total_cmp(&(right_unit.health / right_unit.max_health))
+                    .then_with(|| left_unit.id.0.cmp(&right_unit.id.0))
+            })
     }
 
     pub fn selection(&self) -> &Selection {
@@ -1238,13 +1240,18 @@ impl RtsWorld {
         if !additive {
             self.selection.clear();
         }
-        let selected = self
-            .units
-            .iter()
+        self.rebuild_spatial_index_if_dirty();
+        let candidates = {
+            let index = self.spatial_index.borrow();
+            index.query_cell_ids(point, Self::POINT_SELECT_SEARCH_RADIUS)
+        };
+        let selected = candidates
+            .into_iter()
+            .filter_map(|id| self.unit(id))
             .filter(|unit| unit.alive() && unit.faction == faction)
             .filter_map(|unit| {
                 let distance = unit.position.distance(point);
-                (distance <= unit.radius * 1.35).then_some((unit.id, distance))
+                (distance <= unit.radius.max(0.0) * 1.35).then_some((unit.id, distance))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(id, _)| id);
@@ -1281,9 +1288,18 @@ impl RtsWorld {
         if !additive {
             self.selection.clear();
         }
-        let ids: Vec<UnitId> = self
-            .units
-            .iter()
+        self.rebuild_spatial_index_if_dirty();
+        let padded = Aabb::new(
+            bounds.min - Vec2::splat(Self::BOUNDS_SELECT_PADDING),
+            bounds.max + Vec2::splat(Self::BOUNDS_SELECT_PADDING),
+        );
+        let candidates = {
+            let index = self.spatial_index.borrow();
+            index.query_aabb_ids(padded)
+        };
+        let ids: Vec<UnitId> = candidates
+            .into_iter()
+            .filter_map(|id| self.unit(id))
             .filter(|unit| {
                 unit.alive()
                     && unit.faction == faction
@@ -1502,7 +1518,9 @@ impl RtsWorld {
             .iter()
             .map(|unit| (unit.id, unit.position, unit.alive()))
             .collect();
+        let mut moved = false;
         for unit in &mut self.units {
+            let previous_position = unit.position;
             if !unit.alive() {
                 unit.velocity = Vec2::ZERO;
                 continue;
@@ -1581,6 +1599,12 @@ impl RtsWorld {
                 unit.velocity = offset / distance * unit.speed.max(0.0);
                 unit.position += unit.velocity * dt;
             }
+            if unit.position != previous_position {
+                moved = true;
+            }
+        }
+        if moved {
+            self.spatial_dirty.set(true);
         }
     }
 }
