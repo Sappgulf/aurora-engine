@@ -339,6 +339,12 @@ struct LastLight {
 impl LastLight {
     fn new() -> Self {
         let save_store = CampaignStore::new("last-light", "campaign");
+        // Headless tests must start from a deterministic campaign rather than
+        // inheriting whichever loadout the local playtest most recently saved.
+        // The release binary keeps loading the real versioned campaign file.
+        #[cfg(test)]
+        let save_data = SaveData::default();
+        #[cfg(not(test))]
         let save_data = save::load(&save_store).ok().flatten().unwrap_or_default();
         let starting_salvage = 150_u32.saturating_add(save_data.campaign.currency.min(100) as u32);
         let unlocked_tier = save_data.campaign.unlocked_mission;
