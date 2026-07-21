@@ -66,6 +66,7 @@ struct PathCacheKey {
 pub struct SimpleAggroAi {
     memory: HashMap<UnitId, AiUnitMemory>,
     path_cache: HashMap<PathCacheKey, Option<Vec2>>,
+    cached_nav_version: Option<u64>,
 }
 
 impl SimpleAggroAi {
@@ -90,6 +91,7 @@ impl SimpleAggroAi {
         params: &AiParams,
         nav: Option<&NavGrid>,
     ) {
+        self.sync_path_cache(nav);
         if self.path_cache.len() > Self::PATH_CACHE_MAX_ENTRIES {
             self.path_cache.clear();
         }
@@ -230,6 +232,16 @@ impl SimpleAggroAi {
             if let Some(unit) = world.unit_mut(id) {
                 unit.order = order;
             }
+        }
+    }
+}
+
+impl SimpleAggroAi {
+    fn sync_path_cache(&mut self, nav: Option<&NavGrid>) {
+        let current_nav_version = nav.map(|nav| nav.version());
+        if self.cached_nav_version != current_nav_version {
+            self.path_cache.clear();
+            self.cached_nav_version = current_nav_version;
         }
     }
 }
@@ -475,5 +487,40 @@ mod tests {
         grid.set_blocked(IVec2::new(3, 2), true);
         let second = approach_order(Some(&grid), from, to, UnitId(1), &mut path_cache);
         assert!(matches!(second, UnitOrder::Attack(_)));
+    }
+
+    #[test]
+    fn cached_path_entries_reset_when_nav_version_changes() {
+        let mut world = RtsWorld::default();
+        let attacker = world.spawn(ATTACKERS, Vec2::new(5.0, 15.0));
+        world.spawn(TARGETS, Vec2::new(65.0, 15.0));
+
+        let mut grid = NavGrid::new(7, 3, Vec2::ZERO, 10.0);
+        grid.set_blocked(IVec2::new(3, 1), true);
+
+        let mut ai = SimpleAggroAi::new();
+        ai.think(
+            &mut world,
+            ATTACKERS,
+            TARGETS,
+            0.0,
+            &AiParams::default(),
+            Some(&grid),
+        );
+        assert_eq!(ai.path_cache.len(), 1);
+        assert!(matches!(world.unit(attacker).unwrap().order, UnitOrder::Move(_)));
+
+        grid.set_blocked(IVec2::new(3, 0), true);
+        grid.set_blocked(IVec2::new(3, 2), true);
+        ai.think(
+            &mut world,
+            ATTACKERS,
+            TARGETS,
+            3.1,
+            &AiParams::default(),
+            Some(&grid),
+        );
+        assert_eq!(ai.path_cache.len(), 1);
+        assert!(matches!(world.unit(attacker).unwrap().order, UnitOrder::Attack(_)));
     }
 }
