@@ -66,10 +66,14 @@ const HUD_SCALE_MIN: f32 = 0.5;
 const HUD_SCALE_MAX: f32 = 0.82;
 /// At dense zoom levels the HUD should prioritize command clarity over
 /// always-showing telemetry, so command and info overlays compress.
-const HUD_DENSE_SCALE: f32 = 0.68;
-const COMMAND_CARD_PANEL_WIDTH: f32 = 310.0;
-const COMMAND_CARD_PANEL_HEADER: f32 = 104.0;
-const COMMAND_CARD_ROW_SPACING: f32 = 30.0;
+const HUD_DENSE_ZOOM: f32 = 1.45;
+// The command card is deliberately smaller than the selection card.  It is a
+// contextual mini-menu, not a second dashboard: the playfield should remain
+// the dominant surface while a player reads the next three verbs.
+const COMMAND_CARD_PANEL_WIDTH: f32 = 292.0;
+const COMMAND_CARD_PANEL_HEADER: f32 = 78.0;
+const COMMAND_CARD_ROW_SPACING: f32 = 26.0;
+const COMMAND_CARD_SCALE_FACTOR: f32 = 0.76;
 const COMMAND_CARD_LABELS: [&str; 5] = [
     "Q  WARDEN  90",
     "E  ENGINEER  70",
@@ -989,7 +993,15 @@ impl LastLight {
     }
 
     fn hud_dense_layout(renderer: &Renderer) -> bool {
-        Self::hud_scale(renderer) >= HUD_DENSE_SCALE
+        // The camera owns the authoritative zoom direction.  Using the
+        // explicit zoom value avoids hiding the minimap at launch on native
+        // viewports whose logical world size is smaller than the reference
+        // layout.
+        Self::hud_dense_for_zoom(renderer.camera.zoom)
+    }
+
+    fn hud_dense_for_zoom(zoom: f32) -> bool {
+        zoom >= HUD_DENSE_ZOOM
     }
 
     fn should_auto_minimize_hud(renderer: &Renderer) -> bool {
@@ -1858,12 +1870,19 @@ impl LastLight {
         // One compact column keeps page transitions obvious and avoids moving
         // the anchor point when additional pages are shown.
         let row = slot % COMMAND_CARD_COMPACT_ROWS;
-        let center = card_text + Vec2::new(130.0, -38.0 - row as f32 * 30.0) * scale;
-        Aabb::from_center_size(center, Vec2::new(250.0, 26.0) * scale)
+        let center = card_text
+            + Vec2::new(
+                COMMAND_CARD_PANEL_WIDTH * 0.5,
+                -30.0 - row as f32 * COMMAND_CARD_ROW_SPACING,
+            ) * scale;
+        Aabb::from_center_size(
+            center,
+            Vec2::new(COMMAND_CARD_PANEL_WIDTH - 28.0, 22.0) * scale,
+        )
     }
 
     fn command_card_panel_bounds(renderer: &Renderer, compact: bool, visible_rows: usize) -> Aabb {
-        let scale = Self::hud_scale(renderer);
+        let scale = Self::command_card_scale(renderer);
         let rows = visible_rows.max(1) as f32;
         let card_text = Self::command_card_text_origin(renderer);
         let panel_size = Vec2::new(
@@ -1873,9 +1892,17 @@ impl LastLight {
         let card_center = card_text
             + Vec2::new(
                 COMMAND_CARD_PANEL_WIDTH * 0.5,
-                if compact { -132.0 } else { -132.5 },
+                if compact { -92.0 } else { -92.5 },
             ) * scale;
         Aabb::from_center_size(card_center, panel_size * scale)
+    }
+
+    /// Keep the action card visually subordinate to the unit/structure card.
+    /// This is calculated from the same viewport-aware HUD scale used by
+    /// hit-testing, so native and browser views cannot drift apart when the
+    /// camera zoom or window size changes.
+    fn command_card_scale(renderer: &Renderer) -> f32 {
+        (Self::hud_scale(renderer) * COMMAND_CARD_SCALE_FACTOR).clamp(0.38, 0.66)
     }
 
     fn point_over_command_card(&self, renderer: &Renderer, point: Vec2) -> bool {
@@ -2025,11 +2052,11 @@ impl LastLight {
     /// source of truth for both rendering (`on_update`) and click
     /// hit-testing (`handle_command_keys`) so they can't drift apart.
     fn command_card_text_origin(renderer: &Renderer) -> Vec2 {
-        let scale = Self::hud_scale(renderer);
+        let scale = Self::command_card_scale(renderer);
         let bottom_right = renderer
             .camera
             .world_from_viewport_fraction(Vec2::new(1.0, 0.0));
-        bottom_right + Vec2::new(-525.0, 258.0) * scale
+        bottom_right + Vec2::new(-350.0, 176.0) * scale
     }
 
     fn unit_card_origin(renderer: &Renderer) -> Vec2 {
@@ -2155,7 +2182,7 @@ impl LastLight {
                 .renderer
                 .camera
                 .screen_to_world(ctx.input.mouse_position);
-            let scale = Self::hud_scale(ctx.renderer);
+            let scale = Self::command_card_scale(ctx.renderer);
             if self.command_card_visible() {
                 let card_text = Self::command_card_text_origin(ctx.renderer);
                 let visible_rows = self.visible_command_card_rows_for_display(ctx.renderer);
@@ -6957,6 +6984,7 @@ impl Game for LastLight {
             && self.command_card_visible()
         {
             let compact_card = self.command_card_compact || self.minimal_hud || dense_hud;
+            let card_scale = Self::command_card_scale(ctx.renderer);
             let card_text = Self::command_card_text_origin(ctx.renderer);
             let visible_rows = self.visible_command_card_rows_for_display(ctx.renderer);
             let panel_size = Vec2::new(
@@ -6967,11 +6995,11 @@ impl Game for LastLight {
             let card_center = card_text
                 + Vec2::new(
                     COMMAND_CARD_PANEL_WIDTH * 0.5,
-                    if compact_card { -132.0 } else { -132.5 },
-                ) * hud_scale;
+                    if compact_card { -92.0 } else { -92.5 },
+                ) * card_scale;
             ctx.renderer.draw_sprite(
                 self.tex_ui,
-                Sprite::new(card_center, panel_size * hud_scale)
+                Sprite::new(card_center, panel_size * card_scale)
                     .with_color(Color::rgba(0.01, 0.025, 0.05, 0.88))
                     .with_z(7.5),
             );
@@ -6986,15 +7014,30 @@ impl Game for LastLight {
                         Some(kind) => self
                             .selected_unit_id()
                             .map(|id| {
+                                // Keep the header to one short identity line in
+                                // both modes.  The command-card rows already
+                                // communicate the verbs; repeating "COMMAND"
+                                // wastes the narrow right-edge budget and can
+                                // clip long specialist names on native views.
                                 format!(
-                                    "{} // {} COMMAND",
+                                    "{} // {}",
                                     self.unit_identity_label(id, kind),
                                     kind.label()
                                 )
                             })
-                            .unwrap_or_else(|| "LANTERN SQUAD COMMAND".to_owned()),
+                            .unwrap_or_else(|| {
+                                if compact_card {
+                                    "SQUAD ORDERS".to_owned()
+                                } else {
+                                    "LANTERN SQUAD COMMAND".to_owned()
+                                }
+                            }),
                         None if !self.simulation.world.selection().ids().is_empty() => {
-                            "LANTERN SQUAD COMMAND".to_owned()
+                            if compact_card {
+                                "SQUAD ORDERS".to_owned()
+                            } else {
+                                "LANTERN SQUAD COMMAND".to_owned()
+                            }
                         }
                         _ => "LANTERN FABRICATOR".to_owned(),
                     },
@@ -7005,9 +7048,9 @@ impl Game for LastLight {
                 &card_title,
                 card_text,
                 if compact_card {
-                    2.3 * hud_scale
+                    2.3 * card_scale
                 } else {
-                    2.8 * hud_scale
+                    2.8 * card_scale
                 },
                 Color::rgb(0.3, 1.4, 1.2),
                 8.0,
@@ -7017,7 +7060,7 @@ impl Game for LastLight {
                 .camera
                 .screen_to_world(ctx.input.mouse_position);
             for (slot, &index) in visible_rows.iter().enumerate() {
-                let rect = Self::command_card_row_rect(card_text, slot, hud_scale);
+                let rect = Self::command_card_row_rect(card_text, slot, card_scale);
                 let hovered = rect.contains_point(mouse_world);
                 let available = self.command_card_available(index);
                 ctx.renderer.draw_sprite(
@@ -7036,11 +7079,11 @@ impl Game for LastLight {
                 self.draw_text(
                     ctx.renderer,
                     &command_label,
-                    rect.min + Vec2::new(8.0, 8.0) * hud_scale,
+                    rect.min + Vec2::new(8.0, 7.0) * card_scale,
                     if compact_card {
-                        1.42 * hud_scale
+                        1.42 * card_scale
                     } else {
-                        1.65 * hud_scale
+                        1.65 * card_scale
                     },
                     if available {
                         Color::rgb(0.88, 0.92, 0.92)
@@ -7055,8 +7098,8 @@ impl Game for LastLight {
                     self.draw_text(
                         ctx.renderer,
                         "CMD/CTRL+1-5 ASSIGN   1-5 OR CLICK RECALL",
-                        card_text + Vec2::new(0.0, -142.0) * hud_scale,
-                        1.4 * hud_scale,
+                        card_text + Vec2::new(0.0, -116.0) * card_scale,
+                        1.4 * card_scale,
                         Color::rgba(0.55, 0.7, 0.78, 0.9),
                         8.0,
                     );
@@ -7064,8 +7107,8 @@ impl Game for LastLight {
                     self.draw_text(
                         ctx.renderer,
                         "CTRL+1-5 ASSIGN   1-5 RECALL",
-                        card_text + Vec2::new(0.0, -142.0) * hud_scale,
-                        1.35 * hud_scale,
+                        card_text + Vec2::new(0.0, -116.0) * card_scale,
+                        1.35 * card_scale,
                         Color::rgba(0.58, 0.73, 0.84, 0.86),
                         8.0,
                     );
@@ -7076,8 +7119,8 @@ impl Game for LastLight {
                 self.draw_text(
                     ctx.renderer,
                     &format!("PAGE {page} / {pages}  // ARROWS PAGINATE"),
-                    card_text + Vec2::new(0.0, -112.0) * hud_scale,
-                    1.35 * hud_scale,
+                    card_text + Vec2::new(0.0, -116.0) * card_scale,
+                    1.35 * card_scale,
                     Color::rgba(0.55, 0.78, 0.9, 0.9),
                     8.0,
                 );
@@ -9576,6 +9619,14 @@ mod tests {
             LastLight::hud_scale_for_view(Vec2::new(640.0, 360.0), 1.1),
             0.5
         );
+    }
+
+    #[test]
+    fn dense_hud_is_reserved_for_tight_zoom_not_the_opening_view() {
+        assert!(!LastLight::hud_dense_for_zoom(1.1));
+        assert!(!LastLight::hud_dense_for_zoom(HUD_DENSE_ZOOM - 0.01));
+        assert!(LastLight::hud_dense_for_zoom(HUD_DENSE_ZOOM));
+        assert!(LastLight::hud_dense_for_zoom(1.75));
     }
 
     #[test]

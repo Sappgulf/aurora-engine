@@ -678,6 +678,16 @@ pub fn voice_in_conduit_twelve() -> MissionDef {
                 text: "ARRAY IN SIGHT. NO HERO RUNS AHEAD OF THE FORMATION—WE ARRIVE TOGETHER.",
                 trigger: DialogueTrigger::Time(34.0),
             },
+            // The escort map has no mandatory economy gate, but this late,
+            // optional callout gives a clean payoff when the player chooses
+            // to run the middle cache instead of rushing the array. It is
+            // deliberately terminal so an unclaimed cache can never stall
+            // a later campaign beat in the ordered radio cursor.
+            RadioLine {
+                speaker: "IVO RENN",
+                text: "SALVAGE HOME. THE ARRAY CAN WAIT—EVERY RETURNED LOAD BUYS SENA ANOTHER SAFE STEP.",
+                trigger: DialogueTrigger::SalvageDelivered(24),
+            },
         ],
         reactor_position: None,
         fabricator_position: Vec2::new(-1_100.0, 380.0),
@@ -720,6 +730,16 @@ pub fn voice_in_conduit_twelve() -> MissionDef {
                 0,
                 0.24,
             ),
+            // A short high-ground shoulder above the lower maintenance lane
+            // gives the Warden a deliberate firing perch before the final
+            // extraction push. It is outside the vertical bulkhead, so the
+            // player can choose the exposed upper route without making the
+            // array pocket a mandatory safe zone.
+            TerrainZone::new(
+                Aabb::from_center_size(Vec2::new(520.0, 160.0), Vec2::new(220.0, 180.0)),
+                1,
+                0.12,
+            ),
             TerrainZone::new(
                 Aabb::from_center_size(extraction, Vec2::new(300.0, 260.0)),
                 0,
@@ -736,7 +756,28 @@ pub fn voice_in_conduit_twelve() -> MissionDef {
         engineer_repair_objective: None,
         terrain_control_objective: None,
         resource_objective: None,
-        landmarks: Vec::new(),
+        landmarks: vec![
+            MissionLandmark::new(
+                MissionLandmarkKind::Resource,
+                Vec2::new(80.0, 20.0),
+                "SPINE CACHE",
+            ),
+            MissionLandmark::new(
+                MissionLandmarkKind::Fabricator,
+                Vec2::new(-1_100.0, 380.0),
+                "MAINTENANCE DEPOT",
+            ),
+            MissionLandmark::new(
+                MissionLandmarkKind::EnemyThreat,
+                Vec2::new(520.0, 160.0),
+                "UPPER SPINE CONTACT",
+            ),
+            MissionLandmark::new(
+                MissionLandmarkKind::LumenConsole,
+                extraction,
+                "CONDUIT ARRAY",
+            ),
+        ],
         victory: VictoryCondition::EscortToExtraction {
             point: extraction,
             radius: 140.0,
@@ -1838,6 +1879,42 @@ mod tests {
             has_escort_line,
             "escort mission should explicitly use the escort role"
         );
+    }
+
+    #[test]
+    fn voice_authors_route_landmarks_and_a_final_optional_salvage_payoff() {
+        let mission = voice_in_conduit_twelve();
+        let extraction = match mission.victory {
+            VictoryCondition::EscortToExtraction { point, .. } => point,
+            VictoryCondition::RestoreRelaysAndDefeatBoss { .. } => {
+                panic!("voice mission should use escort victory")
+            }
+        };
+
+        assert_eq!(mission.landmarks.len(), 4);
+        assert!(mission.landmarks.iter().any(|landmark| {
+            landmark.kind == MissionLandmarkKind::Resource
+                && landmark.position == mission.salvage_nodes[1]
+        }));
+        assert!(mission.landmarks.iter().any(|landmark| {
+            landmark.kind == MissionLandmarkKind::Fabricator
+                && landmark.position == mission.fabricator_position
+        }));
+        assert!(mission.landmarks.iter().any(|landmark| {
+            landmark.kind == MissionLandmarkKind::LumenConsole && landmark.position == extraction
+        }));
+
+        let (_, perch) = TerrainZone::resolve_at(Vec2::new(520.0, 160.0), &mission.terrain_zones)
+            .expect("voice mission authors an upper-spine perch");
+        assert_eq!(perch.elevation, 1);
+        assert!(perch.cover < 0.2);
+
+        let final_line = mission.radio_lines.last().expect("voice radio lines");
+        assert!(matches!(
+            final_line.trigger,
+            DialogueTrigger::SalvageDelivered(24)
+        ));
+        assert!(final_line.text.contains("SALVAGE HOME"));
     }
 
     #[test]

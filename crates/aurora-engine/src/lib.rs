@@ -59,12 +59,13 @@ pub use renderer::Mesh3DHandle;
 pub use renderer::{GpuContext, PointLight, RenderQuality, Renderer};
 pub use renderer::{RenderStats, TextureHandle};
 pub use rts::{
-    ArmorClass, BuildId, BuildItem, BuildQueue, BuildQueueError, BuildRecipe, DamageType,
-    FactionId, FogOfWar, FogState, MinimapTransform, NavGrid, PlacementError, PlacementRules,
-    PowerGrid, PowerNode, PowerNodeId, ProductId, ProductionCancelError, ProductionCancelReceipt,
-    ProductionItem, ProductionQueue, ProductionRecipe, QueueError, ResourceBank, ResourceCost,
-    ResourceSet, RtsUnit, RtsWorld, Selection, SelectionBox, SupplyLedger, SupplyQueueError,
-    TechGraph, TechId, TerrainClass, TerrainReadout, TerrainZone, UnitId, UnitOrder,
+    ArmorClass, BuildId, BuildItem, BuildQueue, BuildQueueError, BuildRecipe, CombatEvent,
+    CombatProfile, DamageType, FactionId, FogOfWar, FogState, MinimapTransform, NavGrid,
+    PlacementError, PlacementRules, PowerGrid, PowerNode, PowerNodeId, ProductId,
+    ProductionCancelError, ProductionCancelReceipt, ProductionItem, ProductionQueue,
+    ProductionRecipe, QueueError, ResourceBank, ResourceCost, ResourceSet, RtsCombatResolver,
+    RtsUnit, RtsWorld, Selection, SelectionBox, SupplyLedger, SupplyQueueError, TechGraph, TechId,
+    TerrainClass, TerrainReadout, TerrainZone, UnitId, UnitOrder,
 };
 pub use save::{SaveEnvelope, SaveError, SaveStore, DEFAULT_SAVE_SLOT};
 pub use scene::{EntityId, Scene};

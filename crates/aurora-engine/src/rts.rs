@@ -319,6 +319,242 @@ impl DamageType {
     }
 }
 
+impl Default for DamageType {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+impl Default for ArmorClass {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
+/// Renderer-independent combat tuning for an RTS unit.
+///
+/// The profile deliberately contains both weapon and defensive values so a
+/// single [`RtsUnit`] can be handed to [`RtsCombatResolver`] without an
+/// additional parallel lookup table. `damage` is one pulse of damage, not
+/// DPS; `attack_period` controls the time between pulses. A zero or negative
+/// period is treated as a one-shot-per-update weapon by the resolver.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CombatProfile {
+    pub damage: f32,
+    pub attack_period: f32,
+    pub range: f32,
+    pub damage_type: DamageType,
+    pub armor_class: ArmorClass,
+    pub armor: f32,
+}
+
+impl CombatProfile {
+    pub const fn new(
+        damage: f32,
+        attack_period: f32,
+        range: f32,
+        damage_type: DamageType,
+        armor_class: ArmorClass,
+    ) -> Self {
+        Self {
+            damage,
+            attack_period,
+            range,
+            damage_type,
+            armor_class,
+            armor: 0.0,
+        }
+    }
+
+    /// Returns a copy with a flat damage-reduction value in the 0..1 range.
+    pub const fn with_armor(mut self, armor: f32) -> Self {
+        self.armor = armor;
+        self
+    }
+
+    fn normalized(self) -> Self {
+        Self {
+            damage: if self.damage.is_finite() {
+                self.damage.max(0.0)
+            } else {
+                0.0
+            },
+            attack_period: if self.attack_period.is_finite() {
+                self.attack_period.max(0.0)
+            } else {
+                0.0
+            },
+            range: if self.range.is_finite() {
+                self.range.max(0.0)
+            } else {
+                0.0
+            },
+            damage_type: self.damage_type,
+            armor_class: self.armor_class,
+            armor: if self.armor.is_finite() {
+                self.armor.clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+        }
+    }
+}
+
+impl Default for CombatProfile {
+    fn default() -> Self {
+        Self::new(0.0, 1.0, 0.0, DamageType::Normal, ArmorClass::Medium)
+    }
+}
+
+/// One resolved combat pulse emitted by [`RtsCombatResolver::update`].
+///
+/// Events are returned in stable attacker-ID order, which lets a game drive
+/// hit reactions, audio, floating damage numbers, and replay traces without
+/// reaching into the resolver's internal cooldown state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CombatEvent {
+    pub attacker: UnitId,
+    pub target: UnitId,
+    pub damage: f32,
+    pub target_killed: bool,
+}
+
+/// Deterministic fixed-step resolver for explicit [`UnitOrder::Attack`]
+/// commands.
+///
+/// Movement and target acquisition stay in [`RtsWorld`] and [`SimpleAggroAi`]
+/// (when a game uses it); this resolver owns the part that was historically
+/// duplicated in each game: range checks, attack cadence, armor/damage-type
+/// multipliers, terrain cover, and health mutation. Profiles live on the
+/// units, so workers, scouts, siege units, and structures can each have a
+/// distinct combat identity without engine-specific enums.
+#[derive(Debug, Clone, Default)]
+pub struct RtsCombatResolver {
+    cooldowns: HashMap<UnitId, f32>,
+}
+
+impl RtsCombatResolver {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Remaining attack cooldown for a unit in seconds.
+    pub fn cooldown(&self, id: UnitId) -> f32 {
+        self.cooldowns.get(&id).copied().unwrap_or(0.0).max(0.0)
+    }
+
+    /// Clears any cadence state for `id`, useful when a unit is removed from
+    /// a scene and its ID is later recycled by a game-level entity pool.
+    pub fn reset(&mut self, id: UnitId) {
+        self.cooldowns.remove(&id);
+    }
+
+    /// Resolves one fixed-step combat update.
+    ///
+    /// Every attack samples the world at the beginning of the update. This
+    /// makes simultaneous volleys deterministic: two units can both fire at
+    /// a target that started the tick alive, even if the first pulse is lethal.
+    /// The health mutations are then applied in attacker-ID order. Terrain is
+    /// optional; when zones overlap, [`TerrainZone::resolve_at`] supplies the
+    /// same stable priority used by minimap and authoring tools.
+    pub fn update(
+        &mut self,
+        world: &mut RtsWorld,
+        dt: f32,
+        terrain: &[TerrainZone],
+    ) -> Vec<CombatEvent> {
+        let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        let mut snapshot: Vec<(UnitId, FactionId, Vec2, bool, f32, CombatProfile)> = world
+            .units()
+            .iter()
+            .map(|unit| {
+                (
+                    unit.id,
+                    unit.faction,
+                    unit.position,
+                    unit.alive(),
+                    unit.health,
+                    unit.combat.normalized(),
+                )
+            })
+            .collect();
+        snapshot.sort_by_key(|(id, _, _, _, _, _)| id.0);
+
+        let alive_ids: HashSet<UnitId> = snapshot
+            .iter()
+            .filter(|(_, _, _, alive, _, _)| *alive)
+            .map(|(id, _, _, _, _, _)| *id)
+            .collect();
+        self.cooldowns.retain(|id, _| alive_ids.contains(id));
+        for cooldown in self.cooldowns.values_mut() {
+            *cooldown = (*cooldown - dt).max(0.0);
+        }
+
+        let find_unit = |id: UnitId| snapshot.iter().find(|unit| unit.0 == id);
+        let mut events = Vec::new();
+        for &(attacker_id, attacker_faction, attacker_position, attacker_alive, _, attacker) in
+            &snapshot
+        {
+            if !attacker_alive || attacker.damage <= 0.0 || attacker.range <= 0.0 {
+                continue;
+            }
+            let UnitOrder::Attack(target_id) = world
+                .unit(attacker_id)
+                .map(|unit| unit.order)
+                .unwrap_or(UnitOrder::Idle)
+            else {
+                continue;
+            };
+            let Some((_, target_faction, target_position, target_alive, _, target)) =
+                find_unit(target_id)
+            else {
+                continue;
+            };
+            if !*target_alive || *target_faction == attacker_faction {
+                continue;
+            }
+            if attacker_position.distance(*target_position) > attacker.range {
+                continue;
+            }
+            if self.cooldown(attacker_id) > f32::EPSILON {
+                continue;
+            }
+
+            let attacker_elevation = TerrainZone::resolve_at(attacker_position, terrain)
+                .map(|(_, zone)| zone.elevation)
+                .unwrap_or(0);
+            let terrain_multiplier = TerrainZone::resolve_at(*target_position, terrain)
+                .map(|(_, zone)| zone.damage_multiplier(attacker_elevation))
+                .unwrap_or(1.0);
+            let damage = (attacker.damage
+                * attacker.damage_type.multiplier(target.armor_class)
+                * (1.0 - target.armor)
+                * terrain_multiplier)
+                .max(0.0);
+            self.cooldowns.insert(attacker_id, attacker.attack_period);
+            events.push(CombatEvent {
+                attacker: attacker_id,
+                target: target_id,
+                damage,
+                target_killed: false,
+            });
+        }
+
+        for event in &mut events {
+            let Some(target) = world.unit_mut(event.target) else {
+                continue;
+            };
+            if !target.alive() {
+                event.target_killed = true;
+                continue;
+            }
+            target.health = (target.health - event.damage).max(0.0);
+            event.target_killed = !target.alive();
+        }
+        events
+    }
+}
+
 /// Maximum cover fraction recognized by the tactical resolver.
 pub const TERRAIN_MAX_COVER: f32 = 0.3;
 
@@ -1018,6 +1254,10 @@ pub struct RtsUnit {
     pub speed: f32,
     pub health: f32,
     pub max_health: f32,
+    /// Weapon and armor tuning consumed by [`RtsCombatResolver`]. Games that
+    /// already own a bespoke combat system can leave this at its zero-damage
+    /// default and continue using the movement/selection APIs unchanged.
+    pub combat: CombatProfile,
     pub order: UnitOrder,
     pub queued_orders: VecDeque<UnitOrder>,
 }
@@ -1034,6 +1274,7 @@ impl RtsUnit {
             speed: 180.0,
             health: 100.0,
             max_health: 100.0,
+            combat: CombatProfile::default(),
             order: UnitOrder::Idle,
             queued_orders: VecDeque::new(),
         }
@@ -2207,6 +2448,76 @@ mod tests {
             0.2,
         );
         assert!((cover.damage_multiplier(0) - 0.56).abs() < 0.001);
+    }
+
+    #[test]
+    fn combat_resolver_applies_pulses_and_respects_attack_cooldown() {
+        let mut world = RtsWorld::default();
+        let attacker = world.spawn(PLAYER, Vec2::ZERO);
+        let target = world.spawn(FactionId(2), Vec2::new(80.0, 0.0));
+        world.unit_mut(attacker).unwrap().combat =
+            CombatProfile::new(30.0, 1.0, 100.0, DamageType::Normal, ArmorClass::Medium);
+        world.unit_mut(attacker).unwrap().order = UnitOrder::Attack(target);
+
+        let mut resolver = RtsCombatResolver::new();
+        let first = resolver.update(&mut world, 0.1, &[]);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].attacker, attacker);
+        assert_eq!(first[0].target, target);
+        assert!((first[0].damage - 30.0).abs() < 0.001);
+        assert_eq!(world.unit(target).unwrap().health, 70.0);
+        assert!((resolver.cooldown(attacker) - 1.0).abs() < 0.001);
+
+        assert!(resolver.update(&mut world, 0.5, &[]).is_empty());
+        assert_eq!(world.unit(target).unwrap().health, 70.0);
+
+        let second = resolver.update(&mut world, 0.5, &[]);
+        assert_eq!(second.len(), 1);
+        assert_eq!(world.unit(target).unwrap().health, 40.0);
+    }
+
+    #[test]
+    fn combat_resolver_combines_damage_type_armor_and_high_ground_cover() {
+        let mut world = RtsWorld::default();
+        let attacker = world.spawn(PLAYER, Vec2::new(-120.0, 0.0));
+        let target = world.spawn(FactionId(2), Vec2::new(120.0, 0.0));
+        world.unit_mut(attacker).unwrap().combat =
+            CombatProfile::new(30.0, 1.0, 300.0, DamageType::Explosive, ArmorClass::Medium);
+        world.unit_mut(attacker).unwrap().order = UnitOrder::Attack(target);
+        world.unit_mut(target).unwrap().combat = CombatProfile::default().with_armor(0.1);
+
+        let target_zone = TerrainZone::new(
+            Aabb::from_center_size(Vec2::new(120.0, 0.0), Vec2::splat(80.0)),
+            1,
+            0.2,
+        );
+        let mut resolver = RtsCombatResolver::new();
+        let events = resolver.update(&mut world, 0.1, &[target_zone]);
+
+        assert_eq!(events.len(), 1);
+        // Explosive-vs-medium (0.75), high ground (0.7), cover (0.8), and
+        // 10% armor produce a readable deterministic 11.34 damage pulse.
+        assert!((events[0].damage - 11.34).abs() < 0.001);
+        assert!((world.unit(target).unwrap().health - 88.66).abs() < 0.001);
+    }
+
+    #[test]
+    fn combat_resolver_ignores_friendly_or_out_of_range_orders() {
+        let mut world = RtsWorld::default();
+        let attacker = world.spawn(PLAYER, Vec2::ZERO);
+        let friendly = world.spawn(PLAYER, Vec2::new(20.0, 0.0));
+        let distant = world.spawn(FactionId(2), Vec2::new(500.0, 0.0));
+        world.unit_mut(attacker).unwrap().combat =
+            CombatProfile::new(20.0, 1.0, 100.0, DamageType::Normal, ArmorClass::Medium);
+        let mut resolver = RtsCombatResolver::new();
+
+        world.unit_mut(attacker).unwrap().order = UnitOrder::Attack(friendly);
+        assert!(resolver.update(&mut world, 1.0, &[]).is_empty());
+        assert_eq!(world.unit(friendly).unwrap().health, 100.0);
+
+        world.unit_mut(attacker).unwrap().order = UnitOrder::Attack(distant);
+        assert!(resolver.update(&mut world, 1.0, &[]).is_empty());
+        assert_eq!(world.unit(distant).unwrap().health, 100.0);
     }
 
     #[test]
