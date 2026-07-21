@@ -1166,6 +1166,7 @@ impl RtsWorld {
     ) -> Option<UnitId> {
         let origin_position = self.unit(origin)?.position;
         let range = range.max(0.0);
+        let range_sq = range * range;
         self.rebuild_spatial_index_if_dirty();
         let candidates = {
             let index = self.spatial_index.borrow();
@@ -1181,8 +1182,8 @@ impl RtsWorld {
                     && unit.alive()
                     && unit.max_health > 0.0
                     && unit.health < unit.max_health
-                    && unit.position.distance(origin_position) <= range)
-                    .then_some(unit.id)
+                    && unit.position.distance_squared(origin_position) <= range_sq)
+                .then_some(unit.id)
             })
             .min_by(|left, right| {
                 let left_unit = self.unit(*left).unwrap();
@@ -1253,10 +1254,12 @@ impl RtsWorld {
             .filter_map(|id| self.unit(id))
             .filter(|unit| unit.alive() && unit.faction == faction)
             .filter_map(|unit| {
-                let distance = unit.position.distance(point);
-                (distance <= unit.radius.max(0.0) * 1.35).then_some((unit.id, distance))
+                let radius = unit.radius.max(0.0) * 1.35;
+                let distance_sq = unit.position.distance_squared(point);
+                let radius_sq = radius * radius;
+                (distance_sq <= radius_sq).then_some((unit.id, distance_sq))
             })
-            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.0.cmp(&b.0.0)))
             .map(|(id, _)| id);
         if let Some(id) = selected {
             self.add_selected(id);
