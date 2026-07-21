@@ -1183,7 +1183,7 @@ impl RtsWorld {
                     && unit.max_health > 0.0
                     && unit.health < unit.max_health
                     && unit.position.distance_squared(origin_position) <= range_sq)
-                .then_some(unit.id)
+                    .then_some(unit.id)
             })
             .min_by(|left, right| {
                 let left_unit = self.unit(*left).unwrap();
@@ -1259,7 +1259,7 @@ impl RtsWorld {
                 let radius_sq = radius * radius;
                 (distance_sq <= radius_sq).then_some((unit.id, distance_sq))
             })
-            .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.0.cmp(&b.0.0)))
+            .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0 .0.cmp(&b.0 .0)))
             .map(|(id, _)| id);
         if let Some(id) = selected {
             self.add_selected(id);

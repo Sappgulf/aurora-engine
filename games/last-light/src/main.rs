@@ -25,7 +25,7 @@ use mission_state::{
     SpecialistObjectiveState, StructureKind, TerrainControlAdvance, TerrainControlObjective,
     TerrainControlPresence, TerrainControlState,
 };
-use missions::{DialogueTrigger, MissionDef, VictoryCondition};
+use missions::{DialogueTrigger, MissionDef, MissionLandmarkKind, VictoryCondition};
 use save::{CampaignStore, SaveData};
 use simulation::{
     AbilityError, MissionOutcome, MissionSimulation, ProductionCancelCommandError,
@@ -148,6 +148,17 @@ enum UnitAnimationState {
     Down,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObjectiveStage {
+    None,
+    Specialist,
+    EngineerRepair,
+    ResourceObjective,
+    Relay(usize),
+    Boss,
+    Escort,
+}
+
 /// Result of applying a Fabricator rally to a newly deployed Surveyor.
 ///
 /// Keeping the non-assignment cases explicit lets the HUD explain why a
@@ -266,6 +277,7 @@ struct LastLight {
     /// owns movement/combat; this state only turns an authored high-ground
     /// occupation into a deterministic, readable mission beat.
     terrain_control_state: TerrainControlState,
+    objective_stage: ObjectiveStage,
     dialogue_cursor: usize,
     radio_message: Option<(&'static str, &'static str, f32)>,
     radio_queue: VecDeque<(&'static str, &'static str, Option<Vec2>)>,
@@ -417,6 +429,7 @@ impl LastLight {
             selected_resource_node: None,
             specialist_objective_state: SpecialistObjectiveState::default(),
             terrain_control_state: TerrainControlState::default(),
+            objective_stage: ObjectiveStage::None,
             dialogue_cursor: 0,
             radio_message: None,
             radio_queue: VecDeque::new(),
@@ -482,6 +495,7 @@ impl LastLight {
         self.selected_resource_node = None;
         self.specialist_objective_state = SpecialistObjectiveState::default();
         self.terrain_control_state = TerrainControlState::default();
+        self.objective_stage = ObjectiveStage::None;
         self.dialogue_cursor = 0;
         self.radio_message = None;
         self.radio_queue.clear();
@@ -2432,10 +2446,46 @@ impl LastLight {
                 }
                 SimulationEventKind::MissionVictory => self.victory = true,
                 SimulationEventKind::MissionDefeat => self.defeat = true,
-                SimulationEventKind::CommandAccepted { .. }
-                | SimulationEventKind::ResourcesCredited { .. }
-                | SimulationEventKind::ResourcesDelivered { .. }
-                | SimulationEventKind::UnitQueued { .. } => {}
+                SimulationEventKind::CommandAccepted { action } => {
+                    let action_label = action
+                        .strip_prefix("last_light.")
+                        .unwrap_or(&action)
+                        .replace('_', " ")
+                        .to_uppercase();
+                    self.status = Some((format!("COMMAND // {action_label}"), 1.8));
+                }
+                SimulationEventKind::ResourcesCredited { amount } => {
+                    if amount > 0 {
+                        self.status =
+                            Some((format!("RELAY SALVAGE +{amount} // NODE INCOME"), 2.0));
+                        self.target_feedback = Some((
+                            self.fabricator_position,
+                            format!("INCOME // SALVAGE +{amount}"),
+                            1.8,
+                        ));
+                    }
+                }
+                SimulationEventKind::ResourcesDelivered { salvage, flux } => {
+                    if salvage > 0 || flux > 0 {
+                        let mut parts = Vec::new();
+                        if salvage > 0 {
+                            parts.push(format!("{salvage} SALVAGE"));
+                        }
+                        if flux > 0 {
+                            parts.push(format!("{flux} FLUX"));
+                        }
+                        self.status = Some((format!("DELIVERED // {}", parts.join(" + ")), 2.1));
+                        self.target_feedback = Some((
+                            self.fabricator_position,
+                            format!("DELIVERED // {}", parts.join(" + ")),
+                            1.8,
+                        ));
+                    }
+                }
+                SimulationEventKind::UnitQueued { kind } => {
+                    self.status =
+                        Some((format!("{} QUEUED // FABRICATOR QUEUE", kind.label()), 1.8));
+                }
             }
         }
     }
@@ -3180,13 +3230,11 @@ impl LastLight {
         Some((target, bounded, accent))
     }
 
-    /// Resolves the next player-facing objective from the same mission state
-    /// that determines victory. The result drives the HUD, minimap, world
-    /// beacon, and camera-focus key so those surfaces cannot disagree.
-    fn next_objective(&self) -> Option<(Vec2, String)> {
+    fn objective_stage_and_copy(&self) -> Option<(ObjectiveStage, Vec2, String)> {
         if let Some(objective) = self.mission.specialist_objective {
             if !self.specialist_objective_state.completed {
                 return Some((
+                    ObjectiveStage::Specialist,
                     objective.target,
                     format!(
                         "{} // HOLD {:02}%",
@@ -3200,6 +3248,7 @@ impl LastLight {
         if let Some(objective) = self.mission.engineer_repair_objective {
             if !self.specialist_objective_state.completed {
                 return Some((
+                    ObjectiveStage::EngineerRepair,
                     objective.target,
                     format!(
                         "ENGINEER REPAIR // HOLD {:02}%",
@@ -3212,50 +3261,94 @@ impl LastLight {
                 ));
             }
         }
-        // Resource objectives are campaign beats, not just passive economy
-        // telemetry. Keep them behind the specialist jobs above so Garden's
-        // repair instruction remains the first thing the player sees, then
-        // expose the authored node before the generic escort/victory target.
-        // Reusing the compact chip copy keeps the beacon, minimap, and R-focus
-        // label in lockstep with the resource objective's live state.
         if self
             .simulation
             .resource_objective_state()
             .is_some_and(|state| !state.completed)
         {
             if let Some((target, copy, _)) = self.resource_objective_hud_copy() {
-                return Some((target, format!("RESOURCE // {copy}")));
+                return Some((
+                    ObjectiveStage::ResourceObjective,
+                    target,
+                    format!("RESOURCE // {copy}"),
+                ));
+            }
+        }
+        if self.mission.resource_objective.is_none() {
+            if let Some((index, relay)) = self
+                .simulation
+                .relays
+                .iter()
+                .enumerate()
+                .find(|(_, relay)| !relay.active)
+            {
+                return Some((
+                    ObjectiveStage::Relay(index),
+                    relay.position,
+                    format!("RESTORE RELAY {} — ENGINEER REQUIRED", index + 1),
+                ));
             }
         }
         match self.mission.victory {
-            VictoryCondition::RestoreRelaysAndDefeatBoss { boss_kind } => {
-                if let Some((index, relay)) = self
-                    .simulation
-                    .relays
-                    .iter()
-                    .enumerate()
-                    .find(|(_, relay)| !relay.active)
-                {
-                    return Some((
-                        relay.position,
-                        format!("RESTORE RELAY {} — ENGINEER REQUIRED", index + 1),
-                    ));
-                }
-                self.simulation
-                    .world
-                    .units()
-                    .iter()
-                    .find(|unit| {
-                        unit.faction == CHOIR
-                            && unit.alive()
-                            && self.simulation.kinds.get(&unit.id) == Some(&boss_kind)
-                    })
-                    .map(|unit| (unit.position, format!("ELIMINATE {}", boss_kind.label())))
-            }
-            VictoryCondition::EscortToExtraction { point, .. } => {
-                Some((point, "ESCORT SENA TO THE ARRAY".to_owned()))
-            }
+            VictoryCondition::RestoreRelaysAndDefeatBoss { boss_kind } => self
+                .simulation
+                .world
+                .units()
+                .iter()
+                .find(|unit| {
+                    unit.faction == CHOIR
+                        && unit.alive()
+                        && self.simulation.kinds.get(&unit.id) == Some(&boss_kind)
+                })
+                .map(|unit| {
+                    (
+                        ObjectiveStage::Boss,
+                        unit.position,
+                        format!("ELIMINATE {}", boss_kind.label()),
+                    )
+                }),
+            VictoryCondition::EscortToExtraction { point, .. } => Some((
+                ObjectiveStage::Escort,
+                point,
+                "ESCORT SENA TO THE ARRAY".to_owned(),
+            )),
         }
+    }
+
+    /// Keeps HUD, beacons, and map targets locked to one authoritative
+    /// stage progression so completed beats hand off cleanly instead of
+    /// jumping between unrelated contracts.
+    fn sync_objective_stage(&mut self) {
+        let next_stage = self.objective_stage_and_copy();
+        let (next_stage, position, copy) = match next_stage {
+            Some((next_stage, position, copy)) => (next_stage, position, copy),
+            None if self.objective_stage != ObjectiveStage::None => {
+                self.objective_stage = ObjectiveStage::None;
+                self.status = Some(("OBJECTIVE COMPLETE // CHECK RADIO".to_owned(), 1.8));
+                self.target_feedback = Some((
+                    self.fabricator_position,
+                    "OBJECTIVE COMPLETE // RADIO".to_owned(),
+                    1.8,
+                ));
+                return;
+            }
+            None => {
+                return;
+            }
+        };
+        if self.objective_stage != next_stage {
+            self.objective_stage = next_stage;
+            self.status = Some((format!("OBJECTIVE STAGE // {copy}"), 2.0));
+            self.target_feedback = Some((position, format!("FOCUS // {copy}"), 2.8));
+        }
+    }
+
+    /// Resolves the next player-facing objective from the same mission state
+    /// that determines victory. The result drives the HUD, minimap, world
+    /// beacon, and camera-focus key so those surfaces cannot disagree.
+    fn next_objective(&self) -> Option<(Vec2, String)> {
+        self.objective_stage_and_copy()
+            .map(|(_, target, copy)| (target, copy))
     }
 
     fn focus_next_objective(&mut self, ctx: &mut FrameCtx<'_>) {
@@ -4944,6 +5037,87 @@ impl LastLight {
         }
     }
 
+    fn mission_landmark_color(kind: MissionLandmarkKind) -> ([f32; 3], [f32; 3]) {
+        match kind {
+            MissionLandmarkKind::Objective => ([0.95, 0.62, 0.2], [1.25, 0.82, 0.3]),
+            MissionLandmarkKind::Relay => ([0.16, 1.28, 1.4], [0.2, 1.35, 1.4]),
+            MissionLandmarkKind::Resource => ([0.24, 1.22, 1.25], [0.34, 1.48, 1.52]),
+            MissionLandmarkKind::Fabricator => ([0.14, 0.84, 1.02], [0.2, 0.95, 1.2]),
+            MissionLandmarkKind::Reactor => ([0.42, 0.45, 1.0], [0.65, 0.7, 1.25]),
+            MissionLandmarkKind::EnemyThreat => ([1.4, 0.16, 0.44], [1.5, 0.26, 0.52]),
+            MissionLandmarkKind::LumenConsole => ([0.48, 1.1, 1.15], [0.5, 1.2, 1.2]),
+        }
+    }
+
+    fn mission_landmark_radius(kind: MissionLandmarkKind) -> f32 {
+        match kind {
+            MissionLandmarkKind::Objective => 10.0,
+            MissionLandmarkKind::Relay => 9.0,
+            MissionLandmarkKind::Resource => 8.0,
+            MissionLandmarkKind::Fabricator => 10.5,
+            MissionLandmarkKind::Reactor => 11.0,
+            MissionLandmarkKind::EnemyThreat => 8.5,
+            MissionLandmarkKind::LumenConsole => 10.0,
+        }
+    }
+
+    fn draw_mission_landmarks(&self, renderer: &mut Renderer, time: f32) {
+        let objective = self.next_objective().map(|(position, _)| position);
+        for landmark in &self.mission.landmarks {
+            let (fill, stroke) = Self::mission_landmark_color(landmark.kind);
+            let radius = Self::mission_landmark_radius(landmark.kind);
+            let pulse =
+                radius * (0.82 + (time * 2.3 + landmark.position.x * 0.003).sin().abs() * 0.18);
+            let is_current =
+                objective.is_some_and(|target| target.distance(landmark.position) < radius * 1.5);
+            let glow_alpha = if is_current { 0.4 } else { 0.24 };
+            renderer.draw_sprite(
+                self.tex_glow,
+                Sprite::new(landmark.position, Vec2::splat(pulse * 16.2))
+                    .with_color(Color::rgba(fill[0], fill[1], fill[2], glow_alpha))
+                    .with_z(0.12),
+            );
+            renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(landmark.position, Vec2::splat(radius * 2.6))
+                    .with_color(if is_current {
+                        Color::rgba(stroke[0], stroke[1], stroke[2], 0.9)
+                    } else {
+                        Color::rgba(stroke[0], stroke[1], stroke[2], 0.72)
+                    })
+                    .with_z(0.14),
+            );
+            self.draw_selection_brackets(renderer, landmark.position, pulse);
+        }
+    }
+
+    fn draw_mission_landmarks_minimap(
+        &self,
+        renderer: &mut Renderer,
+        minimap: MinimapTransform,
+        hud_scale: f32,
+    ) {
+        let objective = self.next_objective().map(|(position, _)| position);
+        for landmark in &self.mission.landmarks {
+            let (_, stroke) = Self::mission_landmark_color(landmark.kind);
+            let radius = 2.4 + hud_scale * Self::mission_landmark_radius(landmark.kind) * 0.11;
+            let marker = minimap.world_to_panel(landmark.position);
+            let is_current =
+                objective.is_some_and(|target| target.distance(landmark.position) < 16.0);
+            let size = if is_current { radius * 1.25 } else { radius };
+            renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(marker, Vec2::splat(size))
+                    .with_color(if is_current {
+                        Color::rgba(1.25, 0.95, 0.34, 1.0)
+                    } else {
+                        Color::rgba(stroke[0], stroke[1], stroke[2], 0.76)
+                    })
+                    .with_z(8.45),
+            );
+        }
+    }
+
     fn draw_selection_brackets(&self, renderer: &mut Renderer, position: Vec2, size: f32) {
         let color = Color::rgba(0.22, 1.8, 1.45, 0.95);
         for (offset, dimensions) in [
@@ -5204,6 +5378,7 @@ impl Game for LastLight {
         }
         self.update_specialist_objective(dt);
         self.update_terrain_control_objective(dt);
+        self.sync_objective_stage();
         self.mission_time += dt;
         self.update_radio_dialogue(dt);
         if let Some((_, time)) = self.order_marker.as_mut() {
@@ -5483,6 +5658,8 @@ impl Game for LastLight {
                 0.22 + (t * 3.0).sin().abs() * 0.08,
             ));
         }
+
+        self.draw_mission_landmarks(ctx.renderer, t);
 
         if let Some((position, remaining)) = self.simulation.scan_pulse {
             let pulse = (5.0 - remaining).clamp(0.0, 5.0) / 5.0;
@@ -5977,6 +6154,8 @@ impl Game for LastLight {
                     .with_z(8.25),
                 );
             }
+            self.draw_mission_landmarks_minimap(ctx.renderer, minimap, hud_scale);
+
             // The raid forecast is a minimap-only alert until contacts enter
             // vision. Keeping the marker at the predicted spawn point gives
             // the player a defensible direction without adding another world

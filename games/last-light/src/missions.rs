@@ -110,6 +110,48 @@ pub struct RadioLine {
     pub trigger: DialogueTrigger,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissionLandmarkKind {
+    Objective,
+    Relay,
+    Resource,
+    Fabricator,
+    Reactor,
+    EnemyThreat,
+    LumenConsole,
+}
+
+impl MissionLandmarkKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Objective => "OBJECTIVE",
+            Self::Relay => "RELAY",
+            Self::Resource => "RESOURCE",
+            Self::Fabricator => "FABRICATOR",
+            Self::Reactor => "REACTOR",
+            Self::EnemyThreat => "ENEMY ROUTE",
+            Self::LumenConsole => "LUMEN SIGNAL",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MissionLandmark {
+    pub kind: MissionLandmarkKind,
+    pub position: Vec2,
+    pub label: &'static str,
+}
+
+impl MissionLandmark {
+    pub const fn new(kind: MissionLandmarkKind, position: Vec2, label: &'static str) -> Self {
+        Self {
+            kind,
+            position,
+            label,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MissionDef {
     pub id: &'static str,
@@ -148,6 +190,8 @@ pub struct MissionDef {
     /// contract asks the authored worker to secure one strategic pocket while
     /// a support role can clear a live enemy contest.
     pub resource_objective: Option<ResourceObjective>,
+    /// Optional authored waypoints and strategic markers shown in world + minimap.
+    pub landmarks: Vec<MissionLandmark>,
     pub victory: VictoryCondition,
     pub unlock_next: u32,
     pub reward_lumen: u64,
@@ -196,6 +240,7 @@ impl MissionDef {
                 + self.player_spawns.len()
                 + self.enemy_spawns.len()
                 + self.terrain_zones.len()
+                + self.landmarks.len()
                 + 2,
         );
         anchors.extend(self.relays.iter().copied());
@@ -215,6 +260,7 @@ impl MissionDef {
         if let Some(position) = self.lumen_console {
             anchors.push(position);
         }
+        anchors.extend(self.landmarks.iter().map(|landmark| landmark.position));
         if let Some(objective) = self.specialist_objective {
             objective.validate()?;
             anchors.push(objective.target);
@@ -356,6 +402,9 @@ impl MissionDef {
         }
         for spawn in &mut self.enemy_spawns {
             spawn.position *= scale;
+        }
+        for landmark in &mut self.landmarks {
+            landmark.position *= scale;
         }
         for obstacle in &mut self.obstacles {
             *obstacle = Aabb::new(obstacle.min * scale, obstacle.max * scale);
@@ -544,6 +593,23 @@ pub fn reclaim_the_reactor() -> MissionDef {
         engineer_repair_objective: None,
         terrain_control_objective: None,
         resource_objective: None,
+        landmarks: vec![
+            MissionLandmark::new(
+                MissionLandmarkKind::Relay,
+                Vec2::new(-790.0, 380.0),
+                "ALPHA RELAY APPROACH",
+            ),
+            MissionLandmark::new(
+                MissionLandmarkKind::Objective,
+                Vec2::new(40.0, -150.0),
+                "MIDDLE NODE COVER",
+            ),
+            MissionLandmark::new(
+                MissionLandmarkKind::EnemyThreat,
+                Vec2::new(520.0, 320.0),
+                "PRIMARY ENEMY ROUTE",
+            ),
+        ],
         victory: VictoryCondition::RestoreRelaysAndDefeatBoss {
             boss_kind: UnitKind::Canticle,
         },
@@ -670,6 +736,7 @@ pub fn voice_in_conduit_twelve() -> MissionDef {
         engineer_repair_objective: None,
         terrain_control_objective: None,
         resource_objective: None,
+        landmarks: Vec::new(),
         victory: VictoryCondition::EscortToExtraction {
             point: extraction,
             radius: 140.0,
@@ -813,6 +880,23 @@ pub fn terms_of_salvage() -> MissionDef {
             6.0,
         )),
         resource_objective: None,
+        landmarks: vec![
+            MissionLandmark::new(
+                MissionLandmarkKind::Relay,
+                Vec2::new(-540.0, 250.0),
+                "WARDEN HOLD RIDGE",
+            ),
+            MissionLandmark::new(
+                MissionLandmarkKind::Resource,
+                Vec2::new(-720.0, -260.0),
+                "SALVAGE OUTPOST",
+            ),
+            MissionLandmark::new(
+                MissionLandmarkKind::Fabricator,
+                Vec2::new(20.0, -120.0),
+                "FABRICATOR RECALL",
+            ),
+        ],
         victory: VictoryCondition::RestoreRelaysAndDefeatBoss {
             boss_kind: UnitKind::Canticle,
         },
@@ -1010,6 +1094,18 @@ pub fn garden_below() -> MissionDef {
             260.0,
             8.0,
         )),
+        landmarks: vec![
+            MissionLandmark::new(
+                MissionLandmarkKind::Objective,
+                Vec2::new(780.0, 0.0),
+                "EASTERN HOLD",
+            ),
+            MissionLandmark::new(
+                MissionLandmarkKind::Reactor,
+                Vec2::new(1_080.0, -420.0),
+                "REACTOR STABILIZER",
+            ),
+        ],
         victory: VictoryCondition::EscortToExtraction {
             point: extraction,
             radius: 160.0,
@@ -1197,6 +1293,18 @@ pub fn choir_invisible() -> MissionDef {
             270.0,
             9.0,
         )),
+        landmarks: vec![
+            MissionLandmark::new(
+                MissionLandmarkKind::Objective,
+                Vec2::new(760.0, 300.0),
+                "INVISIBLE GATE WATCH",
+            ),
+            MissionLandmark::new(
+                MissionLandmarkKind::Relay,
+                Vec2::new(1_080.0, -320.0),
+                "NIGHT NODE",
+            ),
+        ],
         victory: VictoryCondition::RestoreRelaysAndDefeatBoss {
             boss_kind: UnitKind::Canticle,
         },
@@ -1376,6 +1484,18 @@ pub fn vesper_gate() -> MissionDef {
             280.0,
             10.0,
         )),
+        landmarks: vec![
+            MissionLandmark::new(
+                MissionLandmarkKind::LumenConsole,
+                Vec2::new(280.0, 20.0),
+                "VESPER GATE",
+            ),
+            MissionLandmark::new(
+                MissionLandmarkKind::EnemyThreat,
+                Vec2::new(-600.0, -160.0),
+                "FLANK WARNING ROUTE",
+            ),
+        ],
         victory: VictoryCondition::RestoreRelaysAndDefeatBoss {
             boss_kind: UnitKind::Canticle,
         },
@@ -1582,6 +1702,18 @@ pub fn hollow_orbit() -> MissionDef {
             280.0,
             10.0,
         )),
+        landmarks: vec![
+            MissionLandmark::new(
+                MissionLandmarkKind::Reactor,
+                Vec2::new(1_100.0, 20.0),
+                "COOLANT CORE",
+            ),
+            MissionLandmark::new(
+                MissionLandmarkKind::Objective,
+                Vec2::new(0.0, 790.0),
+                "ORBITAL LOOP",
+            ),
+        ],
         victory: VictoryCondition::RestoreRelaysAndDefeatBoss {
             boss_kind: UnitKind::Canticle,
         },
