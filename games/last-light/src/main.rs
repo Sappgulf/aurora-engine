@@ -74,6 +74,10 @@ const COMMAND_CARD_PANEL_WIDTH: f32 = 292.0;
 const COMMAND_CARD_PANEL_HEADER: f32 = 78.0;
 const COMMAND_CARD_ROW_SPACING: f32 = 26.0;
 const COMMAND_CARD_SCALE_FACTOR: f32 = 0.76;
+/// Dense camera zoom can reduce the global HUD scale to 0.5. Keep the
+/// contextual mini-menu above a readable floor without restoring the full
+/// dashboard footprint that dense mode is meant to avoid.
+const COMMAND_CARD_DENSE_MIN_SCALE: f32 = 0.46;
 const COMMAND_CARD_LABELS: [&str; 5] = [
     "Q  WARDEN  90",
     "E  ENGINEER  70",
@@ -233,6 +237,7 @@ struct LastLight {
     tex_terrain_details: TextureHandle,
     tex_map_props: TextureHandle,
     tex_specialist_modules: TextureHandle,
+    tex_building_commands: TextureHandle,
     tex_glow: TextureHandle,
     tex_ui: TextureHandle,
     unit_atlas: TextureAtlas,
@@ -257,6 +262,7 @@ struct LastLight {
     terrain_detail_atlas: TextureAtlas,
     map_props_atlas: TextureAtlas,
     specialist_module_atlas: TextureAtlas,
+    building_command_atlas: TextureAtlas,
     simulation: MissionSimulation,
     attack_flash: HashMap<UnitId, f32>,
     damage_flash: HashMap<UnitId, f32>,
@@ -411,6 +417,7 @@ impl LastLight {
             tex_terrain_details: TextureHandle::default(),
             tex_map_props: TextureHandle::default(),
             tex_specialist_modules: TextureHandle::default(),
+            tex_building_commands: TextureHandle::default(),
             tex_glow: TextureHandle::default(),
             tex_ui: TextureHandle::default(),
             unit_atlas: TextureAsset::Units.runtime_atlas(TextureHandle::default()),
@@ -441,6 +448,8 @@ impl LastLight {
                 .runtime_atlas(TextureHandle::default()),
             map_props_atlas: TextureAsset::MapProps.runtime_atlas(TextureHandle::default()),
             specialist_module_atlas: TextureAsset::SpecialistModules
+                .runtime_atlas(TextureHandle::default()),
+            building_command_atlas: TextureAsset::BuildingCommands
                 .runtime_atlas(TextureHandle::default()),
             simulation,
             attack_flash: HashMap::new(),
@@ -2022,8 +2031,20 @@ impl LastLight {
     /// This is calculated from the same viewport-aware HUD scale used by
     /// hit-testing, so native and browser views cannot drift apart when the
     /// camera zoom or window size changes.
+    fn command_card_scale_for_hud(hud_scale: f32, dense: bool) -> f32 {
+        let min_scale = if dense {
+            COMMAND_CARD_DENSE_MIN_SCALE
+        } else {
+            0.38
+        };
+        (hud_scale * COMMAND_CARD_SCALE_FACTOR).clamp(min_scale, 0.66)
+    }
+
     fn command_card_scale(renderer: &Renderer) -> f32 {
-        (Self::hud_scale(renderer) * COMMAND_CARD_SCALE_FACTOR).clamp(0.38, 0.66)
+        Self::command_card_scale_for_hud(
+            Self::hud_scale(renderer),
+            Self::hud_dense_layout(renderer),
+        )
     }
 
     fn point_over_command_card(&self, renderer: &Renderer, point: Vec2) -> bool {
@@ -3249,6 +3270,18 @@ impl LastLight {
         } else {
             "FABRICATOR // Q/E/F QUEUE".to_owned()
         }
+    }
+
+    /// Keeps a contextual header inside the command-card gutter when a
+    /// structure icon is present. BitmapText has a fixed six-cell advance and
+    /// no clipping layer, so the renderer needs a deterministic width budget
+    /// instead of relying on the viewport to hide overflow.
+    fn command_card_title_pixel(text: &str, compact: bool, has_icon: bool) -> f32 {
+        let base: f32 = if compact { 2.3 } else { 2.8 };
+        let gutter = if has_icon { 62.0 } else { 12.0 };
+        let available = (COMMAND_CARD_PANEL_WIDTH - gutter).max(72.0);
+        let glyphs = text.chars().count().max(1) as f32;
+        (base.min(available / (glyphs * 6.0))).max(1.2)
     }
 
     /// Formats the right half of the Fabricator split row (`D`) from the
@@ -5578,6 +5611,7 @@ impl Game for LastLight {
             terrain_details,
             map_props,
             specialist_modules,
+            building_commands,
             glow,
             ui,
             mission_cover,
@@ -5605,6 +5639,7 @@ impl Game for LastLight {
                 assets::load_texture(&gpu, TextureAsset::TerrainDetails),
                 assets::load_texture(&gpu, TextureAsset::MapProps),
                 assets::load_texture(&gpu, TextureAsset::SpecialistModules),
+                assets::load_texture(&gpu, TextureAsset::BuildingCommands),
                 Texture::soft_circle(&gpu, 64, Color::WHITE),
                 Texture::solid(&gpu, Color::WHITE),
                 Texture::from_bytes(
@@ -5658,6 +5693,7 @@ impl Game for LastLight {
         self.tex_terrain_details = renderer.add_texture(terrain_details);
         self.tex_map_props = renderer.add_texture(map_props);
         self.tex_specialist_modules = renderer.add_texture(specialist_modules);
+        self.tex_building_commands = renderer.add_texture(building_commands);
         self.tex_glow = renderer.add_texture(glow);
         self.tex_ui = renderer.add_texture(ui);
         self.unit_atlas = TextureAsset::Units.runtime_atlas(self.tex_units);
@@ -5688,6 +5724,8 @@ impl Game for LastLight {
         self.map_props_atlas = TextureAsset::MapProps.runtime_atlas(self.tex_map_props);
         self.specialist_module_atlas =
             TextureAsset::SpecialistModules.runtime_atlas(self.tex_specialist_modules);
+        self.building_command_atlas =
+            TextureAsset::BuildingCommands.runtime_atlas(self.tex_building_commands);
         renderer.camera.position = Vec2::new(-700.0, -260.0);
         renderer.camera.zoom = 1.1;
         renderer.camera.zoom_min = 0.9;
@@ -7542,13 +7580,43 @@ impl Game for LastLight {
                     .with_color(Color::rgba(0.01, 0.025, 0.05, 0.88))
                     .with_z(7.5),
             );
+            // The command atlas is a compact, panel-safe complement to the
+            // world structure sprites. A single silhouette beside the header
+            // tells the player which interaction family is active before they
+            // scan the verb rows below it; the resource-node icon keeps the
+            // same affordance when a node, rather than a structure, is selected.
+            let context_icon_frame = if self.selected_resource_node.is_some() {
+                Some(3)
+            } else {
+                self.selected_structure.map(|structure| match structure {
+                    StructureKind::Relay(_) => 0,
+                    StructureKind::Reactor => 1,
+                    StructureKind::Fabricator => 2,
+                })
+            };
+            let title_origin = if let Some(frame) = context_icon_frame {
+                let mut icon = self.building_command_atlas.sprite(
+                    card_text + Vec2::new(20.0, -4.0) * card_scale,
+                    Vec2::splat(40.0 * card_scale),
+                    frame,
+                );
+                icon.color = Color::rgba(0.84, 1.0, 0.98, 0.9);
+                icon.z = 7.86;
+                ctx.renderer.draw_sprite(self.tex_building_commands, icon);
+                card_text + Vec2::new(48.0, 0.0) * card_scale
+            } else {
+                card_text
+            };
             let card_title = if self.selected_resource_node.is_some() {
                 "RESOURCE NODE".to_owned()
             } else {
                 match self.selected_structure {
                     Some(StructureKind::Relay(_)) => "POWER RELAY".to_owned(),
-                    Some(StructureKind::Reactor) => "AUXILIARY REACTOR".to_owned(),
-                    Some(StructureKind::Fabricator) => self.fabricator_card_title(),
+                    Some(StructureKind::Reactor) => "AUX REACTOR".to_owned(),
+                    Some(StructureKind::Fabricator) => {
+                        self.fabricator_card_title()
+                            .replacen("FABRICATOR", "FAB", 1)
+                    }
                     None => match self.selected_single_unit_kind() {
                         Some(kind) => self
                             .selected_unit_id()
@@ -7582,15 +7650,16 @@ impl Game for LastLight {
                     },
                 }
             };
+            let title_pixel = Self::command_card_title_pixel(
+                &card_title,
+                compact_card,
+                context_icon_frame.is_some(),
+            );
             self.draw_text(
                 ctx.renderer,
                 &card_title,
-                card_text,
-                if compact_card {
-                    2.3 * card_scale
-                } else {
-                    2.8 * card_scale
-                },
+                title_origin,
+                title_pixel * card_scale,
                 Color::rgb(0.3, 1.4, 1.2),
                 8.0,
             );
@@ -10346,6 +10415,29 @@ mod tests {
         assert!(!LastLight::hud_dense_for_zoom(HUD_DENSE_ZOOM - 0.01));
         assert!(LastLight::hud_dense_for_zoom(HUD_DENSE_ZOOM));
         assert!(LastLight::hud_dense_for_zoom(1.75));
+    }
+
+    #[test]
+    fn dense_command_card_keeps_a_readable_floor() {
+        assert_eq!(LastLight::command_card_scale_for_hud(0.5, false), 0.38);
+        assert_eq!(
+            LastLight::command_card_scale_for_hud(0.5, true),
+            COMMAND_CARD_DENSE_MIN_SCALE
+        );
+        let scaled = LastLight::command_card_scale_for_hud(0.82, true);
+        assert!((scaled - 0.6232).abs() < 1e-5);
+    }
+
+    #[test]
+    fn contextual_command_titles_fit_their_icon_gutter() {
+        let title = "FAB // Q/E/F QUEUE";
+        let pixel = LastLight::command_card_title_pixel(title, false, true);
+        assert!(pixel < 2.8);
+        assert!(title.chars().count() as f32 * 6.0 * pixel <= 230.0 + f32::EPSILON);
+        assert_eq!(
+            LastLight::command_card_title_pixel("POWER RELAY", false, true),
+            2.8
+        );
     }
 
     #[test]

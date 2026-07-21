@@ -158,11 +158,12 @@ unrelated images.
 | `unit-hit-reactions-atlas-v001.png` | 1024×1536 | 4×6 | Full-roster impact, spark, and recovery reactions |
 | `unit-down-reactions-atlas-v001.png` | 1024×1536 | 4×6 | Full-roster non-gory shutdown and persistent wrecks |
 | `last-light-structures-atlas-v001.png` | 1254×1254 | 2×2 | Relay, fabricator, reactor, Choir tower |
-| `resource-node-atlas-v001.png` | 512×512 | 2×2 | Salvage and Flux mine nodes, idle and active frames |
-| `resource-harvest-effects-v001.png` | 512×512 | 2×2 | Extraction beams, cargo lift, and depleted-node pulse |
+| `resource-node-atlas-v002.png` | 512×512 | 2×2 | Salvage and Flux mine nodes, idle and active frames |
+| `resource-harvest-effects-v002.png` | 512×512 | 2×2 | Extraction beams, cargo lift, and depleted-node pulse |
 | `terrain-detail-atlas-v001.png` | 512×512 | 2×2 | High-ground, cover, fissure, and resource-beacon overlays |
 | `map-props-atlas-v001.png` | 768×512 | 3×2 | Cargo, Engineer, conduit, support, relay, and Choir route landmarks |
 | `specialist-module-atlas-v001.png` | 1024×512 | 4×2 | Mara, Ivo, Sena, and Olan loadout icons (base and alternate modules) |
+| `building-command-atlas-v001.png` | 768×512 | 3×2 | Compact relay, reactor, fabricator, resource, beacon, and repair command-card icons |
 | `reactor-sector-v001.png` | 1672×941 | 1×1 | Authored mission floor plate |
 | `portraits/lantern-command-portrait-sheet-v001.png` | 768×512 | 3×2 | Mara, Ivo, Sena, Olan, Vale, and Lumen comms portraits |
 
@@ -204,6 +205,24 @@ python3 tools/asset-sources/last-light/generate_specialist_module_atlas.py
 The source preview is intentionally retained beside the generator for art
 review; only the normalized runtime atlas is embedded in the Rust binary.
 
+The building-command atlas is a panel-safe companion to the large structure
+sprites. Its six transparent cells are ordered relay pulse, reactor core,
+fabricator queue, resource node, field beacon, and repair tool. Last Light
+draws the first three beside a selected building's contextual command-card
+header and uses the resource node cell when a worker node is selected. This is
+presentation-only: command availability, costs, and click hit-testing remain
+owned by the existing `StructureKind` and command-card state. Rebuild the
+runtime atlas and its 4× source review with:
+
+```bash
+python3 tools/asset-sources/last-light/generate_building_command_atlas.py
+```
+
+The icon sheet deliberately retains a transparent runtime surface and a dark
+source-review background; the latter is never embedded. This keeps the
+silhouette crisp against the translucent HUD panel without baking a rectangle
+into the game view.
+
 The harvest-effects atlas is ordered as Salvage extraction, Flux extraction,
 returning cargo, and depleted pulse. These are state-driven overlays rather
 than replacement node art; they are drawn only while a Surveyor job is active
@@ -213,7 +232,8 @@ The catalog also validates the semantic grid for each presentation role before
 shipping: the environment plate is 1×1, unit and portrait sheets are 3×2,
 animation strips are single-row (four or more frames), reaction atlases are
 4×6, structure atlases are 2×2, resource atlases are 2×2, and resource effect
-atlases are 2×2. This catches a dimensionally valid PNG that
+atlases are 2×2, map props and building-command icons are 3×2, and specialist
+modules are 4×2. This catches a dimensionally valid PNG that
 would still crop the wrong comms portrait, reaction row, or building frame.
 Run `cargo test -p last_light assets::tests` after replacing generated art.
 

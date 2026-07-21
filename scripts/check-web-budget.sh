@@ -5,7 +5,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/games/last-light/dist"
 MAX_WASM_BYTES=$((18 * 1024 * 1024))
-MAX_SOURCE_ASSET_BYTES=$((12 * 1024 * 1024))
+# The authored Last Light catalog now includes full reaction atlases, campaign
+# plates, portraits, and terrain/detail sheets. Keep a real ceiling while
+# leaving room for another small art pass without rejecting the shipped set.
+MAX_SOURCE_ASSET_BYTES=$((20 * 1024 * 1024))
 
 WASM="$(find "$DIST" -maxdepth 1 -name '*.wasm' -type f | head -n 1)"
 if [[ -z "$WASM" ]]; then

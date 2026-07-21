@@ -1120,6 +1120,22 @@ impl MissionSimulation {
         })
     }
 
+    /// Returns whether any living Engineer is close enough to work a relay.
+    ///
+    /// Relay restoration is a persistent field job, not a presentation
+    /// selection state. Keeping this query separate from
+    /// [`Self::selected_engineer_near`] lets the HUD continue to explain a
+    /// selected Engineer's nearby interaction while the fixed-step contract
+    /// keeps progressing after the player switches to a Warden or Surveyor.
+    pub fn engineer_near(&self, position: Vec2) -> bool {
+        self.world.units().iter().any(|unit| {
+            unit.faction == PLAYER
+                && unit.alive()
+                && self.kinds.get(&unit.id) == Some(&UnitKind::Engineer)
+                && unit.position.distance(position) < 110.0
+        })
+    }
+
     pub fn destroyed_count(&self, kind: UnitKind) -> u32 {
         self.destroyed_by_kind.get(&kind).copied().unwrap_or(0)
     }
@@ -1409,7 +1425,7 @@ impl MissionSimulation {
                 continue;
             }
             let position = self.relays[index].position;
-            if self.selected_engineer_near(position) {
+            if self.engineer_near(position) {
                 self.relays[index].progress += dt.max(0.0) * self.modifiers.relay_restore_rate;
                 if self.relays[index].progress >= 3.0 {
                     self.relays[index].progress = 3.0;
@@ -2545,6 +2561,41 @@ mod tests {
             .unwrap();
 
         assert!(simulation.apply_command(&command).is_err());
+    }
+
+    #[test]
+    fn relay_restore_job_survives_selection_change() {
+        let mission = crate::missions::reclaim_the_reactor();
+        let mut simulation =
+            MissionSimulation::from_mission(&mission, SimulationModifiers::default());
+        let engineer = simulation
+            .kinds
+            .iter()
+            .find_map(|(id, kind)| (*kind == UnitKind::Engineer).then_some(*id))
+            .expect("mission includes an Engineer");
+        let warden = simulation
+            .kinds
+            .iter()
+            .find_map(|(id, kind)| (*kind == UnitKind::Warden).then_some(*id))
+            .expect("mission includes a Warden");
+        let relay_position = simulation.relays[0].position;
+        simulation.world.unit_mut(engineer).unwrap().position = relay_position;
+
+        // The Engineer begins selected and starts its relay job.
+        assert_eq!(simulation.world.select_ids(&[engineer], PLAYER, false), 1);
+        simulation.fixed_step_with_dt(1.0);
+        let progress_while_selected = simulation.relays[0].progress;
+        assert!(progress_while_selected > 0.0);
+
+        // Switching to another role must not cancel work already in progress.
+        assert_eq!(simulation.world.select_ids(&[warden], PLAYER, false), 1);
+        simulation.fixed_step_with_dt(1.0);
+        assert!(
+            simulation.relays[0].progress > progress_while_selected,
+            "relay work should continue after the player selects a different role"
+        );
+        assert!(simulation.engineer_near(relay_position));
+        assert!(!simulation.selected_engineer_near(relay_position));
     }
 
     #[test]
