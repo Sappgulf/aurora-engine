@@ -805,7 +805,6 @@ impl SpatialUnitIndex {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BuildItem {
     pub build: BuildId,
@@ -1183,7 +1182,7 @@ impl RtsWorld {
                     && unit.max_health > 0.0
                     && unit.health < unit.max_health
                     && unit.position.distance(origin_position) <= range)
-                .then_some(unit.id)
+                    .then_some(unit.id)
             })
             .min_by(|left, right| {
                 let left_unit = self.unit(*left).unwrap();
@@ -1241,10 +1240,14 @@ impl RtsWorld {
             self.selection.clear();
         }
         self.rebuild_spatial_index_if_dirty();
-        let candidates = {
+        let mut candidates = {
             let index = self.spatial_index.borrow();
             index.query_cell_ids(point, Self::POINT_SELECT_SEARCH_RADIUS)
         };
+        if candidates.is_empty() {
+            let index = self.spatial_index.borrow();
+            candidates = index.query_cell_ids(point, f32::INFINITY);
+        }
         let selected = candidates
             .into_iter()
             .filter_map(|id| self.unit(id))

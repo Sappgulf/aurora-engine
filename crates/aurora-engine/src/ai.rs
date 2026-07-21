@@ -53,14 +53,23 @@ struct AiUnitMemory {
     rally_point: Vec2,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PathCacheKey {
+    from: IVec2,
+    to: IVec2,
+}
+
 /// Per-attacker-faction memory (assigned target, retreat timers, rally
 /// point) driving a simple aggro-and-retreat behavior each tick.
 #[derive(Debug, Clone, Default)]
 pub struct SimpleAggroAi {
     memory: HashMap<UnitId, AiUnitMemory>,
+    path_cache: HashMap<PathCacheKey, Option<Vec2>>,
 }
 
 impl SimpleAggroAi {
+    const PATH_CACHE_MAX_ENTRIES: usize = 2048;
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -80,6 +89,9 @@ impl SimpleAggroAi {
         params: &AiParams,
         nav: Option<&NavGrid>,
     ) {
+        if self.path_cache.len() > Self::PATH_CACHE_MAX_ENTRIES {
+            self.path_cache.clear();
+        }
         let candidates: Vec<(UnitId, Vec2, f32)> = world
             .units()
             .iter()
@@ -207,7 +219,13 @@ impl SimpleAggroAi {
                 *assigned_counts.entry(target_id).or_insert(0) += 1;
             }
 
-            let order = approach_order(nav, position, target_position, target_id);
+            let order = approach_order(
+                nav,
+                position,
+                target_position,
+                target_id,
+                &mut self.path_cache,
+            );
             if let Some(unit) = world.unit_mut(id) {
                 unit.order = order;
             }
@@ -250,11 +268,18 @@ fn approach_order(
     from: Vec2,
     target_position: Vec2,
     target_id: UnitId,
+    path_cache: &mut HashMap<PathCacheKey, Option<Vec2>>,
 ) -> UnitOrder {
     if let Some(nav) = nav {
         if nav.segment_blocked(from, target_position) {
-            let path = nav.find_path(from, target_position);
-            if let Some(waypoint) = path.first() {
+            let key = PathCacheKey {
+                from: nav.world_to_cell(from),
+                to: nav.world_to_cell(target_position),
+            };
+            let maybe_waypoint = path_cache
+                .entry(key)
+                .or_insert_with(|| nav.find_path(from, target_position).first().copied());
+            if let Some(waypoint) = maybe_waypoint {
                 return UnitOrder::Move(*waypoint);
             }
         }
@@ -404,6 +429,7 @@ mod tests {
     #[test]
     fn approach_routes_around_blocked_segment() {
         let mut grid = NavGrid::new(5, 3, Vec2::ZERO, 10.0);
+        let mut path_cache = std::collections::HashMap::new();
         mark_obstacles(
             &mut grid,
             &[Aabb::from_center_size(
@@ -416,6 +442,7 @@ mod tests {
             Vec2::new(5.0, 15.0),
             Vec2::new(45.0, 15.0),
             UnitId(0),
+            &mut path_cache,
         );
         assert!(matches!(order, UnitOrder::Move(_)));
 
@@ -424,6 +451,7 @@ mod tests {
             Vec2::new(5.0, 5.0),
             Vec2::new(45.0, 5.0),
             UnitId(0),
+            &mut path_cache,
         );
         assert!(matches!(clear_order, UnitOrder::Attack(_)));
     }
