@@ -79,6 +79,7 @@ pub struct PathingStats {
     pub segment_block_checks: u64,
     pub path_cache_hits: u64,
     pub path_cache_misses: u64,
+    pub path_cache_evictions: u64,
     pub paths_planned: u64,
     pub path_segments_returned: u64,
 }
@@ -125,9 +126,7 @@ impl SimpleAggroAi {
     ) {
         self.sync_path_cache(nav);
         self.evict_stale_path_cache_entries(elapsed);
-        if self.path_cache.len() > Self::PATH_CACHE_MAX_ENTRIES {
-            self.path_cache.clear();
-        }
+        self.evict_excess_path_cache_entries();
         let candidates: Vec<(UnitId, Vec2, f32)> = world
             .units()
             .iter()
@@ -237,14 +236,18 @@ impl SimpleAggroAi {
                             position,
                             *a,
                             &assigned_counts,
-                            self.target_pressure.get(&a.0).map_or(0.0, |pressure| pressure.value),
+                            self.target_pressure
+                                .get(&a.0)
+                                .map_or(0.0, |pressure| pressure.value),
                             params,
                         )
                         .total_cmp(&score(
                             position,
                             *b,
                             &assigned_counts,
-                            self.target_pressure.get(&b.0).map_or(0.0, |pressure| pressure.value),
+                            self.target_pressure
+                                .get(&b.0)
+                                .map_or(0.0, |pressure| pressure.value),
                             params,
                         ))
                     })
@@ -267,7 +270,7 @@ impl SimpleAggroAi {
             }
             if should_retarget {
                 *assigned_counts.entry(target_id).or_insert(0) += 1;
-                self.note_target_pressure(target_id, elapsed, params);
+                self.note_target_pressure(target_id, elapsed);
             }
 
             let order = approach_order(
@@ -306,12 +309,48 @@ impl SimpleAggroAi {
 
     fn evict_stale_path_cache_entries(&mut self, elapsed: f32) {
         if !elapsed.is_finite() {
+            let evicted = u64::try_from(self.path_cache.len()).unwrap_or(u64::MAX);
+            self.pathing_stats.path_cache_evictions = self
+                .pathing_stats
+                .path_cache_evictions
+                .saturating_add(evicted);
             self.path_cache.clear();
             return;
         }
         let cutoff = f64::from(elapsed) - Self::PATH_CACHE_TTL_SECONDS;
+        let before = self.path_cache.len();
         self.path_cache
             .retain(|_, path| path.last_used_at >= cutoff);
+        let removed = before.saturating_sub(self.path_cache.len());
+        self.pathing_stats.path_cache_evictions = self
+            .pathing_stats
+            .path_cache_evictions
+            .saturating_add(u64::try_from(removed).unwrap_or(u64::MAX));
+    }
+
+    fn evict_excess_path_cache_entries(&mut self) {
+        let over_capacity = self
+            .path_cache
+            .len()
+            .saturating_sub(Self::PATH_CACHE_MAX_ENTRIES);
+        if over_capacity == 0 {
+            return;
+        }
+        let mut keys: Vec<(f64, PathCacheKey)> = self
+            .path_cache
+            .iter()
+            .map(|(key, path)| (path.last_used_at, *key))
+            .collect();
+        keys.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+
+        for (_, key) in keys.into_iter().take(over_capacity) {
+            if self.path_cache.remove(&key).is_some() {
+                self.pathing_stats.path_cache_evictions = self
+                    .pathing_stats
+                    .path_cache_evictions
+                    .saturating_add(1);
+            }
+        }
     }
 
     fn prune_and_decay_pressure(
@@ -345,24 +384,20 @@ impl SimpleAggroAi {
             .retain(|_, pressure| pressure.value > 0.000_1);
     }
 
-    fn note_target_pressure(&mut self, target_id: UnitId, elapsed: f32, params: &AiParams) {
+    fn note_target_pressure(&mut self, target_id: UnitId, elapsed: f32) {
         if !elapsed.is_finite() {
             return;
         }
         let now = f64::from(elapsed);
-        let entry = self.target_pressure.entry(target_id).or_insert(TargetPressure {
-            value: 0.0,
-            updated_at: now,
-        });
+        let entry = self
+            .target_pressure
+            .entry(target_id)
+            .or_insert(TargetPressure {
+                value: 0.0,
+                updated_at: now,
+            });
         entry.value += 1.0;
         entry.updated_at = now;
-    }
-
-    fn target_pressure_for(&self, target_id: UnitId) -> f32 {
-        self.target_pressure
-            .get(&target_id)
-            .map(|pressure| pressure.value)
-            .unwrap_or(0.0)
     }
 }
 
@@ -417,46 +452,38 @@ fn approach_order(
                 to: nav.world_to_cell(goal),
                 nav_version: nav.version(),
             };
-            let path = match path_cache.entry(key) {
+            let waypoint = match path_cache.entry(key) {
                 Entry::Occupied(mut entry) => {
                     path_stats.path_cache_hits = path_stats.path_cache_hits.saturating_add(1);
                     entry.get_mut().last_used_at = f64::from(elapsed);
-                    &entry.get().waypoints[..]
+                    next_waypoint(from, &entry.get().waypoints)
                 }
                 Entry::Vacant(entry) => {
                     path_stats.path_cache_misses = path_stats.path_cache_misses.saturating_add(1);
                     let waypoints = nav.find_path(start, goal);
                     path_stats.paths_planned = path_stats.paths_planned.saturating_add(1);
-                    entry.insert(CachedPath {
+                    let cached = entry.insert(CachedPath {
                         waypoints,
                         last_used_at: f64::from(elapsed),
                     });
-                    if let Some(cached) = path_cache.get(&key) {
-                        &cached.waypoints[..]
-                    } else {
-                        &[]
-                    }
+                    next_waypoint(from, &cached.waypoints)
                 }
             };
-            let next_waypoint = next_waypoint(from, path);
-            if let Some(waypoint) = next_waypoint {
+            if let Some(waypoint) = waypoint {
                 path_stats.path_segments_returned =
                     path_stats.path_segments_returned.saturating_add(1);
-                return UnitOrder::Move(*waypoint);
+                return UnitOrder::Move(waypoint);
             }
         }
     }
     UnitOrder::Attack(target_id)
 }
 
-fn next_waypoint(from: Vec2, path: &[Vec2]) -> Option<&Vec2> {
+fn next_waypoint(from: Vec2, path: &[Vec2]) -> Option<Vec2> {
     let reach_threshold = 1.0_f32;
-    for waypoint in path {
-        if from.distance(*waypoint) > reach_threshold {
-            return Some(waypoint);
-        }
-    }
-    None
+    path.iter()
+        .copied()
+        .find(|waypoint| from.distance(*waypoint) > reach_threshold)
 }
 
 /// Marks every `NavGrid` cell overlapping any of `obstacles` as blocked.
@@ -616,6 +643,8 @@ mod tests {
             &mut pathing_stats,
         );
         assert!(matches!(order, UnitOrder::Move(_)));
+        assert_eq!(pathing_stats.path_cache_misses, 1);
+        assert_eq!(pathing_stats.path_segments_returned, 1);
 
         let clear_order = approach_order(
             Some(&grid),
@@ -627,6 +656,52 @@ mod tests {
             &mut pathing_stats,
         );
         assert!(matches!(clear_order, UnitOrder::Attack(_)));
+    }
+
+    #[test]
+    fn cached_paths_report_hits_then_expire_after_the_ttl() {
+        let mut world = RtsWorld::default();
+        let attacker = world.spawn(ATTACKERS, Vec2::new(5.0, 15.0));
+        world.spawn(TARGETS, Vec2::new(65.0, 15.0));
+        let mut grid = NavGrid::new(7, 3, Vec2::ZERO, 10.0);
+        grid.set_blocked(IVec2::new(3, 1), true);
+
+        let mut ai = SimpleAggroAi::new();
+        ai.think(
+            &mut world,
+            ATTACKERS,
+            TARGETS,
+            0.0,
+            &AiParams::default(),
+            Some(&grid),
+        );
+        ai.clear_pathing_stats();
+        ai.think(
+            &mut world,
+            ATTACKERS,
+            TARGETS,
+            3.0,
+            &AiParams::default(),
+            Some(&grid),
+        );
+        assert_eq!(ai.pathing_stats().path_cache_hits, 1);
+        assert_eq!(ai.pathing_stats().path_cache_misses, 0);
+        assert!(matches!(
+            world.unit(attacker).unwrap().order,
+            UnitOrder::Move(_)
+        ));
+
+        ai.clear_pathing_stats();
+        ai.think(
+            &mut world,
+            ATTACKERS,
+            TARGETS,
+            10.0,
+            &AiParams::default(),
+            Some(&grid),
+        );
+        assert_eq!(ai.pathing_stats().path_cache_misses, 1);
+        assert_eq!(ai.pathing_stats().path_cache_hits, 0);
     }
 
     #[test]
@@ -684,7 +759,10 @@ mod tests {
             Some(&grid),
         );
         assert_eq!(ai.path_cache.len(), 1);
-        assert!(matches!(world.unit(attacker).unwrap().order, UnitOrder::Move(_)));
+        assert!(matches!(
+            world.unit(attacker).unwrap().order,
+            UnitOrder::Move(_)
+        ));
 
         grid.set_blocked(IVec2::new(3, 0), true);
         grid.set_blocked(IVec2::new(3, 2), true);
@@ -697,6 +775,82 @@ mod tests {
             Some(&grid),
         );
         assert_eq!(ai.path_cache.len(), 1);
-        assert!(matches!(world.unit(attacker).unwrap().order, UnitOrder::Attack(_)));
+        assert!(matches!(
+            world.unit(attacker).unwrap().order,
+            UnitOrder::Attack(_)
+        ));
+    }
+
+    #[test]
+    fn path_cache_evicts_oldest_entries_when_over_capacity() {
+        let mut world = RtsWorld::default();
+        let mut ai = SimpleAggroAi::new();
+        let cap = SimpleAggroAi::PATH_CACHE_MAX_ENTRIES;
+        for idx in 0..(cap + 7) {
+            ai.path_cache.insert(
+                PathCacheKey {
+                    from: IVec2::new(idx as i32, 0),
+                    to: IVec2::new(idx as i32 + 1, 0),
+                    nav_version: 0,
+                },
+                CachedPath {
+                    waypoints: Vec::new(),
+                    last_used_at: idx as f64,
+                },
+            );
+        }
+
+        ai.think(&mut world, ATTACKERS, TARGETS, 1.0, &AiParams::default(), None);
+
+        assert_eq!(ai.path_cache.len(), cap);
+        assert!(!ai
+            .path_cache
+            .contains_key(&PathCacheKey {
+                    from: IVec2::new(0, 0),
+                    to: IVec2::new(1, 0),
+                    nav_version: 0,
+                }));
+        assert!(ai
+            .path_cache
+            .contains_key(&PathCacheKey {
+                from: IVec2::new(cap as i32 + 6, 0),
+                to: IVec2::new(cap as i32 + 7, 0),
+                nav_version: 0,
+            }));
+        assert_eq!(ai.pathing_stats.path_cache_evictions, 7);
+    }
+
+    #[test]
+    fn target_pressure_decays_so_a_previously_skipped_target_can_return() {
+        let mut world = RtsWorld::default();
+        let attacker = world.spawn(ATTACKERS, Vec2::ZERO);
+        let first = world.spawn(TARGETS, Vec2::new(100.0, 0.0));
+        let second = world.spawn(TARGETS, Vec2::new(100.0, 1.0));
+        let params = AiParams {
+            retarget_interval: 1.0,
+            pressure_half_life_secs: 2.0,
+            ..Default::default()
+        };
+        let mut ai = SimpleAggroAi::new();
+
+        ai.think(&mut world, ATTACKERS, TARGETS, 0.0, &params, None);
+        assert_eq!(
+            world.unit(attacker).unwrap().order,
+            UnitOrder::Attack(first)
+        );
+
+        ai.think(&mut world, ATTACKERS, TARGETS, 1.1, &params, None);
+        assert_eq!(
+            world.unit(attacker).unwrap().order,
+            UnitOrder::Attack(second)
+        );
+
+        // The first target's pressure has had time to decay below the second
+        // target's newer pressure, so deterministic scoring returns to it.
+        ai.think(&mut world, ATTACKERS, TARGETS, 3.1, &params, None);
+        assert_eq!(
+            world.unit(attacker).unwrap().order,
+            UnitOrder::Attack(first)
+        );
     }
 }
