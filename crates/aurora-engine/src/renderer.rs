@@ -1,6 +1,7 @@
 //! GPU renderer: clear + multi-texture sprite batches + optional debug triangle.
 
 use std::sync::Arc;
+use std::fmt;
 
 #[cfg(feature = "3d")]
 use glam::Vec3;
@@ -29,6 +30,7 @@ pub struct TextureHandle(pub(crate) usize);
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RenderStats {
     pub queued_sprites: usize,
+    pub invalid_sprites: usize,
     pub drawn_sprites: usize,
     pub draw_calls: usize,
     pub queued_lights: usize,
@@ -261,8 +263,33 @@ fn logical_viewport(size: winit::dpi::PhysicalSize<u32>, scale_factor: f64) -> (
     )
 }
 
+#[derive(Debug)]
+pub enum RendererInitError {
+    SurfaceCreate(String),
+    AdapterUnavailable,
+    RequestDevice(String),
+    MissingSurfaceFormat,
+    MissingPresentMode,
+    MissingAlphaMode,
+}
+
+impl fmt::Display for RendererInitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SurfaceCreate(error) => write!(f, "failed to create WGPU surface: {error}"),
+            Self::AdapterUnavailable => write!(f, "no compatible GPU adapter found"),
+            Self::RequestDevice(error) => write!(f, "failed to create WGPU device: {error}"),
+            Self::MissingSurfaceFormat => write!(f, "device exposed no supported surface format"),
+            Self::MissingPresentMode => write!(f, "device exposed no supported present mode"),
+            Self::MissingAlphaMode => write!(f, "device exposed no supported alpha mode"),
+        }
+    }
+}
+
+impl std::error::Error for RendererInitError {}
+
 impl Renderer {
-    pub async fn new(window: Arc<Window>) -> Self {
+    pub async fn new(window: Arc<Window>) -> Result<Self, RendererInitError> {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
@@ -276,7 +303,7 @@ impl Renderer {
 
         let surface = instance
             .create_surface(window.clone())
-            .expect("failed to create wgpu surface");
+            .map_err(|error| RendererInitError::SurfaceCreate(error.to_string()))?;
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -285,7 +312,7 @@ impl Renderer {
                 force_fallback_adapter: false,
             })
             .await
-            .expect("failed to find a suitable GPU adapter");
+            .ok_or(RendererInitError::AdapterUnavailable)?;
 
         let (device, queue) = adapter
             .request_device(
@@ -302,7 +329,7 @@ impl Renderer {
                 None,
             )
             .await
-            .expect("failed to create GPU device");
+            .map_err(|error| RendererInitError::RequestDevice(error.to_string()))?;
 
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
@@ -310,7 +337,8 @@ impl Renderer {
             .iter()
             .copied()
             .find(|f| f.is_srgb())
-            .unwrap_or(surface_caps.formats[0]);
+            .or_else(|| surface_caps.formats.first().copied())
+            .ok_or(RendererInitError::MissingSurfaceFormat)?;
         // FIFO is the portable VSync mode. Selecting it deliberately keeps
         // Aurora's 60 Hz simulation from presenting with unstable pacing.
         let present_mode = surface_caps
@@ -318,7 +346,13 @@ impl Renderer {
             .iter()
             .copied()
             .find(|mode| *mode == wgpu::PresentMode::Fifo)
-            .unwrap_or(surface_caps.present_modes[0]);
+            .or_else(|| surface_caps.present_modes.first().copied())
+            .ok_or(RendererInitError::MissingPresentMode)?;
+        let alpha_mode = surface_caps
+            .alpha_modes
+            .first()
+            .copied()
+            .ok_or(RendererInitError::MissingAlphaMode)?;
 
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut surface_usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
@@ -335,7 +369,7 @@ impl Renderer {
             width,
             height,
             present_mode,
-            alpha_mode: surface_caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -689,7 +723,7 @@ impl Renderer {
             surface_format
         );
 
-        Self {
+        Ok(Self {
             surface,
             device,
             queue,
@@ -742,7 +776,7 @@ impl Renderer {
             mesh3d_queue: Vec::new(),
             #[cfg(feature = "3d")]
             mesh3d_scene: Scene3DState::default(),
-        }
+        })
     }
 
     /// Borrow GPU handles for creating textures / buffers.
@@ -810,9 +844,7 @@ impl Renderer {
 
     /// Queue a sprite for the next frame (call during `on_update`).
     pub fn draw_sprite(&mut self, texture: TextureHandle, sprite: Sprite) {
-        if texture.0 < self.textures.len() {
-            self.draw_queue.push(QueuedSprite { texture, sprite });
-        }
+        self.draw_queue.push(QueuedSprite { texture, sprite });
     }
 
     /// Queue a radial HDR light for this frame. Lights are automatically
@@ -1005,7 +1037,8 @@ impl Renderer {
         let composed_lights = lights.len().min(self.quality.light_budget());
         self.stats = RenderStats {
             queued_sprites: queue.len(),
-            drawn_sprites: queue.len(),
+            drawn_sprites: 0,
+            invalid_sprites: 0,
             draw_calls: 0,
             queued_lights: lights.len(),
             composed_lights,
@@ -1027,14 +1060,18 @@ impl Renderer {
             while i < queue.len() {
                 let tex = queue[i].texture;
                 let index_start = all_indices.len() as u32;
-                let vert_base_start = all_vertices.len() as u32;
-                let mut local_verts = 0u32;
+                let mut local_sprites = 0u32;
                 while i < queue.len() && queue[i].texture == tex {
-                    push_sprite_mesh(&queue[i].sprite, &mut all_vertices, &mut all_indices);
-                    local_verts += 4;
+                    if tex.0 < self.textures.len() {
+                        push_sprite_mesh(&queue[i].sprite, &mut all_vertices, &mut all_indices);
+                        local_sprites += 1;
+                    } else {
+                        self.stats.invalid_sprites += 1;
+                    }
                     i += 1;
-                    let _ = (vert_base_start, local_verts);
                 }
+                self.stats.drawn_sprites += local_sprites as usize;
+
                 let index_count = all_indices.len() as u32 - index_start;
                 if index_count > 0 {
                     self.stats.draw_calls += 1;
@@ -1207,9 +1244,16 @@ impl Renderer {
                 let unpadded_bytes_per_row = self.config.width * bytes_per_pixel;
                 let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
                 let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+                let Some(buffer_size) = u64::from(padded_bytes_per_row)
+                    .checked_mul(u64::from(self.config.height))
+                    .and_then(|bytes| wgpu::BufferAddress::try_from(bytes).ok())
+                else {
+                    log::warn!("screenshot capture aborted: pixel buffer size overflow");
+                    return None;
+                };
                 let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("Screenshot Buffer"),
-                    size: (padded_bytes_per_row * self.config.height) as wgpu::BufferAddress,
+                    size: buffer_size,
                     usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                     mapped_at_creation: false,
                 });
@@ -1234,8 +1278,9 @@ impl Renderer {
                         depth_or_array_layers: 1,
                     },
                 );
-                (path, buffer, padded_bytes_per_row, unpadded_bytes_per_row)
-            });
+                Some((path, buffer, padded_bytes_per_row, unpadded_bytes_per_row))
+            })
+            .flatten();
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
@@ -1269,6 +1314,22 @@ impl Renderer {
     ) {
         let width = self.config.width;
         let height = self.config.height;
+        let Some(height_rows) = usize::try_from(height).ok() else {
+            log::warn!("screenshot write skipped: invalid capture height");
+            return;
+        };
+        let Some(padded_row_bytes) = usize::try_from(padded_bytes_per_row).ok() else {
+            log::warn!("screenshot write skipped: invalid padded row stride");
+            return;
+        };
+        let Some(unpadded_row_bytes) = usize::try_from(unpadded_bytes_per_row).ok() else {
+            log::warn!("screenshot write skipped: invalid unpadded row stride");
+            return;
+        };
+        let Some(pixel_buffer_size) = unpadded_row_bytes.checked_mul(height_rows) else {
+            log::warn!("screenshot write skipped: row buffer size overflow");
+            return;
+        };
         let slice = buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -1279,15 +1340,32 @@ impl Renderer {
             log::warn!("screenshot buffer map failed");
             return;
         };
-        let mut pixels = vec![0u8; (unpadded_bytes_per_row * height) as usize];
+        let mut pixels = vec![0u8; pixel_buffer_size];
         {
             let data = slice.get_mapped_range();
-            for row in 0..height {
-                let src_start = (row * padded_bytes_per_row) as usize;
-                let dst_start = (row * unpadded_bytes_per_row) as usize;
-                let row_len = unpadded_bytes_per_row as usize;
-                pixels[dst_start..dst_start + row_len]
-                    .copy_from_slice(&data[src_start..src_start + row_len]);
+            for row in 0..height_rows {
+                let Some(src_start) = row.checked_mul(padded_row_bytes) else {
+                    log::warn!("screenshot write skipped: source row overflow");
+                    return;
+                };
+                let Some(dst_start) = row.checked_mul(unpadded_row_bytes) else {
+                    log::warn!("screenshot write skipped: destination row overflow");
+                    return;
+                };
+                let Some(src_end) = src_start.checked_add(unpadded_row_bytes) else {
+                    log::warn!("screenshot write skipped: source row overflow");
+                    return;
+                };
+                let Some(dst_end) = dst_start.checked_add(unpadded_row_bytes) else {
+                    log::warn!("screenshot write skipped: destination row overflow");
+                    return;
+                };
+                if src_end > data.len() || dst_end > pixels.len() {
+                    log::warn!("screenshot write skipped: capture row bounds exceeded");
+                    return;
+                }
+                pixels[dst_start..dst_end]
+                    .copy_from_slice(&data[src_start..src_end]);
             }
         }
         buffer.unmap();

@@ -27,6 +27,87 @@ pub struct PlacementRules {
     pub max_power_distance: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlobId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionBlob {
+    pub id: BlobId,
+    pub center: Vec2,
+    pub radius: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlockId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionBlock {
+    pub id: BlockId,
+    pub bounds: Aabb,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FlubberId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlubberBlob {
+    pub id: FlubberId,
+    pub position: Vec2,
+    pub velocity: Vec2,
+    pub radius: f32,
+    /// Directional stretch from the neutral shape. Positive stretch values pull
+    /// the blob outward; the update loop applies a mass-spring relaxation.
+    pub stretch: Vec2,
+    /// Rate of change for stretch deformation.
+    pub stretch_velocity: Vec2,
+    pub rest_radius: f32,
+    /// Maximum stretch length in world units before clamping.
+    pub max_stretch: f32,
+    /// Spring constant restoring the blob toward its neutral shape.
+    pub elasticity: f32,
+    /// Passive damping factor that keeps oscillation under control.
+    pub damping: f32,
+    /// Velocity inversion on bounce, where 1.0 is perfectly elastic and 0.0 is
+    /// fully absorbed.
+    pub restitution: f32,
+    /// Physical mass scalar for impulse mapping.
+    pub mass: f32,
+}
+
+impl FlubberBlob {
+    pub const fn new(id: FlubberId, position: Vec2, radius: f32) -> Self {
+        let rest_radius = radius.max(1.0);
+        Self {
+            id,
+            position,
+            velocity: Vec2::ZERO,
+            radius: rest_radius,
+            stretch: Vec2::ZERO,
+            stretch_velocity: Vec2::ZERO,
+            rest_radius,
+            max_stretch: rest_radius * 3.0,
+            elasticity: 24.0,
+            damping: 20.0,
+            restitution: 0.46,
+            mass: 1.0,
+        }
+    }
+
+    fn effective_radius(self) -> f32 {
+        self.radius + self.stretch.length().min(self.max_stretch)
+    }
+
+    fn apply_slap(&mut self, impulse: Vec2) {
+        let mass = self.mass.max(0.001);
+        let impulse = if impulse.is_finite() { impulse } else { Vec2::ZERO };
+        self.velocity += impulse / mass;
+        // Split the impact between rigid motion and local deformation so the
+        // blob feels both velocity and visible squash.
+        self.stretch_velocity += impulse / (mass * 2.1);
+        self.stretch += impulse * 0.005 / mass;
+    }
+}
+
 impl PlacementRules {
     pub fn validate(&self, position: Vec2, radius: f32) -> Result<(), PlacementError> {
         let radius = radius.max(0.0);
@@ -1223,6 +1304,11 @@ impl PowerGrid {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UnitId(pub u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtsSpawnError {
+    UnitIdExhausted,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FactionId(pub u8);
 
@@ -1253,6 +1339,24 @@ pub struct RtsUnit {
     /// on the target's origin.
     pub engagement_range: f32,
     pub speed: f32,
+    /// Maximum acceleration and deceleration in world units per second squared.
+    ///
+    /// A larger value feels snappier; smaller values produce smoother RTS
+    /// strafing and coasted turns.
+    pub acceleration: f32,
+    /// Deceleration used for arrival damping once a target is in stopping
+    /// range.
+    pub deceleration: f32,
+    /// Optional per-unit speed multiplier for temporary boosts, stutters, or
+    /// role-based speed tuning. A value <= 0.0 means frozen movement.
+    pub speed_scale: f32,
+    /// Steering gain applied to the acceleration ramp. Lower values make turns
+    /// and corrections feel heavier; higher values feel sharper/"insaner".
+    pub steering: f32,
+    /// Influence radius for unit separation steering. Zero disables this unit.
+    pub separation_radius: f32,
+    /// Strength in world units per second for separation impulses.
+    pub separation_strength: f32,
     pub health: f32,
     pub max_health: f32,
     /// Weapon and armor tuning consumed by [`RtsCombatResolver`]. Games that
@@ -1273,6 +1377,12 @@ impl RtsUnit {
             radius: 28.0,
             engagement_range: 0.0,
             speed: 180.0,
+            acceleration: 3_000.0,
+            deceleration: 4_500.0,
+            speed_scale: 1.0,
+            steering: 1.0,
+            separation_radius: 0.0,
+            separation_strength: 0.0,
             health: 100.0,
             max_health: 100.0,
             combat: CombatProfile::default(),
@@ -1333,6 +1443,12 @@ impl SelectionBox {
 #[derive(Debug, Clone)]
 pub struct RtsWorld {
     units: Vec<RtsUnit>,
+    blobs: Vec<MotionBlob>,
+    blocks: Vec<MotionBlock>,
+    flubbers: Vec<FlubberBlob>,
+    next_blob_id: u32,
+    next_flubber_id: u32,
+    next_block_id: u32,
     selection: Selection,
     control_groups: [Vec<UnitId>; 10],
     next_id: u32,
@@ -1344,6 +1460,12 @@ impl Default for RtsWorld {
     fn default() -> Self {
         Self {
             units: Vec::new(),
+            blobs: Vec::new(),
+            blocks: Vec::new(),
+            flubbers: Vec::new(),
+            next_blob_id: 0,
+            next_flubber_id: 0,
+            next_block_id: 0,
             selection: Selection::default(),
             control_groups: std::array::from_fn(|_| Vec::new()),
             next_id: 0,
@@ -1359,11 +1481,431 @@ impl RtsWorld {
     const BOUNDS_SELECT_PADDING: f32 = 192.0;
 
     pub fn spawn(&mut self, faction: FactionId, position: Vec2) -> UnitId {
-        let id = UnitId(self.next_id);
-        self.next_id = self.next_id.saturating_add(1);
+        self.try_spawn(faction, position).expect("RTS unit ID allocator exhausted")
+    }
+
+    pub fn try_spawn(
+        &mut self,
+        faction: FactionId,
+        position: Vec2,
+    ) -> Result<UnitId, RtsSpawnError> {
+        let position = if position.is_finite() { position } else { Vec2::ZERO };
+        let id = (self.next_id != u32::MAX).then_some(UnitId(self.next_id));
+        let id = id.ok_or(RtsSpawnError::UnitIdExhausted)?;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or(RtsSpawnError::UnitIdExhausted)?;
         self.units.push(RtsUnit::new(id, faction, position));
         self.spatial_dirty.set(true);
-        id
+        Ok(id)
+    }
+
+    pub fn add_blob_obstacle(&mut self, center: Vec2, radius: f32) -> Option<BlobId> {
+        if !center.is_finite() || !radius.is_finite() {
+            return None;
+        }
+        let id = BlobId(self.next_blob_id);
+        self.next_blob_id = self.next_blob_id.checked_add(1)?;
+        self.blobs.push(MotionBlob {
+            id,
+            center,
+            radius: radius.max(0.0),
+        });
+        Some(id)
+    }
+
+    pub fn remove_blob_obstacle(&mut self, id: BlobId) -> bool {
+        let before = self.blobs.len();
+        self.blobs.retain(|blob| blob.id != id);
+        before != self.blobs.len()
+    }
+
+    pub fn add_block_obstacle(&mut self, bounds: Aabb) -> Option<BlockId> {
+        if !bounds.min.is_finite() || !bounds.max.is_finite() {
+            return None;
+        }
+        let id = BlockId(self.next_block_id);
+        self.next_block_id = self.next_block_id.checked_add(1)?;
+        self.blocks.push(MotionBlock { id, bounds });
+        Some(id)
+    }
+
+    pub fn remove_block_obstacle(&mut self, id: BlockId) -> bool {
+        let before = self.blocks.len();
+        self.blocks.retain(|block| block.id != id);
+        before != self.blocks.len()
+    }
+
+    pub fn clear_motion_obstacles(&mut self) {
+        self.blobs.clear();
+        self.blocks.clear();
+    }
+
+    pub fn add_flubber(&mut self, position: Vec2, radius: f32) -> Option<FlubberId> {
+        if !position.is_finite() || !radius.is_finite() {
+            return None;
+        }
+        let id = FlubberId(self.next_flubber_id);
+        self.next_flubber_id = self.next_flubber_id.checked_add(1)?;
+        self.flubbers.push(FlubberBlob::new(id, position, radius));
+        Some(id)
+    }
+
+    pub fn remove_flubber(&mut self, id: FlubberId) -> bool {
+        let before = self.flubbers.len();
+        self.flubbers.retain(|flubber| flubber.id != id);
+        before != self.flubbers.len()
+    }
+
+    pub fn flubbers(&self) -> &[FlubberBlob] {
+        &self.flubbers
+    }
+
+    pub fn flubber(&self, id: FlubberId) -> Option<&FlubberBlob> {
+        self.flubbers.iter().find(|flubber| flubber.id == id)
+    }
+
+    pub fn flubber_mut(&mut self, id: FlubberId) -> Option<&mut FlubberBlob> {
+        self.flubbers.iter_mut().find(|flubber| flubber.id == id)
+    }
+
+    pub fn slap_flubber(&mut self, id: FlubberId, impulse: Vec2) -> bool {
+        let Some(flubber) = self.flubber_mut(id) else {
+            return false;
+        };
+        flubber.apply_slap(impulse);
+        true
+    }
+
+    pub fn slap_flubber_at(
+        &mut self,
+        point: Vec2,
+        radius: f32,
+        impulse_magnitude: f32,
+    ) -> Option<FlubberId> {
+        if !point.is_finite() {
+            return None;
+        }
+        let radius = radius.max(0.0);
+        let impulse_magnitude = impulse_magnitude.max(0.0);
+        if radius == 0.0 || impulse_magnitude == 0.0 {
+            return None;
+        }
+
+        let mut best = None;
+        let mut best_distance = f32::INFINITY;
+        let mut best_index = 0_usize;
+
+        for (index, flubber) in self.flubbers.iter().enumerate() {
+            if !flubber.position.is_finite() {
+                continue;
+            }
+            let delta = flubber.position - point;
+            let distance_sq = delta.length_squared();
+            if distance_sq <= radius * radius && distance_sq < best_distance {
+                best_distance = distance_sq;
+                best = Some(flubber.id);
+                best_index = index;
+            }
+        }
+
+        let Some(id) = best else {
+            return None;
+        };
+        let Some(flubber) = self.flubbers.get(best_index).copied() else {
+            return None;
+        };
+
+        let mut direction = flubber.position - point;
+        if direction.length_squared() <= f32::EPSILON {
+            direction = Vec2::Y;
+        } else {
+            direction /= direction.length();
+        }
+        if let Some(target) = self.flubber_mut(id) {
+            target.apply_slap(direction * impulse_magnitude);
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    pub fn can_place_building(
+        &self,
+        rules: &PlacementRules,
+        position: Vec2,
+        radius: f32,
+    ) -> Result<(), PlacementError> {
+        rules.validate(position, radius)?;
+
+        if !position.is_finite() {
+            return Err(PlacementError::Obstructed);
+        }
+
+        let radius = radius.max(0.0);
+        for unit in self.units.iter().filter(|unit| unit.alive()) {
+            if unit.position.is_finite() && unit.position.distance(position) <= radius + unit.radius.max(0.0) {
+                return Err(PlacementError::Obstructed);
+            }
+        }
+
+        if Self::is_position_in_blobs(position, radius, &self.blobs)
+            || Self::is_position_in_blocks(position, radius, &self.blocks)
+        {
+            return Err(PlacementError::Obstructed);
+        }
+
+        Ok(())
+    }
+
+    fn is_position_in_blobs(
+        position: Vec2,
+        radius: f32,
+        blobs: &[MotionBlob],
+    ) -> bool {
+        let radius = radius.max(0.0);
+        blobs
+            .iter()
+            .any(|blob| position.distance(blob.center) <= radius + blob.radius.max(0.0))
+    }
+
+    fn is_position_in_blocks(
+        position: Vec2,
+        radius: f32,
+        blocks: &[MotionBlock],
+    ) -> bool {
+        let radius = radius.max(0.0);
+        blocks.iter().any(|block| {
+            block
+                .bounds
+                .inflated(radius)
+                .contains_point(position)
+        })
+    }
+
+    fn block_penetration_push(
+        position: Vec2,
+        radius: f32,
+        block: MotionBlock,
+    ) -> Vec2 {
+        let bounds = block.bounds.inflated(radius.max(0.0));
+        if !Self::point_in_aabb(bounds, position) {
+            return Vec2::ZERO;
+        }
+        let left = position.x - bounds.min.x;
+        let right = bounds.max.x - position.x;
+        let bottom = position.y - bounds.min.y;
+        let top = bounds.max.y - position.y;
+        let min_distance = left.min(right).min(bottom).min(top);
+        if min_distance == left {
+            Vec2::new(-left, 0.0)
+        } else if min_distance == right {
+            Vec2::new(right, 0.0)
+        } else if min_distance == bottom {
+            Vec2::new(0.0, -bottom)
+        } else {
+            Vec2::new(0.0, top)
+        }
+    }
+
+    fn resolve_motion_obstacle_push(
+        mut position: Vec2,
+        radius: f32,
+        blobs: &[MotionBlob],
+        blocks: &[MotionBlock],
+    ) -> Vec2 {
+        let radius = radius.max(0.0);
+        for _ in 0..4 {
+            let mut resolved = Vec2::ZERO;
+            for blob in blobs {
+                let mut away = position - blob.center;
+                let threshold = radius + blob.radius.max(0.0);
+                let distance = away.length();
+                if distance < threshold {
+                    if distance <= f32::EPSILON {
+                        away = Vec2::X;
+                    } else {
+                        away = away / distance;
+                    }
+                    resolved += away * (threshold - distance).max(0.0);
+                }
+            }
+            for block in blocks {
+                resolved += Self::block_penetration_push(position, radius, *block);
+            }
+            if resolved.length_squared() <= f32::EPSILON {
+                break;
+            }
+            position += resolved;
+        }
+        position
+    }
+
+    fn separation_impulse(
+        id: UnitId,
+        position: Vec2,
+        radius: f32,
+        separation_radius: f32,
+        separation_strength: f32,
+        neighbors: &[(UnitId, Vec2, f32)],
+    ) -> Vec2 {
+        if !(separation_strength.is_finite() && separation_strength > 0.0) {
+            return Vec2::ZERO;
+        }
+        let separation_radius = separation_radius.max(0.0);
+        let radius = radius.max(0.0);
+        if separation_radius <= 0.0 {
+            return Vec2::ZERO;
+        }
+
+        let mut impulse = Vec2::ZERO;
+        for &(other_id, other_position, other_radius) in neighbors {
+            if other_id == id {
+                continue;
+            }
+            let to_unit = position - other_position;
+            let mut distance = to_unit.length();
+            let other_radius = other_radius.max(0.0);
+            let safe_distance = separation_radius + radius + other_radius;
+            if distance >= safe_distance || distance <= f32::EPSILON {
+                if distance <= f32::EPSILON {
+                    continue;
+                }
+                continue;
+            }
+            distance = distance.max(f32::EPSILON);
+            let overlap = (safe_distance - distance) / safe_distance;
+            impulse += to_unit / distance * (separation_strength * overlap);
+        }
+        impulse
+    }
+
+    fn obstacle_repulsion(
+        position: Vec2,
+        radius: f32,
+        blobs: &[MotionBlob],
+        blocks: &[MotionBlock],
+        separation_radius: f32,
+        strength: f32,
+    ) -> Vec2 {
+        if !(strength.is_finite() && strength > 0.0) {
+            return Vec2::ZERO;
+        }
+        let radius = radius.max(0.0);
+        let separation_radius = separation_radius.max(0.0);
+        let mut impulse = Vec2::ZERO;
+        for blob in blobs {
+            let mut away = position - blob.center;
+            let clear = radius + blob.radius.max(0.0);
+            let distance = away.length();
+            if distance < clear + separation_radius {
+                if distance <= f32::EPSILON {
+                    away = Vec2::Y;
+                } else {
+                    away /= distance;
+                }
+                let falloff = ((clear + separation_radius) - distance) / (clear + separation_radius.max(f32::EPSILON));
+                impulse += away * (strength * falloff);
+            }
+        }
+        for block in blocks {
+            let expanded = block.bounds.inflated(radius + separation_radius);
+            if !Self::point_in_aabb(expanded, position) {
+                continue;
+            }
+            let push = Self::block_penetration_push(position, radius + separation_radius, *block);
+            let push_length = push.length();
+            if push_length <= f32::EPSILON {
+                continue;
+            }
+            impulse += push.normalize() * (strength * push_length);
+        }
+        impulse
+    }
+
+    fn update_flubbers(
+        &mut self,
+        dt: f32,
+        blobs: &[MotionBlob],
+        blocks: &[MotionBlock],
+    ) -> bool {
+        let mut moved = false;
+        for flubber in &mut self.flubbers {
+            let previous_position = flubber.position;
+            if !flubber.position.is_finite() {
+                flubber.position = Vec2::ZERO;
+                flubber.velocity = Vec2::ZERO;
+                flubber.stretch = Vec2::ZERO;
+                flubber.stretch_velocity = Vec2::ZERO;
+                continue;
+            }
+
+            // Internal spring: stretch is pulled back toward zero with a little
+            // damping so repeated slaps ring and settle naturally.
+            let stretch_force = -flubber.stretch * flubber.elasticity;
+            let damping_force = -flubber.stretch_velocity * flubber.damping;
+            flubber.stretch_velocity += (stretch_force + damping_force) * dt;
+
+            let damp = (1.0 - flubber.damping * dt * 0.06).clamp(0.0, 1.0);
+            flubber.velocity *= damp;
+            flubber.stretch_velocity *= damp;
+
+            flubber.stretch += flubber.stretch_velocity * dt;
+            let stretch_len = flubber.stretch.length();
+            if stretch_len > flubber.max_stretch {
+                flubber.stretch = flubber.stretch / stretch_len * flubber.max_stretch;
+            }
+
+            // Soft body inertia: local stretch injects corrective velocity so
+            // the body visibly snaps back after impact.
+            flubber.velocity += -flubber.stretch * (flubber.elasticity * 0.22) * dt;
+
+            let effective_radius = flubber.effective_radius().max(1.0);
+            let mut desired_velocity = flubber.velocity
+                + Self::obstacle_repulsion(
+                    flubber.position,
+                    flubber.radius,
+                    blobs,
+                    blocks,
+                    34.0,
+                    flubber.elasticity,
+                )
+                    * 0.5;
+
+            // Clamp speed to avoid tunneling with small dt spikes.
+            let speed = desired_velocity.length();
+            if speed > 4200.0 {
+                desired_velocity = desired_velocity / speed * 4200.0;
+            }
+
+            let next_position = flubber.position + desired_velocity * dt;
+            let resolved_position = Self::resolve_motion_obstacle_push(
+                next_position,
+                effective_radius,
+                blobs,
+                blocks,
+            );
+
+            if resolved_position != next_position {
+                flubber.velocity = -desired_velocity * flubber.restitution;
+            } else {
+                flubber.velocity = desired_velocity;
+            }
+
+            flubber.position = resolved_position;
+            if flubber.position != previous_position {
+                moved = true;
+            }
+        }
+        moved
+    }
+
+    fn point_in_aabb(bounds: Aabb, position: Vec2) -> bool {
+        position.x >= bounds.min.x
+            && position.x <= bounds.max.x
+            && position.y >= bounds.min.y
+            && position.y <= bounds.max.y
     }
 
     pub fn units(&self) -> &[RtsUnit] {
@@ -1759,12 +2301,51 @@ impl RtsWorld {
         }
     }
 
+    /// Tuning command: scale movement speed for every selected unit.
+    pub fn issue_speed_scale(&mut self, speed_scale: f32) {
+        let speed_scale = speed_scale.max(0.0);
+        let ids = self.selection.ids.clone();
+        for id in ids {
+            if let Some(unit) = self.unit_mut(id) {
+                unit.speed_scale = speed_scale;
+            }
+        }
+    }
+
+    /// Tuning command: adjust steering responsiveness for every selected unit.
+    pub fn issue_steering(&mut self, steering: f32) {
+        let steering = steering.max(0.0);
+        let ids = self.selection.ids.clone();
+        for id in ids {
+            if let Some(unit) = self.unit_mut(id) {
+                unit.steering = steering;
+            }
+        }
+    }
+
+    /// Tuning command: adjust unit-to-unit separation profile for selected units.
+    pub fn issue_separation_profile(&mut self, radius: f32, strength: f32) {
+        let radius = radius.max(0.0);
+        let strength = strength.max(0.0);
+        let ids = self.selection.ids.clone();
+        for id in ids {
+            if let Some(unit) = self.unit_mut(id) {
+                unit.separation_radius = radius;
+                unit.separation_strength = strength;
+            }
+        }
+    }
+
     pub fn update(&mut self, dt: f32) {
-        let dt = dt.max(0.0);
-        let positions: Vec<(UnitId, Vec2, bool)> = self
+        let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        let blob_obstacles = self.blobs.clone();
+        let block_obstacles = self.blocks.clone();
+        let flubbers_moved = self.update_flubbers(dt, &blob_obstacles, &block_obstacles);
+        let neighbors: Vec<(UnitId, Vec2, f32)> = self
             .units
             .iter()
-            .map(|unit| (unit.id, unit.position, unit.alive()))
+            .filter(|unit| unit.alive() && unit.position.is_finite())
+            .map(|unit| (unit.id, unit.position, unit.radius.max(0.0)))
             .collect();
         let mut moved = false;
         for unit in &mut self.units {
@@ -1773,18 +2354,27 @@ impl RtsWorld {
                 unit.velocity = Vec2::ZERO;
                 continue;
             }
+            if !unit.position.is_finite() {
+                unit.position = Vec2::ZERO;
+                unit.velocity = Vec2::ZERO;
+                continue;
+            }
             let target = match unit.order {
                 UnitOrder::Move(target)
                 | UnitOrder::AttackMove(target)
                 | UnitOrder::Interact(target) => Some(target),
-                UnitOrder::Attack(id) => positions
-                    .iter()
-                    .find(|(candidate, _, alive)| *candidate == id && *alive)
-                    .map(|(_, position, _)| *position),
-                UnitOrder::Follow(id) => positions
-                    .iter()
-                    .find(|(candidate, _, alive)| *candidate == id && *alive)
-                    .map(|(_, position, _)| *position),
+                UnitOrder::Attack(id) => {
+                    neighbors
+                        .iter()
+                        .find(|(candidate, _, _)| *candidate == id)
+                        .map(|(_, position, _)| *position)
+                }
+                UnitOrder::Follow(id) => {
+                    neighbors
+                        .iter()
+                        .find(|(candidate, _, _)| *candidate == id)
+                        .map(|(_, position, _)| *position)
+                }
                 UnitOrder::Patrol(first, _) => Some(first),
                 UnitOrder::Idle | UnitOrder::Hold => None,
             };
@@ -1802,32 +2392,103 @@ impl RtsWorld {
                 unit.velocity = Vec2::ZERO;
                 continue;
             };
+            if !target.is_finite() {
+                unit.velocity = Vec2::ZERO;
+                continue;
+            }
             let offset = target - unit.position;
             let distance = offset.length();
-            let arrival_radius = unit.radius.max(0.0) * 0.35;
+            let radius = unit.radius.max(0.0);
+            let arrival_radius = radius * 0.35;
+            let steering = unit.steering.max(0.0);
+            let speed_scale = unit.speed_scale.max(0.0);
+            let speed = unit.speed.max(0.0) * speed_scale;
+            if !distance.is_finite() || !speed.is_finite() || speed <= 0.0 {
+                unit.velocity = Vec2::ZERO;
+                continue;
+            }
+            let direction = if distance > f32::EPSILON {
+                offset / distance
+            } else {
+                Vec2::ZERO
+            };
             let engagement_range = match unit.order {
                 UnitOrder::Attack(_) => unit.engagement_range.max(0.0),
                 _ => 0.0,
             };
-            // Attack orders have a distinct firing line. Once a unit is
-            // inside that envelope it must hold position and keep its order;
-            // the combat resolver can then apply damage without the movement
-            // integrator pushing the unit through the target.
-            if engagement_range > arrival_radius && distance <= engagement_range {
-                unit.velocity = Vec2::ZERO;
-                continue;
+            let stop_distance = if engagement_range > arrival_radius {
+                engagement_range
+            } else {
+                arrival_radius
+            };
+            let remaining_to_stop = (distance - stop_distance).max(0.0);
+            let deceleration = if unit.deceleration.is_finite() && unit.deceleration > 0.0 {
+                unit.deceleration
+            } else {
+                1.0
+            };
+            let speed_cap = speed * speed / (2.0 * deceleration);
+            let target_speed = if remaining_to_stop < speed_cap {
+                if speed_cap > 0.0 {
+                    speed * (remaining_to_stop / speed_cap)
+                } else {
+                    0.0
+                }
+            } else {
+                speed
             }
-            // Clamp the integration step to the destination. Without this,
-            // a hitch or a headless simulation tick can overshoot a waypoint
-            // and make the unit oscillate around it forever.
-            let step = unit.speed.max(0.0) * dt;
-            let stopping_distance = engagement_range.max(arrival_radius);
-            if distance <= arrival_radius || distance <= step + stopping_distance {
-                if engagement_range > arrival_radius && distance > f32::EPSILON {
-                    // Place the unit exactly on the near edge of its firing
-                    // envelope. The order remains Attack, so a later target
-                    // death or retarget can advance naturally.
-                    unit.position = target - offset / distance * engagement_range;
+            .min(speed);
+            let mut desired_velocity = if distance.is_finite() {
+                direction * target_speed
+            } else {
+                Vec2::ZERO
+            };
+            desired_velocity += Self::separation_impulse(
+                unit.id,
+                unit.position,
+                radius,
+                unit.separation_radius.max(0.0),
+                unit.separation_strength.max(0.0),
+                &neighbors,
+            ) * (1.0 + steering);
+            desired_velocity += Self::obstacle_repulsion(
+                unit.position,
+                radius,
+                &blob_obstacles,
+                &block_obstacles,
+                18.0,
+                unit.separation_strength.max(0.0) + steering,
+            );
+            let steering_cap = speed * (1.0 + steering * 0.5);
+            let desired_speed_len = desired_velocity.length();
+            if desired_speed_len > steering_cap {
+                desired_velocity = desired_velocity / desired_speed_len * steering_cap;
+            }
+            if desired_velocity.is_finite() {
+                let accel = if unit.acceleration.is_finite() && unit.acceleration > 0.0 {
+                    unit.acceleration * (1.0 + steering)
+                } else {
+                    0.0
+                };
+                let dv = desired_velocity - unit.velocity;
+                let dv_len = dv.length();
+                if dv_len <= f32::EPSILON || accel <= f32::EPSILON {
+                    unit.velocity = desired_velocity;
+                } else {
+                    let dv_step = (accel * dt).min(dv_len);
+                    unit.velocity = unit.velocity + dv / dv_len * dv_step;
+                }
+            } else {
+                unit.velocity = Vec2::ZERO;
+            }
+            if remaining_to_stop <= f32::EPSILON || remaining_to_stop <= unit.velocity.length() * dt {
+                if engagement_range > arrival_radius {
+                    if distance > engagement_range && distance > f32::EPSILON {
+                        // Place the unit exactly on the near edge of its firing
+                        // envelope. The order remains Attack, so a later target
+                        // or retarget can advance naturally.
+                        unit.position = target - offset / distance * engagement_range;
+                    }
                 } else {
                     unit.position = target;
                 }
@@ -1844,13 +2505,23 @@ impl RtsWorld {
                     _ => {}
                 }
             } else {
-                unit.velocity = offset / distance * unit.speed.max(0.0);
-                unit.position += unit.velocity * dt;
+                let next_position = unit.position + unit.velocity * dt;
+                let resolved_position = Self::resolve_motion_obstacle_push(
+                    next_position,
+                    radius,
+                    &blob_obstacles,
+                    &block_obstacles,
+                );
+                if resolved_position != next_position {
+                    unit.velocity *= 0.25;
+                }
+                unit.position = resolved_position;
             }
             if unit.position != previous_position {
                 moved = true;
             }
         }
+        moved |= flubbers_moved;
         if moved {
             self.spatial_dirty.set(true);
         }
@@ -2384,6 +3055,43 @@ mod tests {
             })
             .collect();
         assert_eq!(defaults, [Vec2::new(165.0, 100.0), Vec2::new(235.0, 100.0)]);
+    }
+
+    #[test]
+    fn physics_tuning_commands_update_selected_unit_profile() {
+        let mut world = RtsWorld::default();
+        let unit = world.spawn(PLAYER, Vec2::ZERO);
+        world.select_point(Vec2::ZERO, PLAYER, false);
+
+        world.issue_speed_scale(1.75);
+        world.issue_steering(2.25);
+        world.issue_separation_profile(48.0, 90.0);
+
+        let unit = world.unit(unit).unwrap();
+        assert_eq!(unit.speed_scale, 1.75);
+        assert_eq!(unit.steering, 2.25);
+        assert_eq!(unit.separation_radius, 48.0);
+        assert_eq!(unit.separation_strength, 90.0);
+    }
+
+    #[test]
+    fn placement_checks_account_for_blobs_and_blocks() {
+        let mut world = RtsWorld::default();
+        let _building = world.spawn(PLAYER, Vec2::new(90.0, 90.0));
+        world.add_blob_obstacle(Vec2::new(0.0, 0.0), 20.0);
+        world.add_block_obstacle(Aabb::new(Vec2::new(50.0, 50.0), Vec2::new(70.0, 70.0)));
+
+        let rules = PlacementRules {
+            build_area: Aabb::from_center_size(Vec2::ZERO, Vec2::splat(200.0)),
+            power_sources: vec![Vec2::ZERO],
+            obstructions: Vec::new(),
+            max_power_distance: 150.0,
+        };
+
+        assert_eq!(world.can_place_building(&rules, Vec2::new(0.0, 0.0), 10.0), Err(PlacementError::Obstructed));
+        assert_eq!(world.can_place_building(&rules, Vec2::new(60.0, 60.0), 10.0), Err(PlacementError::Obstructed));
+        assert_eq!(world.can_place_building(&rules, Vec2::new(-100.0, -100.0), 10.0), Err(PlacementError::OutsideBuildArea));
+        assert_eq!(world.can_place_building(&rules, Vec2::new(10.0, 10.0), 5.0), Ok(()));
     }
 
     #[test]
