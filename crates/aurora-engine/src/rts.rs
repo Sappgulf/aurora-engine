@@ -72,6 +72,10 @@ pub struct FlubberBlob {
     pub restitution: f32,
     /// Physical mass scalar for impulse mapping.
     pub mass: f32,
+    /// Upper speed clamp before clamping against explicit restitution and drag.
+    pub speed_cap: f32,
+    /// Minimum impulse magnitude that can trigger a deterministic split.
+    pub split_threshold: f32,
 }
 
 impl FlubberBlob {
@@ -90,6 +94,8 @@ impl FlubberBlob {
             damping: 20.0,
             restitution: 0.46,
             mass: 1.0,
+            speed_cap: 4200.0,
+            split_threshold: 3600.0,
         }
     }
 
@@ -1515,10 +1521,43 @@ impl RtsWorld {
         Some(id)
     }
 
+    pub fn blob_obstacles(&self) -> &[MotionBlob] {
+        &self.blobs
+    }
+
     pub fn remove_blob_obstacle(&mut self, id: BlobId) -> bool {
         let before = self.blobs.len();
         self.blobs.retain(|blob| blob.id != id);
         before != self.blobs.len()
+    }
+
+    pub fn remove_blob_obstacle_at(&mut self, point: Vec2, radius_scale: f32) -> Option<BlobId> {
+        if !point.is_finite() || !radius_scale.is_finite() {
+            return None;
+        }
+        let mut best = None;
+        let mut best_distance = f32::INFINITY;
+        let mut best_index = 0usize;
+        let scale = radius_scale.max(0.0);
+
+        for (index, blob) in self.blobs.iter().enumerate() {
+            if !blob.center.is_finite() {
+                continue;
+            }
+            let threshold = blob.radius * (1.0 + scale);
+            let delta = blob.center - point;
+            let distance_sq = delta.length_squared();
+            if distance_sq <= threshold * threshold && distance_sq < best_distance {
+                best_distance = distance_sq;
+                best = Some(blob.id);
+                best_index = index;
+            }
+        }
+
+        best.map(|id| {
+            self.blobs.swap_remove(best_index);
+            id
+        })
     }
 
     pub fn add_block_obstacle(&mut self, bounds: Aabb) -> Option<BlockId> {
@@ -1531,10 +1570,40 @@ impl RtsWorld {
         Some(id)
     }
 
+    pub fn block_obstacles(&self) -> &[MotionBlock] {
+        &self.blocks
+    }
+
     pub fn remove_block_obstacle(&mut self, id: BlockId) -> bool {
         let before = self.blocks.len();
         self.blocks.retain(|block| block.id != id);
         before != self.blocks.len()
+    }
+
+    pub fn remove_block_obstacle_at(&mut self, point: Vec2) -> Option<BlockId> {
+        if !point.is_finite() {
+            return None;
+        }
+        let mut best = None;
+        let mut best_area = f32::INFINITY;
+        let mut best_index = 0usize;
+        for (index, block) in self.blocks.iter().enumerate() {
+            if !block.bounds.min.is_finite() || !block.bounds.max.is_finite() {
+                continue;
+            }
+            if block.bounds.contains_point(point) {
+                let area = block.bounds.size().length_squared();
+                if area < best_area {
+                    best_area = area;
+                    best = Some(block.id);
+                    best_index = index;
+                }
+            }
+        }
+        best.map(|id| {
+            self.blocks.swap_remove(best_index);
+            id
+        })
     }
 
     pub fn clear_motion_obstacles(&mut self) {
@@ -1550,6 +1619,71 @@ impl RtsWorld {
         self.next_flubber_id = self.next_flubber_id.checked_add(1)?;
         self.flubbers.push(FlubberBlob::new(id, position, radius));
         Some(id)
+    }
+
+    pub fn split_flubber(
+        &mut self,
+        id: FlubberId,
+        impulse: Vec2,
+    ) -> Option<(FlubberId, FlubberId)> {
+        let index = self.flubbers.iter().position(|flubber| flubber.id == id)?;
+        let source = self.flubbers[index];
+        if source.radius < 24.0 || !source.position.is_finite() {
+            return None;
+        }
+
+        let split_radius = (source.radius * source.radius * 0.5).sqrt();
+        if !split_radius.is_finite() || split_radius < 6.0 {
+            return None;
+        }
+
+        let first_id = FlubberId(self.next_flubber_id);
+        self.next_flubber_id = self.next_flubber_id.checked_add(1)?;
+        let second_id = FlubberId(self.next_flubber_id);
+        self.next_flubber_id = self.next_flubber_id.checked_add(1)?;
+
+        let mut direction = if impulse.length_squared() > f32::EPSILON {
+            impulse / impulse.length()
+        } else {
+            source.velocity
+        };
+        if !direction.is_finite() || direction.length_squared() <= f32::EPSILON {
+            direction = Vec2::Y;
+        }
+
+        let split_offset = split_radius + 2.0;
+        let split_impulse = (source.velocity + direction * 80.0) * 0.9;
+        let mut left = FlubberBlob::new(first_id, source.position + direction * split_offset, split_radius);
+        let mut right = FlubberBlob::new(second_id, source.position - direction * split_offset, split_radius);
+
+        left.mass = source.mass * 0.5;
+        right.mass = source.mass * 0.5;
+        left.velocity = source.velocity - split_impulse;
+        right.velocity = source.velocity + split_impulse;
+        left.stretch = source.stretch * 0.4;
+        right.stretch = source.stretch * 0.4;
+        left.stretch_velocity = source.stretch_velocity * 0.3;
+        right.stretch_velocity = source.stretch_velocity * 0.3;
+        left.elasticity = source.elasticity;
+        right.elasticity = source.elasticity;
+        left.damping = source.damping;
+        right.damping = source.damping;
+        left.restitution = source.restitution;
+        right.restitution = source.restitution;
+        left.speed_cap = source.speed_cap;
+        right.speed_cap = source.speed_cap;
+        left.split_threshold = source.split_threshold;
+        right.split_threshold = source.split_threshold;
+        left.radius = split_radius.max(1.0);
+        right.radius = split_radius.max(1.0);
+        left.rest_radius = split_radius.max(1.0);
+        right.rest_radius = split_radius.max(1.0);
+        left.max_stretch = split_radius * 3.0;
+        right.max_stretch = split_radius * 3.0;
+
+        self.flubbers[index] = left;
+        self.flubbers.push(right);
+        Some((first_id, second_id))
     }
 
     pub fn remove_flubber(&mut self, id: FlubberId) -> bool {
@@ -1571,10 +1705,19 @@ impl RtsWorld {
     }
 
     pub fn slap_flubber(&mut self, id: FlubberId, impulse: Vec2) -> bool {
-        let Some(flubber) = self.flubber_mut(id) else {
-            return false;
+        let (split, split_impulse) = {
+            let Some(flubber) = self.flubber_mut(id) else {
+                return false;
+            };
+            let impulse_magnitude = if impulse.is_finite() { impulse.length() } else { 0.0 };
+            let should_split = flubber.radius > 26.0 && impulse_magnitude > flubber.split_threshold;
+            let split_impulse = if should_split { impulse } else { Vec2::ZERO };
+            flubber.apply_slap(if impulse.is_finite() { impulse } else { Vec2::ZERO });
+            (should_split, split_impulse)
         };
-        flubber.apply_slap(impulse);
+        if split {
+            let _ = self.split_flubber(id, split_impulse);
+        }
         true
     }
 
@@ -1623,12 +1766,11 @@ impl RtsWorld {
         } else {
             direction /= direction.length();
         }
-        if let Some(target) = self.flubber_mut(id) {
-            target.apply_slap(direction * impulse_magnitude);
-            Some(id)
-        } else {
-            None
+        let impulse = direction * impulse_magnitude;
+        if !self.slap_flubber(id, impulse) {
+            return None;
         }
+        Some(id)
     }
 
     pub fn can_place_building(
@@ -1830,7 +1972,9 @@ impl RtsWorld {
         blobs: &[MotionBlob],
         blocks: &[MotionBlock],
     ) -> bool {
+        let dt = dt.max(0.0);
         let mut moved = false;
+
         for flubber in &mut self.flubbers {
             let previous_position = flubber.position;
             if !flubber.position.is_finite() {
@@ -1841,8 +1985,6 @@ impl RtsWorld {
                 continue;
             }
 
-            // Internal spring: stretch is pulled back toward zero with a little
-            // damping so repeated slaps ring and settle naturally.
             let stretch_force = -flubber.stretch * flubber.elasticity;
             let damping_force = -flubber.stretch_velocity * flubber.damping;
             flubber.stretch_velocity += (stretch_force + damping_force) * dt;
@@ -1857,26 +1999,23 @@ impl RtsWorld {
                 flubber.stretch = flubber.stretch / stretch_len * flubber.max_stretch;
             }
 
-            // Soft body inertia: local stretch injects corrective velocity so
-            // the body visibly snaps back after impact.
             flubber.velocity += -flubber.stretch * (flubber.elasticity * 0.22) * dt;
 
             let effective_radius = flubber.effective_radius().max(1.0);
-            let mut desired_velocity = flubber.velocity
-                + Self::obstacle_repulsion(
-                    flubber.position,
-                    flubber.radius,
-                    blobs,
-                    blocks,
-                    34.0,
-                    flubber.elasticity,
-                )
-                    * 0.5;
+            let repulsion = Self::obstacle_repulsion(
+                flubber.position,
+                flubber.radius,
+                blobs,
+                blocks,
+                36.0,
+                flubber.elasticity,
+            ) * 0.5;
+            let mut desired_velocity = flubber.velocity + repulsion;
 
-            // Clamp speed to avoid tunneling with small dt spikes.
+            let speed_cap = flubber.speed_cap.max(1.0);
             let speed = desired_velocity.length();
-            if speed > 4200.0 {
-                desired_velocity = desired_velocity / speed * 4200.0;
+            if speed > speed_cap {
+                desired_velocity = desired_velocity / speed * speed_cap;
             }
 
             let next_position = flubber.position + desired_velocity * dt;
@@ -1898,7 +2037,117 @@ impl RtsWorld {
                 moved = true;
             }
         }
+
+        let mut i = 0_usize;
+        while i < self.flubbers.len() {
+            let mut j = i + 1;
+            while j < self.flubbers.len() {
+                let mut merged = None;
+                {
+                    let (left, right) = self.flubbers.split_at_mut(j);
+                    let a = &mut left[i];
+                    let b = &mut right[0];
+
+                    let delta = b.position - a.position;
+                    let distance = delta.length();
+                    let minimum_distance = a.effective_radius() + b.effective_radius();
+                    if distance >= minimum_distance || distance <= f32::EPSILON || !minimum_distance.is_finite() {
+                        j += 1;
+                        continue;
+                    }
+
+                    let overlap = (minimum_distance - distance).max(0.0);
+                    if overlap <= 0.0 || !distance.is_finite() {
+                        j += 1;
+                        continue;
+                    }
+
+                    let normal = if distance <= f32::EPSILON {
+                        Vec2::Y
+                    } else {
+                        delta / distance
+                    };
+                    let relative_velocity = b.velocity - a.velocity;
+                    let approach_speed = relative_velocity.dot(normal);
+                    let push_a = if (a.mass + b.mass) > 0.0 {
+                        b.mass / (a.mass + b.mass)
+                    } else {
+                        0.5
+                    };
+                    let push_b = 1.0 - push_a;
+
+                    if overlap > minimum_distance * 0.45 && approach_speed.abs() <= 100.0 {
+                        merged = Some(Self::merge_flubbers(*a, *b));
+                    } else {
+                        let correction = normal * overlap;
+                        a.position -= correction * push_a;
+                        b.position += correction * push_b;
+
+                        if approach_speed < 0.0 {
+                            let inv_mass = 1.0 / (a.mass.max(0.001)) + 1.0 / (b.mass.max(0.001));
+                            let restitution = (a.restitution + b.restitution) * 0.5;
+                            let impulse_scalar = if inv_mass > 0.0 {
+                                (-(1.0 + restitution) * approach_speed) / inv_mass
+                            } else {
+                                0.0
+                            };
+                            let impulse = normal * impulse_scalar;
+                            a.velocity -= impulse / a.mass.max(0.001);
+                            b.velocity += impulse / b.mass.max(0.001);
+                        }
+
+                        let lateral = Vec2::new(-normal.y, normal.x);
+                        let lateral_speed = relative_velocity.dot(lateral);
+                        let tangent_impulse = lateral * (lateral_speed * 0.12);
+                        a.velocity += tangent_impulse;
+                        b.velocity -= tangent_impulse;
+
+                        a.stretch += -normal * (overlap * 0.15);
+                        b.stretch += normal * (overlap * 0.15);
+                        moved = true;
+                    }
+                }
+
+                if let Some(merged_blob) = merged {
+                    self.flubbers[i] = merged_blob;
+                    self.flubbers.swap_remove(j);
+                    moved = true;
+                } else {
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+
+        for flubber in &mut self.flubbers {
+            let speed_cap = flubber.speed_cap.max(1.0);
+            let speed = flubber.velocity.length();
+            if speed > speed_cap {
+                flubber.velocity = flubber.velocity / speed * speed_cap;
+            }
+        }
         moved
+    }
+
+    fn merge_flubbers(left: FlubberBlob, right: FlubberBlob) -> FlubberBlob {
+        let total_mass = left.mass.max(0.001) + right.mass.max(0.001);
+        let left_share = left.mass.max(0.001) / total_mass;
+        let right_share = right.mass.max(0.001) / total_mass;
+        let merged_radius = (left.radius * left.radius + right.radius * right.radius).sqrt().max(1.0);
+        let mut merged = FlubberBlob::new(left.id, left.position * left_share + right.position * right_share, merged_radius);
+        merged.mass = total_mass;
+        merged.radius = merged_radius;
+        merged.rest_radius = merged_radius;
+        merged.max_stretch = merged_radius * 3.0;
+        merged.velocity = left.velocity * left_share + right.velocity * right_share;
+        merged.stretch = left.stretch * left_share + right.stretch * right_share;
+        merged.stretch_velocity = left.stretch_velocity * left_share + right.stretch_velocity * right_share;
+        merged.elasticity = (left.elasticity + right.elasticity) * 0.5;
+        merged.damping = (left.damping + right.damping) * 0.5;
+        merged.restitution = (left.restitution + right.restitution) * 0.5;
+        merged.speed_cap = left.speed_cap.max(right.speed_cap);
+        merged.split_threshold = (left.split_threshold + right.split_threshold) * 0.5;
+        merged
     }
 
     fn point_in_aabb(bounds: Aabb, position: Vec2) -> bool {
