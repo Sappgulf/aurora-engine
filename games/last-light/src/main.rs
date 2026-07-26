@@ -28,7 +28,7 @@ use mission_state::{
 use missions::{DialogueTrigger, MissionDef, MissionLandmarkKind, VictoryCondition};
 use save::{CampaignStore, SaveData};
 use simulation::{
-    AbilityError, MissionOutcome, MissionSimulation, ProductionCancelCommandError,
+    AbilityError, MissionOutcome, MissionSimulation, MotionProfile, ProductionCancelCommandError,
     ProductionCommandError, RaidPhase, RaidState, SimulationEventKind, SimulationModifiers,
     SpecialAbility, StructureCommandError, FABRICATOR_NODE, MAP_SIZE, QUEUE_CANCEL_REFUND_PERCENT,
 };
@@ -84,6 +84,44 @@ const COMMAND_CARD_LABELS: [&str; 5] = [
     "F  SURVEYOR  60",
     "H  HOLD",
     "T  STOP",
+];
+const FIELD_BEACON_RADIUS: f32 = 65.0;
+const MOTION_PRESETS: [MotionProfile; 5] = [
+    MotionProfile {
+        label: "SLOW HOLD",
+        speed_scale: 0.75,
+        steering: 0.65,
+        separation_radius: 22.0,
+        separation_strength: 18.0,
+    },
+    MotionProfile {
+        label: "BALANCED",
+        speed_scale: 1.0,
+        steering: 1.0,
+        separation_radius: 28.0,
+        separation_strength: 35.0,
+    },
+    MotionProfile {
+        label: "FAST TRACK",
+        speed_scale: 1.35,
+        steering: 1.45,
+        separation_radius: 34.0,
+        separation_strength: 52.0,
+    },
+    MotionProfile {
+        label: "SLICK SHIFT",
+        speed_scale: 1.75,
+        steering: 2.0,
+        separation_radius: 46.0,
+        separation_strength: 72.0,
+    },
+    MotionProfile {
+        label: "RAPID STRIKE",
+        speed_scale: 2.2,
+        steering: 2.45,
+        separation_radius: 62.0,
+        separation_strength: 100.0,
+    },
 ];
 
 /// Edge-triggered input may be consumed once per rendered frame even when the
@@ -1052,20 +1090,20 @@ impl LastLight {
                 .map(|relay| relay.position),
         );
         power_sources.extend(self.field_beacons.iter().map(|beacon| beacon.position));
-        let mut obstructions = vec![(self.fabricator_position, 105.0)];
+        let mut obstructions = vec![(self.fabricator_position, StructureKind::FABRICATOR_RADIUS)];
         if let Some(reactor_position) = self.reactor_position {
-            obstructions.push((reactor_position, 135.0));
+            obstructions.push((reactor_position, StructureKind::REACTOR_RADIUS));
         }
         obstructions.extend(
             self.simulation
                 .relays
                 .iter()
-                .map(|relay| (relay.position, 85.0)),
+                .map(|relay| (relay.position, StructureKind::RELAY_RADIUS)),
         );
         obstructions.extend(
             self.field_beacons
                 .iter()
-                .map(|beacon| (beacon.position, 65.0)),
+                .map(|beacon| (beacon.position, FIELD_BEACON_RADIUS)),
         );
         PlacementRules {
             build_area: Aabb::from_center_size(Vec2::ZERO, MAP_SIZE - Vec2::splat(80.0)),
@@ -2171,6 +2209,25 @@ impl LastLight {
         }
     }
 
+    fn apply_motion_preset(&mut self, slot: usize) {
+        if slot == 0 || slot > MOTION_PRESETS.len() {
+            return;
+        }
+        let profile = MOTION_PRESETS[slot - 1];
+        let applied = self.simulation.issue_selected_motion_profile(profile);
+        if applied == 0 {
+            self.status = Some(("PHYSICS PRESET // SELECT FRIENDLY UNITS".to_owned(), 1.8));
+            return;
+        }
+        self.status = Some((
+            format!(
+                "PHYSICS PRESET #{slot} // {} // {} UNIT(S)",
+                profile.label, applied
+            ),
+            1.8,
+        ));
+    }
+
     fn control_group_chip_rect(panel: Aabb, slot: usize, scale: f32) -> Aabb {
         let spacing = 46.0 * scale;
         let start_x = panel.center().x - spacing * 2.0;
@@ -2316,8 +2373,21 @@ impl LastLight {
                 4 => KeyCode::Digit4,
                 _ => KeyCode::Digit5,
             };
-            if ctx.input.key_pressed(key) {
-                self.control_group_action(slot, ctx.input.control_down(), ctx);
+            let numpad_key = match slot {
+                1 => KeyCode::Numpad1,
+                2 => KeyCode::Numpad2,
+                3 => KeyCode::Numpad3,
+                4 => KeyCode::Numpad4,
+                _ => KeyCode::Numpad5,
+            };
+            if ctx.input.key_pressed(key) || ctx.input.key_pressed(numpad_key) {
+                if self.simulation.world.selection().ids().is_empty() {
+                    self.control_group_action(slot, ctx.input.control_down(), ctx);
+                } else if ctx.input.control_down() {
+                    self.control_group_action(slot, true, ctx);
+                } else {
+                    self.apply_motion_preset(slot);
+                }
             }
         }
 
@@ -3610,6 +3680,9 @@ impl LastLight {
                         self.field_beacons.push(FieldBeacon {
                             position: mouse_world,
                         });
+                        let _ = self
+                            .simulation
+                            .add_circular_motion_obstacle(mouse_world, FIELD_BEACON_RADIUS);
                         self.placing_beacon = false;
                         self.status = Some(("FIELD BEACON DEPLOYED".to_owned(), 3.0));
                         ctx.audio.collect();

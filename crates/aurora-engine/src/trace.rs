@@ -223,11 +223,54 @@ pub struct TraceRunReport {
     pub checkpoints_checked: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceStepRecord {
+    pub tick: u64,
+    pub fixed_tick: u64,
+    pub commands_applied: usize,
+    pub state_hash: StateHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceRunJournal {
+    pub records: Vec<TraceStepRecord>,
+}
+
+impl TraceRunJournal {
+    pub fn new() -> Self {
+        Self {
+            records: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, record: TraceStepRecord) {
+        self.records.push(record);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn final_hash(&self) -> Option<StateHash> {
+        self.records.last().map(|record| record.state_hash.clone())
+    }
+}
+
+impl Default for TraceRunJournal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn run_trace<S: DeterministicSimulation>(
     simulation: &mut S,
     trace: &AuroraTrace,
 ) -> Result<TraceRunReport, TraceError> {
-    run_trace_with_checkpoints(simulation, trace, &[])
+    run_trace_with_checkpoints_and_journal(simulation, trace, &[], None)
 }
 
 /// Run a deterministic simulation while optionally checking fixed tick
@@ -237,6 +280,17 @@ pub fn run_trace_with_checkpoints<S: DeterministicSimulation>(
     simulation: &mut S,
     trace: &AuroraTrace,
     checkpoints: &[TraceCheckpoint],
+) -> Result<TraceRunReport, TraceError> {
+    run_trace_with_checkpoints_and_journal(simulation, trace, checkpoints, None)
+}
+
+/// Run a deterministic simulation while optionally collecting per-tick journal
+/// entries for replay diffing.
+pub fn run_trace_with_checkpoints_and_journal<S: DeterministicSimulation>(
+    simulation: &mut S,
+    trace: &AuroraTrace,
+    checkpoints: &[TraceCheckpoint],
+    mut journal: Option<&mut TraceRunJournal>,
 ) -> Result<TraceRunReport, TraceError> {
     trace.validate()?;
     let mut checkpoints = checkpoints.to_vec();
@@ -276,11 +330,19 @@ pub fn run_trace_with_checkpoints<S: DeterministicSimulation>(
         simulation.fixed_step();
 
         let current_tick = tick + 1;
+        let hash = simulation.state_hash();
+        if let Some(journal) = journal.as_mut() {
+            journal.push(TraceStepRecord {
+                tick: current_tick,
+                fixed_tick: current_tick,
+                commands_applied: cursor,
+                state_hash: hash.clone(),
+            });
+        }
         while next_checkpoint < checkpoints.len()
             && checkpoints[next_checkpoint].tick == current_tick
         {
             let checkpoint = &checkpoints[next_checkpoint];
-            let hash = simulation.state_hash();
             if hash != checkpoint.expected_hash {
                 return Err(TraceError::CheckpointMismatch {
                     tick: current_tick,
@@ -483,5 +545,31 @@ mod tests {
 
         assert_eq!(first.finish(), second.finish());
         assert_ne!(first.finish(), reversed.finish());
+    }
+
+    #[test]
+    fn trace_journal_records_state_at_each_fixed_tick() {
+        let mut trace = AuroraTrace::new("engine.counter", 11, 60, 4);
+        trace.push(
+            SemanticCommand::new(1, "counter.add")
+                .with_payload(&5_i64)
+                .unwrap(),
+        );
+
+        let mut journal = TraceRunJournal::new();
+        let report = run_trace_with_checkpoints_and_journal(
+            &mut CounterSimulation { tick: 0, value: 0 },
+            &trace,
+            &[],
+            Some(&mut journal),
+        )
+        .unwrap();
+
+        assert_eq!(journal.len(), 4);
+        assert!(!journal.is_empty());
+        assert_eq!(journal.records[0].tick, 1);
+        assert_eq!(journal.records[0].fixed_tick, 1);
+        assert_eq!(journal.records[0].commands_applied, 1);
+        assert_eq!(journal.final_hash(), Some(report.final_state_hash));
     }
 }

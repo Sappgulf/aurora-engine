@@ -3,6 +3,27 @@
 use crate::color::Color;
 use crate::renderer::GpuContext;
 
+fn pixel_len(width: u32, height: u32, channels: u32, what: &str) -> usize {
+    let Some(bytes) = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|px| px.checked_mul(u64::from(channels)))
+    else {
+        panic!("texture dimensions too large for {what}: {width}x{height}x{channels}");
+    };
+    usize::try_from(bytes)
+        .unwrap_or_else(|_| panic!("texture byte size exceeds address space for {what}"))
+}
+
+fn expect_pixel_len(width: u32, height: u32, rgba: &[u8], what: &str) {
+    let expected = pixel_len(width, height, 4, what);
+    assert_eq!(
+        rgba.len(),
+        expected,
+        "texture pixel payload has wrong size for {what}: expected {expected}, got {}",
+        rgba.len()
+    );
+}
+
 /// Handle to a GPU texture + bind group for the sprite sampler layout.
 #[derive(Debug)]
 pub struct Texture {
@@ -21,7 +42,7 @@ impl Texture {
         rgba: &[u8],
         label: &str,
     ) -> Self {
-        assert_eq!(rgba.len(), (width * height * 4) as usize);
+        expect_pixel_len(width, height, rgba, "from_rgba");
 
         let size = wgpu::Extent3d {
             width,
@@ -102,7 +123,7 @@ impl Texture {
 
     /// Soft circular glow (good for particles / orbs).
     pub fn soft_circle(gpu: &GpuContext<'_>, size: u32, color: Color) -> Self {
-        let mut data = vec![0u8; (size * size * 4) as usize];
+        let mut data = vec![0u8; pixel_len(size, size, 4, "soft_circle")];
         let cxy = (size as f32 - 1.0) * 0.5;
         let r = size as f32 * 0.5;
         for y in 0..size {
@@ -123,7 +144,7 @@ impl Texture {
 
     /// Faceted diamond pickup with a transparent background.
     pub fn crystal(gpu: &GpuContext<'_>, size: u32, color: Color) -> Self {
-        let mut data = vec![0u8; (size * size * 4) as usize];
+        let mut data = vec![0u8; pixel_len(size, size, 4, "crystal")];
         let half = (size as f32 - 1.0) * 0.5;
         for y in 0..size {
             for x in 0..size {
@@ -157,7 +178,7 @@ impl Texture {
 
     /// Checkerboard for debugging UV / camera.
     pub fn checker(gpu: &GpuContext<'_>, size: u32, cell: u32, a: Color, b: Color) -> Self {
-        let mut data = vec![0u8; (size * size * 4) as usize];
+        let mut data = vec![0u8; pixel_len(size, size, 4, "checker")];
         for y in 0..size {
             for x in 0..size {
                 let on = ((x / cell) + (y / cell)) & 1 == 0;
@@ -174,7 +195,7 @@ impl Texture {
 
     /// Horizontal gradient.
     pub fn gradient_h(gpu: &GpuContext<'_>, size: u32, left: Color, right: Color) -> Self {
-        let mut data = vec![0u8; (size * size * 4) as usize];
+        let mut data = vec![0u8; pixel_len(size, size, 4, "gradient_h")];
         for y in 0..size {
             for x in 0..size {
                 let t = x as f32 / (size - 1).max(1) as f32;
@@ -190,7 +211,7 @@ impl Texture {
 
     /// A low-contrast arena material: indigo depth, cyan lane lines, and a central energy bloom.
     pub fn arena_floor(gpu: &GpuContext<'_>, size: u32) -> Self {
-        let mut data = vec![0u8; (size * size * 4) as usize];
+        let mut data = vec![0u8; pixel_len(size, size, 4, "arena_floor")];
         for y in 0..size {
             for x in 0..size {
                 let u = x as f32 / (size - 1).max(1) as f32;
@@ -230,9 +251,11 @@ impl Texture {
         color: Color,
     ) -> Self {
         let frames = frames.max(1);
-        let w = frame_size * frames;
+        let w = frame_size
+            .checked_mul(frames)
+            .unwrap_or_else(|| panic!("orb atlas dimensions overflow: frame_size={frame_size}, frames={frames}"));
         let h = frame_size;
-        let mut data = vec![0u8; (w * h * 4) as usize];
+        let mut data = vec![0u8; pixel_len(w, h, 4, "orb_atlas_strip")];
         for f in 0..frames {
             let scale = 0.75
                 + 0.25

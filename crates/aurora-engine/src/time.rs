@@ -28,6 +28,8 @@ pub struct Time {
     max_accumulator: f32,
     /// Maximum number of fixed steps executed per rendered frame.
     max_fixed_steps_per_frame: usize,
+    fixed_steps_executed_last_frame: usize,
+    fixed_steps_discarded_last_frame: usize,
 }
 
 impl Default for Time {
@@ -52,11 +54,15 @@ impl Time {
             max_delta: 0.1,
             max_accumulator: 0.25,
             max_fixed_steps_per_frame: 5,
+            fixed_steps_executed_last_frame: 0,
+            fixed_steps_discarded_last_frame: 0,
         }
     }
 
     /// Advance time; call once per frame.
     pub fn tick(&mut self) {
+        self.fixed_steps_executed_last_frame = 0;
+        self.fixed_steps_discarded_last_frame = 0;
         let now = InstantCompat::now();
         let raw_delta = now
             .duration_since(self.last)
@@ -73,9 +79,14 @@ impl Time {
     /// Consume one fixed step if enough time has accumulated.
     /// Call in a loop: `while time.step_fixed() { sim(); }`
     pub fn step_fixed(&mut self) -> bool {
+        if self.fixed_dt <= f32::EPSILON {
+            self.alpha = 0.0;
+            return false;
+        }
         if self.accumulator >= self.fixed_dt {
             self.accumulator -= self.fixed_dt;
             self.alpha = self.accumulator / self.fixed_dt;
+            self.fixed_steps_executed_last_frame = self.fixed_steps_executed_last_frame.saturating_add(1);
             true
         } else {
             self.alpha = self.accumulator / self.fixed_dt;
@@ -90,9 +101,19 @@ impl Time {
         if self.fixed_dt <= f32::EPSILON {
             self.accumulator = 0.0;
             self.alpha = 0.0;
+            self.fixed_steps_discarded_last_frame = 0;
             return;
         }
-
+        let dropped = (self.accumulator / self.fixed_dt).floor();
+        self.fixed_steps_discarded_last_frame = if dropped.is_finite() {
+            if dropped > usize::MAX as f32 {
+                usize::MAX
+            } else {
+                dropped as usize
+            }
+        } else {
+            0
+        };
         self.accumulator %= self.fixed_dt;
         self.alpha = self.accumulator / self.fixed_dt;
     }
@@ -154,6 +175,21 @@ impl Time {
     /// Maximum fixed-step catch-up budget in seconds.
     pub fn max_accumulator(&self) -> f32 {
         self.max_accumulator
+    }
+
+    /// Number of fixed steps executed in the most recent frame's fixed loop.
+    pub fn fixed_steps_executed_last_frame(&self) -> usize {
+        self.fixed_steps_executed_last_frame
+    }
+
+    /// Number of fixed steps discarded when the frame capped its fixed loop.
+    pub fn fixed_steps_discarded_last_frame(&self) -> usize {
+        self.fixed_steps_discarded_last_frame
+    }
+
+    /// Remaining fixed-step backlog after catch-up execution/discard.
+    pub fn fixed_step_backlog(&self) -> f32 {
+        self.accumulator
     }
 }
 

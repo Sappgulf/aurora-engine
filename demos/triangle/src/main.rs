@@ -201,6 +201,22 @@ impl Game for FlubberDemo {
             .camera
             .screen_to_world(ctx.input.mouse_position);
 
+        let shift_down = ctx.input.shift_down();
+        if ctx.input.mouse_pressed(MouseButton::Middle) && shift_down {
+            let removed_blob = self
+                .world
+                .remove_blob_obstacle_at(mouse_world, 0.65)
+                .is_some();
+            if !removed_blob {
+                let _ = self.world.remove_block_obstacle_at(mouse_world);
+            }
+        } else if ctx.input.mouse_pressed(MouseButton::Middle) {
+            let radius = (36.0 * build_scale).max(14.0);
+            if let Some(id) = self.world.add_flubber(mouse_world, radius) {
+                self.selected_flubber = Some(id);
+            }
+        }
+
         if ctx.input.mouse_pressed(MouseButton::Left) {
             match self.mode {
                 DemoMode::Flubber => {
@@ -212,9 +228,13 @@ impl Game for FlubberDemo {
                     }
                 }
                 DemoMode::Build => {
-                    let size = Vec2::new(90.0, 230.0) * build_scale;
-                    self.world
-                        .add_block_obstacle(Aabb::from_center_size(mouse_world, size));
+                    if shift_down {
+                        let _ = self.world.remove_block_obstacle_at(mouse_world);
+                    } else {
+                        let size = Vec2::new(90.0, 230.0) * build_scale;
+                        self.world
+                            .add_block_obstacle(Aabb::from_center_size(mouse_world, size));
+                    }
                 }
             }
         }
@@ -236,10 +256,9 @@ impl Game for FlubberDemo {
             }
         }
 
-        if ctx.input.mouse_pressed(MouseButton::Middle) {
-            let radius = (36.0 * build_scale).max(14.0);
-            if let Some(id) = self.world.add_flubber(mouse_world, radius) {
-                self.selected_flubber = Some(id);
+        if let Some(selected_flubber) = self.selected_flubber {
+            if ctx.input.key_pressed(KeyCode::KeyE) {
+                self.energy_pulse(selected_flubber, mouse_world, 1.25);
             }
         }
 
@@ -338,7 +357,7 @@ impl Game for FlubberDemo {
             } else {
                 "SELECTED F: none".to_string()
             };
-            let controls = "LEFT slap/spawn block | RIGHT boop/spawn blob | MIDDLE spawn flubber";
+            let controls = "LMB slap/spawn block | RMB boop/spawn blob | MMB spawn flubber | SHIFT+MMB remove obstacle | SHIFT+LMB remove block in build mode | KEYE energy pulse";
             let tuning = "[/-] elast  [ / ] damping  ,/. restitution  ;/' speedcap  Q/W split";
 
             self.draw_text(ctx.renderer, &mode_line, Vec2::new(-700.0, 332.0), 2.9, Color::rgb(0.9, 0.99, 1.0));
@@ -352,4 +371,68 @@ impl Game for FlubberDemo {
 
 fn main() {
     aurora_engine::run(FlubberDemo::default());
+}
+
+impl FlubberDemo {
+    fn energy_pulse(&mut self, source_id: FlubberId, cursor: Vec2, intensity: f32) {
+        let Some(source) = self.world.flubber(source_id) else {
+            self.selected_flubber = None;
+            return;
+        };
+
+        let source_mass = source.mass;
+        let source_velocity = source.velocity;
+        let source_position = source.position;
+        let radius = 260.0;
+        let impulse_scale = intensity * 0.15 * source_mass.max(0.001);
+        let mut pulse = Vec2::ZERO;
+
+        let targets: Vec<(FlubberId, Vec2)> = self
+            .world
+            .flubbers()
+            .iter()
+            .filter_map(|target| {
+                if target.id == source_id {
+                    return None;
+                }
+                let to_target = target.position - source_position;
+                let distance = to_target.length();
+                if distance <= f32::EPSILON || distance > radius {
+                    return None;
+                }
+                if !target.position.is_finite() || !to_target.is_finite() {
+                    return None;
+                }
+                Some((target.id, target.position))
+            })
+            .collect();
+
+        for (target_id, target_position) in targets {
+            let to_target = target_position - source_position;
+            let distance = to_target.length();
+            let falloff = 1.0 - (distance / radius).min(1.0);
+            let direction = if distance <= f32::EPSILON {
+                cursor - source_position
+            } else {
+                to_target
+            };
+            let dir = if direction.length_squared() <= f32::EPSILON {
+                Vec2::Y
+            } else {
+                direction / direction.length()
+            };
+            let base_impulse = if source_velocity.length_squared() > f32::EPSILON {
+                source_velocity.normalize() * source_velocity.length() * falloff * impulse_scale
+            } else {
+                dir * 1200.0 * falloff * impulse_scale
+            };
+            let _ = self.world.slap_flubber(target_id, base_impulse);
+            pulse += -base_impulse;
+        }
+
+        if pulse.length() > f32::EPSILON {
+            let recoil = pulse * 0.25 / source_mass.max(1.0);
+            let _ = self.world.slap_flubber(source_id, recoil);
+        }
+    }
 }

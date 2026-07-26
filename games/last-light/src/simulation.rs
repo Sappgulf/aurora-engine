@@ -3,8 +3,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use aurora_engine::{
-    mark_obstacles, Aabb, BuildId, BuildQueue, BuildRecipe, CombatProfile as EngineCombatProfile,
-    CooldownBook, DeterministicSimulation, FactionId, NavGrid, PowerGrid, PowerNode, PowerNodeId,
+    mark_obstacles, Aabb, BlockId, BuildId, BuildQueue, BuildRecipe,
+    CombatProfile as EngineCombatProfile, CooldownBook, DeterministicSimulation, FactionId,
+    NavGrid, PowerGrid, PowerNode, PowerNodeId,
     ProductionCancelError as EngineProductionCancelError, ProductionQueue, QueueError,
     ResourceBank, ResourceSet, RtsCombatResolver, RtsWorld, SemanticCommand, StableStateHasher,
     StateHash, SupplyLedger, SupplyQueueError, TechGraph, TechId, TerrainZone, UnitId, UnitOrder,
@@ -17,6 +18,15 @@ use crate::mission_state::{
 };
 use crate::missions::{MissionDef, VictoryCondition};
 use crate::units::{UnitKind, CHOIR, PLAYER};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionProfile {
+    pub speed_scale: f32,
+    pub steering: f32,
+    pub separation_radius: f32,
+    pub separation_strength: f32,
+    pub label: &'static str,
+}
 
 pub const MAP_SIZE: Vec2 = Vec2::new(3600.0, 2200.0);
 pub const NAV_CELL_SIZE: f32 = 40.0;
@@ -442,7 +452,21 @@ impl MissionSimulation {
             -MAP_SIZE * 0.5,
             NAV_CELL_SIZE,
         );
-        mark_obstacles(&mut nav, &mission.obstacles);
+        let mut nav_obstacles = mission.obstacles.clone();
+        nav_obstacles.push(Aabb::from_center_size(
+            mission.fabricator_position,
+            Vec2::splat(StructureKind::FABRICATOR_RADIUS * 2.0),
+        ));
+        nav_obstacles.extend(mission.relays.iter().copied().map(|position| {
+            Aabb::from_center_size(position, Vec2::splat(StructureKind::RELAY_RADIUS * 2.0))
+        }));
+        if let Some(reactor_position) = mission.reactor_position {
+            nav_obstacles.push(Aabb::from_center_size(
+                reactor_position,
+                Vec2::splat(StructureKind::REACTOR_RADIUS * 2.0),
+            ));
+        }
+        mark_obstacles(&mut nav, &nav_obstacles);
         let mut power = PowerGrid::default();
         power.add_node(PowerNode {
             id: FABRICATOR_NODE,
@@ -566,6 +590,25 @@ impl MissionSimulation {
             enemy_telegraph_emitted: false,
             destroyed_by_kind: HashMap::new(),
         };
+        for obstacle in &mission.obstacles {
+            let _ = simulation.world.add_block_obstacle(*obstacle);
+        }
+        let _ = simulation.world.add_block_obstacle(Aabb::from_center_size(
+            simulation.fabricator_position,
+            Vec2::splat(StructureKind::FABRICATOR_RADIUS * 2.0),
+        ));
+        for relay in &mission.relays {
+            let _ = simulation.world.add_block_obstacle(Aabb::from_center_size(
+                *relay,
+                Vec2::splat(StructureKind::RELAY_RADIUS * 2.0),
+            ));
+        }
+        if let Some(reactor_position) = simulation.reactor_position {
+            let _ = simulation.world.add_block_obstacle(Aabb::from_center_size(
+                reactor_position,
+                Vec2::splat(StructureKind::REACTOR_RADIUS * 2.0),
+            ));
+        }
         for spawn in &mission.player_spawns {
             let id = simulation.spawn(
                 spawn.kind,
@@ -850,6 +893,26 @@ impl MissionSimulation {
     pub fn set_combat_scales(&mut self, damage: f32, damage_taken: f32) {
         self.modifiers.player_damage_scale = damage.max(0.0);
         self.modifiers.player_damage_taken_scale = damage_taken.max(0.0);
+    }
+
+    pub fn issue_selected_motion_profile(&mut self, profile: MotionProfile) -> usize {
+        let selected = self.world.selection().ids().to_vec();
+        self.world.issue_speed_scale(profile.speed_scale.max(0.0));
+        self.world.issue_steering(profile.steering.max(0.0));
+        self.world.issue_separation_profile(
+            profile.separation_radius.max(0.0),
+            profile.separation_strength.max(0.0),
+        );
+        selected.len()
+    }
+
+    pub fn add_circular_motion_obstacle(&mut self, center: Vec2, radius: f32) -> Option<BlockId> {
+        let radius = radius.max(0.0);
+        if !center.is_finite() || !radius.is_finite() {
+            return None;
+        }
+        self.world
+            .add_block_obstacle(Aabb::from_center_size(center, Vec2::splat(radius * 2.0)))
     }
 
     pub fn ability_for_kind(kind: UnitKind) -> Option<SpecialAbility> {

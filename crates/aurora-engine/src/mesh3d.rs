@@ -164,7 +164,17 @@ impl Mesh3D {
         let rings = rings.max(2);
         let radius = 0.5;
 
-        let mut vertices = Vec::with_capacity(((segments + 1) * (rings + 1)) as usize);
+        let vertex_capacity = {
+            let Some(vertex_count) = u64::from(segments + 1)
+                .checked_mul(u64::from(rings + 1))
+            else {
+                panic!("uv sphere segment/ring count overflows capacity");
+            };
+            usize::try_from(vertex_count).unwrap_or_else(|_| {
+                panic!("uv sphere has too many vertices to fit on this platform")
+            })
+        };
+        let mut vertices = Vec::with_capacity(vertex_capacity);
         for ring in 0..=rings {
             let v = ring as f32 / rings as f32;
             let theta = v * std::f32::consts::PI;
@@ -183,7 +193,18 @@ impl Mesh3D {
         }
 
         let stride = segments + 1;
-        let mut indices = Vec::with_capacity((segments * rings * 6) as usize);
+        let index_capacity = {
+            let Some(indices) = u64::from(segments)
+                .checked_mul(u64::from(rings))
+                .and_then(|value| value.checked_mul(6))
+            else {
+                panic!("uv sphere index count overflows capacity");
+            };
+            usize::try_from(indices).unwrap_or_else(|_| {
+                panic!("uv sphere has too many indices to fit on this platform")
+            })
+        };
+        let mut indices = Vec::with_capacity(index_capacity);
         for ring in 0..rings {
             for seg in 0..segments {
                 let a = ring * stride + seg;
@@ -267,7 +288,8 @@ impl GpuMesh {
         Self {
             vertex_buffer,
             index_buffer,
-            index_count: mesh.indices.len() as u32,
+            index_count: u32::try_from(mesh.indices.len())
+                .unwrap_or_else(|_| panic!("mesh index count exceeds u32: {}", mesh.indices.len())),
         }
     }
 

@@ -4,6 +4,15 @@ use glam::{IVec2, Vec2};
 
 use crate::{Aabb, Color, Renderer, TextureAtlas};
 
+fn checked_layer_size(width: u32, height: u32, what: &str) -> usize {
+    let Some(area) = u64::from(width).checked_mul(u64::from(height)) else {
+        panic!("{what} dimensions overflow: {width}x{height}");
+    };
+    usize::try_from(area).unwrap_or_else(|_| {
+        panic!("{what} area exceeds addressable memory: {width}x{height}");
+    })
+}
+
 /// A named grid layer. Tiles are atlas frame indices; `None` is empty space.
 #[derive(Debug, Clone)]
 pub struct TileLayer {
@@ -19,7 +28,7 @@ impl TileLayer {
             name: name.into(),
             z,
             visible: true,
-            tiles: vec![None; (width * height) as usize],
+            tiles: vec![None; checked_layer_size(width, height, "tile layer")],
         }
     }
 }
@@ -51,7 +60,7 @@ impl TileMap {
             tile_size: tile_size.max(Vec2::ONE),
             origin: Vec2::ZERO,
             layers: Vec::new(),
-            solid: vec![false; (width * height) as usize],
+            solid: vec![false; checked_layer_size(width, height, "tilemap")],
             triggers: Vec::new(),
         }
     }
@@ -183,14 +192,18 @@ impl TileMap {
         layer: usize,
         tint: Color,
     ) {
+        if self.width == 0 || self.height == 0 {
+            return;
+        }
         let Some(layer) = self.layers.get(layer).filter(|layer| layer.visible) else {
             return;
         };
         for (index, tile) in layer.tiles.iter().enumerate() {
             let Some(frame) = tile else { continue };
+            let index = index as u32;
             let cell = IVec2::new(
-                (index as u32 % self.width) as i32,
-                (index as u32 / self.width) as i32,
+                (index % self.width) as i32,
+                (index / self.width) as i32,
             );
             let position = self.origin + (cell.as_vec2() + Vec2::splat(0.5)) * self.tile_size;
             let sprite = atlas
@@ -210,7 +223,12 @@ impl TileMap {
 
     fn cell_index(&self, cell: IVec2) -> Option<usize> {
         (cell.x >= 0 && cell.y >= 0 && cell.x < self.width as i32 && cell.y < self.height as i32)
-            .then_some((cell.y as u32 * self.width + cell.x as u32) as usize)
+            .then_some(
+                u64::from(cell.y as u32)
+                    .checked_mul(u64::from(self.width))?
+                    .checked_add(u64::from(cell.x as u32))
+                    .and_then(|index| usize::try_from(index).ok())?,
+            )
     }
 }
 

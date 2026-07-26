@@ -11,9 +11,13 @@ pub struct DiagnosticSnapshot {
     pub fps: f32,
     pub frame_ms: f32,
     pub simulation_delta_ms: f32,
+    pub fixed_steps_executed: usize,
+    pub fixed_step_backlog: f32,
+    pub fixed_steps_discarded: usize,
     pub render_cpu_ms: f32,
     pub draw_calls: usize,
     pub drawn_sprites: usize,
+    pub invalid_sprites: usize,
     pub composed_lights: usize,
     pub asset_progress: f32,
     pub failed_assets: usize,
@@ -31,9 +35,13 @@ impl DiagnosticSnapshot {
             },
             frame_ms,
             simulation_delta_ms: time.fixed_dt * 1_000.0,
+            fixed_steps_executed: time.fixed_steps_executed_last_frame(),
+            fixed_step_backlog: time.fixed_step_backlog(),
+            fixed_steps_discarded: time.fixed_steps_discarded_last_frame(),
             render_cpu_ms: render.cpu_frame_ms,
             draw_calls: render.draw_calls,
             drawn_sprites: render.drawn_sprites,
+            invalid_sprites: render.invalid_sprites,
             composed_lights: render.composed_lights,
             asset_progress: assets.progress(),
             failed_assets: assets.failed_count(),
@@ -48,6 +56,7 @@ pub struct Diagnostics {
     latest: Option<DiagnosticSnapshot>,
     smoothed_fps: f32,
     smoothed_frame_ms: f32,
+    smoothed_render_cpu_ms: f32,
 }
 
 impl Diagnostics {
@@ -56,10 +65,13 @@ impl Diagnostics {
         if self.latest.is_none() {
             self.smoothed_fps = snapshot.fps;
             self.smoothed_frame_ms = snapshot.frame_ms;
+            self.smoothed_render_cpu_ms = snapshot.render_cpu_ms;
         } else {
             self.smoothed_fps += (snapshot.fps - self.smoothed_fps) * NEW_SAMPLE_WEIGHT;
             self.smoothed_frame_ms +=
                 (snapshot.frame_ms - self.smoothed_frame_ms) * NEW_SAMPLE_WEIGHT;
+            self.smoothed_render_cpu_ms +=
+                (snapshot.render_cpu_ms - self.smoothed_render_cpu_ms) * NEW_SAMPLE_WEIGHT;
         }
         self.latest = Some(snapshot);
     }
@@ -74,6 +86,10 @@ impl Diagnostics {
 
     pub fn smoothed_frame_ms(&self) -> f32 {
         self.smoothed_frame_ms
+    }
+
+    pub fn smoothed_render_cpu_ms(&self) -> f32 {
+        self.smoothed_render_cpu_ms
     }
 }
 

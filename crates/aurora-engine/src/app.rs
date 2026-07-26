@@ -1,5 +1,6 @@
 //! Application trait and cross-platform runner (native + WASM).
 
+use std::fmt;
 use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
@@ -9,9 +10,11 @@ use winit::window::{Window, WindowId};
 
 use crate::audio::Audio;
 use crate::color::Color;
+use crate::diagnostics::{DiagnosticSnapshot, Diagnostics};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::devtools::DebugHarness;
 use crate::input::Input;
+use crate::loader::AssetLoadQueue;
 use crate::renderer::Renderer;
 use crate::time::Time;
 
@@ -25,6 +28,8 @@ pub struct FrameCtx<'a> {
     pub renderer: &'a mut Renderer,
     /// Procedural beeps / SFX.
     pub audio: &'a mut Audio,
+    /// Runtime diagnostics snapshot source for HUDs and telemetry.
+    pub diagnostics: &'a Diagnostics,
 }
 
 /// Implement this for your game / demo.
@@ -59,6 +64,33 @@ enum UserEvent {
 
 /// Launch a game on the current platform (desktop window or browser canvas).
 pub fn run<G: Game>(game: G) {
+    if let Err(error) = run_result(game) {
+        log::error!("Aurora failed to start: {error}");
+    }
+}
+
+#[derive(Debug)]
+enum EngineStartError {
+    EventLoopBuild(String),
+    EventLoopRun(String),
+    WindowCreate(String),
+    RendererInit(String),
+}
+
+impl fmt::Display for EngineStartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EventLoopBuild(error) => write!(f, "failed to create event loop: {error}"),
+            Self::EventLoopRun(error) => write!(f, "event loop terminated with error: {error}"),
+            Self::WindowCreate(error) => write!(f, "failed to create window: {error}"),
+            Self::RendererInit(error) => write!(f, "renderer initialization failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for EngineStartError {}
+
+fn run_result<G: Game>(game: G) -> Result<(), EngineStartError> {
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "wasm32")] {
             init_logging_wasm();
@@ -69,7 +101,7 @@ pub fn run<G: Game>(game: G) {
 
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
-        .expect("failed to create event loop");
+        .map_err(|error| EngineStartError::EventLoopBuild(error.to_string()))?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
     let proxy = event_loop.create_proxy();
@@ -80,6 +112,8 @@ pub fn run<G: Game>(game: G) {
         renderer: None,
         time: Time::new(),
         input: Input::new(),
+        diagnostics: Diagnostics::default(),
+        asset_load_queue: AssetLoadQueue::default(),
         audio: Audio::new(),
         proxy,
         init_started: false,
@@ -95,9 +129,10 @@ pub fn run<G: Game>(game: G) {
             let mut app = app;
             event_loop
                 .run_app(&mut app)
-                .expect("event loop terminated with error");
+                .map_err(|error| EngineStartError::EventLoopRun(error.to_string()))?;
         }
     }
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -143,6 +178,8 @@ struct EngineApp<G: Game> {
     renderer: Option<Renderer>,
     time: Time,
     input: Input,
+    diagnostics: Diagnostics,
+    asset_load_queue: AssetLoadQueue,
     audio: Audio,
     proxy: EventLoopProxy<UserEvent>,
     init_started: bool,
@@ -160,16 +197,28 @@ impl<G: Game> EngineApp<G> {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let renderer = pollster::block_on(Renderer::new(window));
-            let _ = self.proxy.send_event(UserEvent::RendererReady(renderer));
+            match pollster::block_on(Renderer::new(window)) {
+                Ok(renderer) => {
+                    let _ = self.proxy.send_event(UserEvent::RendererReady(renderer));
+                }
+                Err(error) => {
+                    log::error!("{error}");
+                }
+            }
         }
 
         #[cfg(target_arch = "wasm32")]
         {
             let proxy = self.proxy.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let renderer = Renderer::new(window).await;
-                let _ = proxy.send_event(UserEvent::RendererReady(renderer));
+                match Renderer::new(window).await {
+                    Ok(renderer) => {
+                        let _ = proxy.send_event(UserEvent::RendererReady(renderer));
+                    }
+                    Err(error) => {
+                        log::error!("{error}");
+                    }
+                }
             });
         }
     }
@@ -220,11 +269,13 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
             }
         };
 
-        let window = Arc::new(
-            event_loop
-                .create_window(window_attrs)
-                .expect("failed to create window"),
-        );
+        let window = match event_loop.create_window(window_attrs) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
+                log::error!("{}", EngineStartError::WindowCreate(error.to_string()));
+                return;
+            }
+        };
         // Keep native pointer coordinates in the same logical-pixel space as
         // the camera/HUD. The renderer applies the same scale when building
         // its viewport, so selection and asset framing stay aligned on
@@ -373,6 +424,7 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                         input: &self.input,
                         renderer,
                         audio: &mut self.audio,
+                        diagnostics: &self.diagnostics,
                     };
                     game.on_fixed_update(&mut ctx);
                     fixed_steps += 1;
@@ -387,6 +439,7 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                         input: &self.input,
                         renderer,
                         audio: &mut self.audio,
+                        diagnostics: &self.diagnostics,
                     };
                     game.on_update(&mut ctx);
                     game.on_post_update(&mut ctx);
@@ -417,6 +470,12 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                         log::warn!("Surface error (other)");
                     }
                 }
+
+                self.diagnostics.record(DiagnosticSnapshot::capture(
+                    &self.time,
+                    renderer.stats(),
+                    &self.asset_load_queue,
+                ));
 
                 // Clear edge-triggered input after the frame has consumed it.
                 self.input.begin_frame();
