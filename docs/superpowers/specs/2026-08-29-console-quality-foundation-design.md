@@ -1,7 +1,7 @@
 # Aurora Engine Console-Quality Foundation
 
 **Date:** 2026-08-29  
-**Status:** Draft for review  
+**Status:** Approved
 **Scope:** Shared desktop and browser runtime; no vendor console SDK
 
 ## Goal
