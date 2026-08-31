@@ -76,6 +76,17 @@ impl Time {
         self.accumulator = (self.accumulator + self.delta).min(self.max_accumulator);
     }
 
+    /// Discard wall-clock and fixed-step state accumulated while the app was
+    /// suspended. The next tick starts a fresh frame interval.
+    pub fn reset_after_suspend(&mut self) {
+        self.last = InstantCompat::now();
+        self.delta = 0.0;
+        self.accumulator = 0.0;
+        self.alpha = 0.0;
+        self.fixed_steps_executed_last_frame = 0;
+        self.fixed_steps_discarded_last_frame = 0;
+    }
+
     /// Consume one fixed step if enough time has accumulated.
     /// Call in a loop: `while time.step_fixed() { sim(); }`
     pub fn step_fixed(&mut self) -> bool {
@@ -252,5 +263,23 @@ mod tests {
 
         assert!((time.accumulator - 0.017).abs() < 0.000_1);
         assert!((time.alpha - 0.85).abs() < 0.001);
+    }
+
+    #[test]
+    fn reset_after_suspend_clears_stale_frame_and_fixed_step_state() {
+        let mut time = Time::new();
+        time.delta = 0.1;
+        time.accumulator = 0.12;
+        time.alpha = 0.5;
+        time.fixed_steps_executed_last_frame = 3;
+        time.fixed_steps_discarded_last_frame = 2;
+
+        time.reset_after_suspend();
+
+        assert_eq!(time.delta, 0.0);
+        assert_eq!(time.accumulator, 0.0);
+        assert_eq!(time.alpha, 0.0);
+        assert_eq!(time.fixed_steps_executed_last_frame, 0);
+        assert_eq!(time.fixed_steps_discarded_last_frame, 0);
     }
 }
