@@ -8,9 +8,9 @@ struct PostUniforms {
     texel_x: f32,
     texel_y: f32,
     light_count: f32,
+    film_grain: f32,
+    speed_streaks: f32,
     _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
     lights: array<vec4<f32>, 16>,
     light_colors: array<vec4<f32>, 16>,
 }
@@ -49,6 +49,10 @@ fn tonemap_aces(c: vec3<f32>) -> vec3<f32> {
     let d = 0.59;
     let e = 0.14;
     return clamp((c * (a * c + b)) / (c * (cc * c + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn hash_noise(seed: vec2<f32>) -> f32 {
+    return fract(sin(dot(seed, vec2<f32>(12.9898, 78.233))) * 43758.5453);
 }
 
 @fragment
@@ -118,5 +122,30 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Subtle pulse
     color *= 0.97 + 0.03 * sin(u.time * 1.5);
 
-    return vec4<f32>(tonemap_aces(color), 1.0);
+    var tonemapped = tonemap_aces(color);
+
+    // Animated film grain, applied post-tonemap like a camera sensor overlay.
+    if (u.film_grain > 0.001) {
+        let grain_uv = uv * vec2<f32>(u.texel_y / u.texel_x, 1.0) * 540.0;
+        let noise = hash_noise(grain_uv + vec2<f32>(fract(u.time * 13.7) * 91.0, 0.0)) - 0.5;
+        tonemapped = clamp(tonemapped + vec3<f32>(noise) * u.film_grain * 0.14, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+
+    // Radial dash streaks, added post-tonemap like the grain overlay. The
+    // view angle is encoded through the unit direction so the three noise
+    // octaves rotate seamlessly (no atan2 branch-cut seam at 180 degrees).
+    if (u.speed_streaks > 0.001) {
+        let delta = uv - vec2<f32>(0.5, 0.5);
+        let radius = max(length(delta), 1e-4);
+        let dir = delta / radius;
+        var streak = hash_noise(dir * 14.0 + vec2<f32>(u.time * 5.0, 0.0));
+        streak += hash_noise(dir * 29.0 - vec2<f32>(u.time * 8.0, 0.0)) * 0.5;
+        streak += hash_noise(dir * 53.0 + vec2<f32>(u.time * 12.0, 0.0)) * 0.25;
+        streak = streak / 1.75;
+        let fade = 1.0 - smoothstep(0.05, 0.85, radius);
+        let add = streak * fade * u.speed_streaks * 0.25;
+        tonemapped = clamp(tonemapped + vec3<f32>(add), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+
+    return vec4<f32>(tonemapped, 1.0);
 }

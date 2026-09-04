@@ -3,6 +3,10 @@
 //! `Scene` deliberately owns simulation values only. Rendering stays in the
 //! renderer, so a scene can be tested, saved, or simulated without a GPU.
 
+use std::collections::HashMap;
+
+use glam::Vec2;
+
 /// Stable entity identifier with a generation counter.
 ///
 /// An ID becomes invalid when its entity is removed, even if the underlying
@@ -26,15 +30,31 @@ struct Slot<T> {
     value: Option<T>,
 }
 
+/// Minimal spatial contract so hierarchy propagation can compose offsets.
+///
+/// Implemented by any component type that carries a world position; games
+/// usually implement it once for their sprite/state tuple.
+pub trait Positioned {
+    fn position(&self) -> Vec2;
+    fn set_position(&mut self, position: Vec2);
+}
+
 /// Compact storage for one simulation value per entity.
 ///
 /// Games can use several `Scene`s keyed by the same `EntityId` later, but a
 /// single typed scene is a clear, small foundation for Aurora's first games.
+///
+/// Parent links (`attach`) make children follow parent movement deterministically:
+/// [`Scene::propagate`], run each fixed tick in stable slot order, applies the
+/// parents' per-tick displacement to every descendant (deep chains work).
+/// Loops are rejected at attach time.
 #[derive(Debug)]
 pub struct Scene<T> {
     slots: Vec<Slot<T>>,
     free: Vec<u32>,
     len: usize,
+    /// Child -> parent, generation-checked on use.
+    parents: HashMap<EntityId, EntityId>,
 }
 
 impl<T> Default for Scene<T> {
@@ -44,11 +64,12 @@ impl<T> Default for Scene<T> {
 }
 
 impl<T> Scene<T> {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             slots: Vec::new(),
             free: Vec::new(),
             len: 0,
+            parents: HashMap::new(),
         }
     }
 
@@ -147,7 +168,122 @@ impl<T> Scene<T> {
         let slot = self.slots.get_mut(entity.index as usize)?;
         (slot.generation == entity.generation).then_some(slot)
     }
+
+    /// Links `child` to follow `parent` (deep chains allowed). Re-attaching
+    /// replaces the previous link; cycles are rejected and reported.
+    pub fn attach(&mut self, child: EntityId, parent: EntityId) -> Result<(), HierarchyError> {
+        if child == parent {
+            return Err(HierarchyError::SelfParent);
+        }
+        // Reject links onto dead entities up front for a crisp contract.
+        let valid = |scene: &Self, id: EntityId| scene.contains(id);
+        if !valid(self, child) || !valid(self, parent) {
+            return Err(HierarchyError::DeadEntity);
+        }
+        // Cycle walk: can `parent` reach itself through the new edge?
+        let mut cursor = Some(parent);
+        while let Some(current) = cursor {
+            if current == child {
+                return Err(HierarchyError::Cycle);
+            }
+            cursor = self.parents.get(&current).copied();
+        }
+        self.parents.insert(child, parent);
+        Ok(())
+    }
+
+    /// Removes any parent link on `child`.
+    pub fn detach(&mut self, child: EntityId) -> bool {
+        self.parents.remove(&child).is_some()
+    }
+
+    pub fn parent_of(&self, child: EntityId) -> Option<EntityId> {
+        // Links referencing stale entities read as absent.
+        let parent = *self.parents.get(&child)?;
+        self.contains(parent).then_some(parent)
+    }
+
+    /// Applies game-reported per-tick movement to whole descendant chains.
+    ///
+    /// `moved` maps *live* entities to the world-space offset they shifted
+    /// this tick (movers, ferries, bosses). Each linked child receives its
+    /// ancestors' accumulated delta exactly once per tick. Chains resolve
+    /// deterministically when parents occupy lower slots than children (the
+    /// spawn-order convention); deeper nesting formed the other way converges
+    /// on the next tick, lag-bounded, never diverging.
+    pub fn propagate(&mut self, moved: &HashMap<EntityId, Vec2>)
+    where
+        T: Positioned,
+    {
+        if self.parents.is_empty() || moved.is_empty() {
+            return;
+        }
+        let mut links: Vec<(EntityId, EntityId)> = self
+            .parents
+            .iter()
+            .filter(|&(&child, &parent)| self.contains(child) && self.contains(parent))
+            .map(|(&child, &parent)| (child, parent))
+            .collect();
+        // Ascending child order keeps chains settle-fast for the spawn-order
+        // convention (parents before children); other orders still converge
+        // over rounds below.
+        links.sort_unstable_by_key(|&(child, _)| child);
+
+        let mut settled: HashMap<EntityId, Vec2> = HashMap::new();
+        for _ in 0..8 {
+            let mut changed = false;
+            for &(child, parent) in &links {
+                let Some(inherited) = moved
+                    .get(&parent)
+                    .copied()
+                    .or_else(|| settled.get(&parent).copied())
+                else {
+                    continue;
+                };
+                let next = match settled.get(&child) {
+                    Some(current) if *current == inherited => continue,
+                    Some(_) => inherited,
+                    None => inherited,
+                };
+                if settled.get(&child) != Some(&next) {
+                    settled.insert(child, next);
+                    changed = true;
+                }
+                let _ = changed;
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        for (child, delta) in settled {
+            if let Some(value) = self.get_mut(child) {
+                let next = value.position() + delta;
+                value.set_position(next);
+            }
+        }
+    }
 }
+
+/// Failure modes of [`Scene::attach`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HierarchyError {
+    SelfParent,
+    DeadEntity,
+    Cycle,
+}
+
+impl std::fmt::Display for HierarchyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SelfParent => write!(f, "an entity cannot parent itself"),
+            Self::DeadEntity => write!(f, "hierarchy link references despawned entity"),
+            Self::Cycle => write!(f, "attach would create a parenting cycle"),
+        }
+    }
+}
+
+impl std::error::Error for HierarchyError {}
 
 #[cfg(test)]
 mod tests {
@@ -164,5 +300,125 @@ mod tests {
         assert_ne!(original, replacement);
         assert!(!scene.contains(original));
         assert_eq!(scene.get(replacement), Some(&"new"));
+    }
+}
+
+#[cfg(test)]
+mod hierarchy_tests {
+    use super::*;
+
+    #[derive(Debug, Clone, Copy)]
+    struct Node {
+        position: Vec2,
+    }
+
+    impl Positioned for Node {
+        fn position(&self) -> Vec2 {
+            self.position
+        }
+        fn set_position(&mut self, position: Vec2) {
+            self.position = position;
+        }
+    }
+
+    #[test]
+    fn children_follow_parent_deltas_exactly_once_per_tick() {
+        let mut scene = Scene::new();
+        let parent = scene.spawn(Node {
+            position: Vec2::ZERO,
+        });
+        let child = scene.spawn(Node {
+            position: Vec2::new(40.0, -10.0),
+        });
+        let grandchild = scene.spawn(Node {
+            position: Vec2::new(-4.0, 8.0),
+        });
+        scene.attach(child, parent).expect("linear chain");
+        scene.attach(grandchild, child).expect("deep chain");
+
+        let moved = HashMap::from([(parent, Vec2::new(3.0, 0.0))]);
+        scene.propagate(&moved);
+
+        assert_eq!(scene.get(child).unwrap().position, Vec2::new(43.0, -10.0));
+        assert_eq!(
+            scene.get(grandchild).unwrap().position,
+            Vec2::new(-1.0, 8.0),
+            "grandchild inherits through the middle link"
+        );
+
+        // Idempotent per tick: replaying the same map must not double-move.
+        scene.propagate(&moved);
+        assert_eq!(scene.get(child).unwrap().position, Vec2::new(46.0, -10.0));
+    }
+
+    #[test]
+    fn rejections_cover_self_dead_and_cycle_cases() {
+        let mut scene = Scene::new();
+        let a = scene.spawn(Node {
+            position: Vec2::ZERO,
+        });
+        let b = scene.spawn(Node {
+            position: Vec2::ONE,
+        });
+        scene.attach(b, a).unwrap();
+
+        assert_eq!(scene.attach(a, a), Err(HierarchyError::SelfParent));
+        assert_eq!(scene.attach(a, b), Err(HierarchyError::Cycle));
+
+        scene.despawn(a);
+        let ghost_child = EntityId {
+            index: a.index(),
+            generation: 999,
+        };
+        assert_eq!(
+            scene.attach(ghost_child, b),
+            Err(HierarchyError::DeadEntity)
+        );
+    }
+
+    #[test]
+    fn stale_links_ignore_despawned_sides_and_detach_clears() {
+        let mut scene = Scene::new();
+        let parent = scene.spawn(Node {
+            position: Vec2::ZERO,
+        });
+        let child = scene.spawn(Node {
+            position: Vec2::ZERO,
+        });
+        scene.attach(child, parent).unwrap();
+        scene.despawn(parent);
+
+        assert_eq!(scene.parent_of(child), None, "stale parents read absent");
+        // And propagation with only the stale pair does nothing.
+        let moved = HashMap::from([(parent, Vec2::splat(50.0))]);
+        scene.propagate(&moved);
+        assert_eq!(scene.get(child).unwrap().position, Vec2::ZERO);
+
+        let new_parent = scene.spawn(Node {
+            position: Vec2::ZERO,
+        });
+        scene.attach(child, new_parent).unwrap();
+        assert!(scene.detach(child));
+        assert!(!scene.detach(child));
+    }
+
+    #[test]
+    fn chains_settle_multi_round_when_children_precede_parents() {
+        let mut scene = Scene::new();
+        // Spawn child FIRST so its slot sorts before its parent.
+        let child = scene.spawn(Node {
+            position: Vec2::ZERO,
+        });
+        let parent = scene.spawn(Node {
+            position: Vec2::ZERO,
+        });
+        scene.attach(child, parent).unwrap();
+
+        scene.propagate(&HashMap::from([(parent, Vec2::new(7.5, 2.25))]));
+        assert_eq!(
+            scene.get(child).unwrap().position,
+            Vec2::new(7.5, 2.25),
+            "reverse-order chains still settle"
+        );
     }
 }

@@ -3,6 +3,40 @@
 use crate::color::Color;
 use crate::renderer::GpuContext;
 
+const MAX_TEXTURE_DIMENSION: u32 = 8_192;
+const MAX_TEXTURE_BYTES: usize = 256 * 1024 * 1024;
+
+/// Validates a decoded RGBA payload before it reaches the GPU allocator.
+pub fn validate_rgba_payload(width: u32, height: u32, rgba_len: usize) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "texture dimensions must be nonzero, got {width}x{height}"
+        ));
+    }
+    if width > MAX_TEXTURE_DIMENSION || height > MAX_TEXTURE_DIMENSION {
+        return Err(format!(
+            "texture dimensions exceed maximum of {MAX_TEXTURE_DIMENSION}x{MAX_TEXTURE_DIMENSION}, got {width}x{height}"
+        ));
+    }
+    let expected = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| format!("texture dimensions overflow for {width}x{height}"))?;
+    let expected = usize::try_from(expected)
+        .map_err(|_| "texture payload exceeds the host address space".to_owned())?;
+    if expected > MAX_TEXTURE_BYTES {
+        return Err(format!(
+            "decoded texture payload exceeds maximum of {MAX_TEXTURE_BYTES} bytes, got {expected}"
+        ));
+    }
+    if rgba_len != expected {
+        return Err(format!(
+            "texture pixel payload has wrong size: expected {expected}, got {rgba_len}"
+        ));
+    }
+    Ok(())
+}
+
 fn pixel_len(width: u32, height: u32, channels: u32, what: &str) -> usize {
     let Some(bytes) = u64::from(width)
         .checked_mul(u64::from(height))
@@ -15,13 +49,8 @@ fn pixel_len(width: u32, height: u32, channels: u32, what: &str) -> usize {
 }
 
 fn expect_pixel_len(width: u32, height: u32, rgba: &[u8], what: &str) {
-    let expected = pixel_len(width, height, 4, what);
-    assert_eq!(
-        rgba.len(),
-        expected,
-        "texture pixel payload has wrong size for {what}: expected {expected}, got {}",
-        rgba.len()
-    );
+    validate_rgba_payload(width, height, rgba.len())
+        .unwrap_or_else(|error| panic!("invalid texture payload for {what}: {error}"));
 }
 
 /// Handle to a GPU texture + bind group for the sprite sampler layout.
@@ -105,8 +134,14 @@ impl Texture {
     /// Load from PNG (or other formats enabled on the `image` crate).
     pub fn from_bytes(gpu: &GpuContext<'_>, bytes: &[u8], label: &str) -> Result<Self, String> {
         let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+        let (w, h) = (img.width(), img.height());
+        let expected = u64::from(w)
+            .checked_mul(u64::from(h))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .unwrap_or(usize::MAX);
+        validate_rgba_payload(w, h, expected)?;
         let rgba = img.to_rgba8();
-        let (w, h) = rgba.dimensions();
         Ok(Self::from_rgba(gpu, w, h, &rgba, label))
     }
 
@@ -251,9 +286,9 @@ impl Texture {
         color: Color,
     ) -> Self {
         let frames = frames.max(1);
-        let w = frame_size
-            .checked_mul(frames)
-            .unwrap_or_else(|| panic!("orb atlas dimensions overflow: frame_size={frame_size}, frames={frames}"));
+        let w = frame_size.checked_mul(frames).unwrap_or_else(|| {
+            panic!("orb atlas dimensions overflow: frame_size={frame_size}, frames={frames}")
+        });
         let h = frame_size;
         let mut data = vec![0u8; pixel_len(w, h, 4, "orb_atlas_strip")];
         for f in 0..frames {
@@ -280,5 +315,17 @@ impl Texture {
             }
         }
         Self::from_rgba(gpu, w, h, &data, "orb_atlas")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_rgba_payload;
+
+    #[test]
+    fn rgba_payload_preflight_accepts_valid_data_and_rejects_limits() {
+        assert!(validate_rgba_payload(2, 2, 16).is_ok());
+        assert!(validate_rgba_payload(8_193, 1, 8_193 * 4).is_err());
+        assert!(validate_rgba_payload(1, 1, 256 * 1024 * 1024 + 1).is_err());
     }
 }

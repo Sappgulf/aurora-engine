@@ -3,8 +3,10 @@
 
 The server deliberately exposes a small, safe workflow for models working on
 this repository.  It never accepts a shell command or an arbitrary path.  The
-only potentially mutating operation is an explicitly selected validation lane,
-which is limited to fixed Cargo commands and is clearly annotated as such.
+only potentially mutating operations are explicitly selected validation lanes,
+limited to fixed Cargo commands, plus one dev-only agent-control tool that
+launches the platformer with a loopback-only, opt-in agent server and drives a
+bounded scripted scenario.
 
 Install the dependencies in ``requirements.txt`` and start it with:
 
@@ -19,14 +21,25 @@ import asyncio
 import json
 import logging
 import os
+import re
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Literal
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
+
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+from agent_control import AgentControlError, drive_platformer, drive_scenario, free_port, validate_scenario
 
 
 SERVER_NAME = "aurora_engine_mcp"
@@ -91,6 +104,34 @@ SCENARIO_REPORTS: dict[str, tuple[str, str]] = {
         "reports/latest.json",
     ),
 }
+
+PLATFORMER_TEST_COMMAND: tuple[str, ...] = ("cargo", "test", "-p", "platformer")
+PLATFORMER_TEST_TIMEOUT_S = 240
+LEVEL_CHECK_COMMAND: tuple[str, ...] = (
+    "cargo",
+    "run",
+    "-q",
+    "-p",
+    "platformer",
+    "--bin",
+    "level-check",
+    "--",
+)
+LEVEL_CHECK_TIMEOUT_S = 120
+LEVEL_SOLVE_TIMEOUT_S = 240
+LEVELS_DIRNAME = Path("demos") / "platformer" / "levels"
+MAX_LEVEL_JSON_CHARS = 60_000
+SAVE_NAME_MIN_CHARS = 3
+SAVE_NAME_MAX_CHARS = 40
+SAVE_NAME_CLEANUP = re.compile(r"[^a-z0-9]+")
+EVIDENCE_DIRECTORIES: tuple[Path, ...] = (
+    REPO_ROOT / "playtests" / "screenshots",
+    Path(tempfile.gettempdir()) / "aurora-mcp",
+)
+EVIDENCE_LIMIT = 50
+AGENT_GAME_COMMAND: tuple[str, ...] = ("cargo", "run", "-q", "-p", "platformer")
+AGENT_GAME_GRACE_S = 5.0
+AGENT_CLEANUP_SLACK_S = 10.0
 
 
 class ResponseFormat(str, Enum):
@@ -191,6 +232,188 @@ def _system_records() -> list[dict[str, str]]:
             }
         )
     return records
+
+
+def _terminate_process_group(process: subprocess.Popen, grace_s: float = AGENT_GAME_GRACE_S) -> None:
+    """Stop the game process and anything it spawned; best effort, never raises."""
+    try:
+        group: int | None = None
+        if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+            try:
+                group = os.getpgid(process.pid)
+            except ProcessLookupError:
+                group = None
+            if group is not None:
+                os.killpg(group, signal.SIGTERM)
+        else:
+            process.terminate()
+        try:
+            process.wait(timeout=grace_s)
+        except subprocess.TimeoutExpired:
+            if group is not None:
+                os.killpg(group, signal.SIGKILL)
+            else:
+                process.kill()
+            process.wait(timeout=grace_s)
+    except (OSError, subprocess.SubprocessError) as exc:
+        LOGGER.warning("Agent game cleanup issue: %s", type(exc).__name__)
+
+
+def _default_agent_screenshot() -> Path:
+    """Screenshot target under the system temp dir; the repo stays untouched."""
+    return Path(tempfile.gettempdir()) / "aurora-mcp" / "platformer-agent.png"
+
+
+def _level_input_path(level: str) -> tuple[Path, bool]:
+    """Resolve the level input to one file, or raise ValueError with guidance.
+
+    A string is either a repo-relative path under ``demos/platformer/levels/``
+    or raw level JSON, which is written only to a system temp file. Returns the
+    path and whether it is a temp file the caller must clean up.
+    """
+    trimmed = level.strip()
+    if not trimmed:
+        raise ValueError("The level input is empty. Provide level JSON or a demos/platformer/levels/ path.")
+    if trimmed.startswith("{"):
+        try:
+            json.loads(trimmed)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"The level string is not valid JSON: {exc}") from exc
+        handle_fd, temp_name = tempfile.mkstemp(prefix="aurora-level-", suffix=".json")
+        with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
+            handle.write(trimmed)
+        return Path(temp_name), True
+
+    relative = Path(trimmed)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("Level paths must be repository-relative and stay inside demos/platformer/levels/.")
+    levels_root = (REPO_ROOT / LEVELS_DIRNAME).resolve()
+    resolved: Path | None = None
+    for candidate in (REPO_ROOT / relative, levels_root / relative):
+        resolved_candidate = candidate.resolve()
+        if levels_root in resolved_candidate.parents:
+            resolved = resolved_candidate
+            break
+    if resolved is None:
+        raise ValueError("Level paths must stay inside demos/platformer/levels/.")
+    if resolved.suffix != ".json" or not resolved.is_file():
+        raise ValueError(f"'{trimmed}' is not an existing .json level under demos/platformer/levels/.")
+    return resolved, False
+
+
+def _sanitize_save_name(save_name: str) -> str:
+    """Fold a save name to a safe file stem: lowercase letters, digits, hyphens.
+
+    Dots, slashes, and every other separator become hyphens, leading and
+    trailing hyphens are dropped, and the stem must end up 3..=40 characters.
+    Raises ValueError with guidance when nothing usable remains.
+    """
+    cleaned = SAVE_NAME_CLEANUP.sub("-", save_name.strip().lower())[:SAVE_NAME_MAX_CHARS].strip("-")
+    if not SAVE_NAME_MIN_CHARS <= len(cleaned) <= SAVE_NAME_MAX_CHARS:
+        raise ValueError(
+            f"save_name must sanitize to {SAVE_NAME_MIN_CHARS}-{SAVE_NAME_MAX_CHARS} characters of "
+            "lowercase letters, digits, and hyphens (no dots or slashes survive sanitizing)."
+        )
+    return cleaned
+
+
+def _evidence_records() -> list[dict[str, object]]:
+    """Collect screenshot-evidence metadata from the two fixed evidence roots."""
+    found: list[tuple[float, dict[str, object]]] = []
+    for directory in EVIDENCE_DIRECTORIES:
+        try:
+            candidates = sorted(directory.glob("*.png"))
+        except OSError:
+            continue
+        for candidate in candidates:
+            try:
+                stat = candidate.stat()
+            except OSError:
+                continue
+            found.append(
+                (
+                    stat.st_mtime,
+                    {
+                        "name": candidate.name,
+                        "path": str(candidate.resolve()),
+                        "size_bytes": stat.st_size,
+                        "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                    },
+                )
+            )
+    found.sort(key=lambda item: item[0], reverse=True)
+    return [record for _, record in found[:EVIDENCE_LIMIT]]
+
+
+async def _run_level_check(path: Path, *, solve: bool = False, timeout_s: int = LEVEL_CHECK_TIMEOUT_S) -> dict[str, object]:
+    """Run the fixed level-check binary against one level file and parse its JSON line.
+
+    With ``solve`` the binary is additionally asked for a bot-solve proof. In
+    that mode it exits 1 when the level is unsolvable while still printing its
+    JSON verdict, so a non-zero exit is reported with the parsed payload rather
+    than discarded raw output.
+    """
+    command = (*LEVEL_CHECK_COMMAND, str(path), *(("--solve",) if solve else ()))
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=REPO_ROOT,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        return {
+            "title": "Level check failed",
+            "command": " ".join(command),
+            "error": f"level-check exceeded {LEVEL_CHECK_TIMEOUT_S} seconds and was stopped.",
+        }
+    except OSError as exc:
+        LOGGER.warning("level-check could not start: %s", type(exc).__name__)
+        return {
+            "title": "Level check failed",
+            "command": " ".join(command),
+            "error": "Cargo could not start level-check. Confirm Rust is installed and demos/platformer builds.",
+        }
+
+    output = stdout.decode("utf-8", errors="replace").strip()
+    if process.returncode != 0:
+        return {
+            "title": "Level check failed",
+            "command": " ".join(command),
+            "exit_code": process.returncode,
+            "output_tail": output[-4_000:],
+        }
+    json_line = next((line for line in reversed(output.splitlines()) if line.strip().startswith("{")), None)
+    if json_line is None:
+        return {
+            "title": "Level check failed",
+            "command": " ".join(command),
+            "error": "level-check produced no JSON line.",
+            "output_tail": output[-4_000:],
+        }
+    try:
+        parsed = json.loads(json_line)
+    except json.JSONDecodeError:
+        return {
+            "title": "Level check failed",
+            "command": " ".join(command),
+            "error": "level-check's final line was not valid JSON.",
+            "output_tail": output[-4_000:],
+        }
+    if not isinstance(parsed, dict):
+        return {
+            "title": "Level check failed",
+            "command": " ".join(command),
+            "error": "level-check's JSON line was not an object.",
+            "output_tail": output[-4_000:],
+        }
+    return {
+        "title": "Platformer level solve check" if solve else "Platformer level check",
+        "command": " ".join(command),
+        "exit_code": process.returncode,
+        **parsed,
+    }
 
 
 mcp = FastMCP(SERVER_NAME)
@@ -452,6 +675,358 @@ async def aurora_run_validation(
         },
         ResponseFormat.MARKDOWN,
     )
+
+
+@mcp.tool(
+    name="aurora_playtest_platformer",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+async def aurora_playtest_platformer() -> str:
+    """Run the platformer's own test suite as one bounded playtest lane.
+
+    Executes the fixed command ``cargo test -p platformer`` with a 240-second
+    bound and reports structured pass/fail plus the tail of the output. The
+    tool cannot run arbitrary commands or modify source; Cargo may create
+    local build artifacts, so this is deliberately not marked read-only.
+    """
+    command = PLATFORMER_TEST_COMMAND
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=REPO_ROOT,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=PLATFORMER_TEST_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return f"Error: the platformer playtest lane exceeded {PLATFORMER_TEST_TIMEOUT_S} seconds and was stopped. Use aurora_run_validation's fast lane or inspect the local build."
+    except OSError as exc:
+        LOGGER.warning("Platformer playtest could not start: %s", type(exc).__name__)
+        return "Error: Cargo could not start. Confirm Rust is installed and that demos/platformer builds."
+
+    output = stdout.decode("utf-8", errors="replace").strip()
+    tail = output[-8_000:] if output else "(Cargo produced no output.)"
+    status = "passed" if process.returncode == 0 else "failed"
+    return _format(
+        {
+            "title": f"Platformer playtest {status}",
+            "command": " ".join(command),
+            "exit_code": process.returncode,
+            "passed": process.returncode == 0,
+            "output_tail": tail,
+        },
+        ResponseFormat.MARKDOWN,
+    )
+
+
+@mcp.tool(
+    name="aurora_validate_level",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+async def aurora_validate_level(
+    level: Annotated[str, Field(min_length=1, max_length=20_000, description="A platformer level as a JSON string, or a repo-relative path under demos/platformer/levels/.")],
+) -> str:
+    """Validate one platformer level with the fixed level-check binary.
+
+    ``level`` is either raw level JSON (written only to a system temp file) or a
+    repo-relative path under ``demos/platformer/levels/``; absolute paths and
+    any traversal outside that directory are rejected. The tool runs only the
+    allow-listed ``cargo run -q -p platformer --bin level-check -- <path>``
+    command with a 120-second bound and returns the binary's JSON verdict.
+    """
+    temp_path: Path | None = None
+    try:
+        temp_path, is_temp = _level_input_path(level)
+        return _format(await _run_level_check(temp_path), ResponseFormat.MARKDOWN)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    except OSError as exc:
+        LOGGER.warning("Level validation failed: %s", type(exc).__name__)
+        return "Error: the level input could not be read or staged."
+    finally:
+        if temp_path is not None and is_temp:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+@mcp.tool(
+    name="aurora_level_author",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+async def aurora_level_author(
+    level_json: Annotated[str, Field(min_length=2, max_length=MAX_LEVEL_JSON_CHARS, description="The full platformer level as a JSON object string.")],
+    save_name: Annotated[str | None, Field(max_length=80, description="Optional file stem; when given, a level that passes validation and the bot solve is persisted to demos/platformer/levels/<save_name>.json.")] = None,
+    overwrite: Annotated[bool, Field(description="Allow replacing an existing persisted level file.")] = False,
+) -> str:
+    """Validate authored level JSON and require a bot-solve proof before persisting.
+
+    The JSON is parsed (it must be an object) and staged in a system temp
+    file, then checked with the fixed level-check binary. When the level
+    declares a non-empty ``solution_route``, a second ``--solve`` run must
+    report ``solvable: true``. With ``save_name``, a level that passed both
+    stages is copied to ``demos/platformer/levels/<save_name>.json``; an
+    existing file is never overwritten unless ``overwrite`` is true.
+    """
+    try:
+        parsed = json.loads(level_json)
+    except json.JSONDecodeError as exc:
+        return f"Error: level_json is not valid JSON: {exc}"
+    if not isinstance(parsed, dict):
+        return "Error: level_json must be a JSON object."
+
+    safe_name: str | None = None
+    if save_name is not None:
+        try:
+            safe_name = _sanitize_save_name(save_name)
+        except ValueError as exc:
+            return f"Error: {exc}"
+        if (REPO_ROOT / LEVELS_DIRNAME / f"{safe_name}.json").exists() and not overwrite:
+            return f"Error: demos/platformer/levels/{safe_name}.json already exists; pass overwrite=true to replace it."
+
+    temp_path: Path | None = None
+    try:
+        handle_fd, temp_name = tempfile.mkstemp(prefix="aurora-author-", suffix=".json")
+        with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(parsed, indent=2) + "\n")
+        temp_path = Path(temp_name)
+
+        validation = await _run_level_check(temp_path)
+        report: dict[str, object] = {
+            "title": "Level authoring report",
+            "level_name": parsed.get("name") or parsed.get("id"),
+            "save_name": safe_name,
+            "validation": validation,
+            "solve": None,
+            "persisted": None,
+        }
+        validation_ok = (
+            "error" not in validation
+            and validation.get("exit_code") == 0
+            and validation.get("valid") is True
+        )
+        if not validation_ok:
+            report["solve"] = "skipped: validation failed"
+            return _format(report, ResponseFormat.JSON)
+
+        if not parsed.get("solution_route"):
+            report["solve"] = "skipped: the level declares no solution_route"
+        else:
+            solve = await _run_level_check(temp_path, solve=True, timeout_s=LEVEL_SOLVE_TIMEOUT_S)
+            report["solve"] = solve
+            if "error" in solve or solve.get("solvable") is not True:
+                return _format(report, ResponseFormat.JSON)
+
+        if safe_name is None:
+            return _format(report, ResponseFormat.JSON)
+
+        destination = REPO_ROOT / LEVELS_DIRNAME / f"{safe_name}.json"
+        if destination.exists() and not overwrite:
+            report["persist_error"] = "the destination appeared mid-run; nothing was overwritten"
+            return _format(report, ResponseFormat.JSON)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(temp_path, destination)
+        report["persisted"] = str(destination.relative_to(REPO_ROOT))
+        return _format(report, ResponseFormat.JSON)
+    except (OSError, TypeError, ValueError) as exc:
+        LOGGER.warning("Level authoring failed: %s", type(exc).__name__)
+        return "Error: the level could not be staged, checked, or persisted."
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+@mcp.tool(
+    name="aurora_evidence_gallery",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+async def aurora_evidence_gallery(
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN,
+) -> str:
+    """List screenshot evidence PNGs from the repo's playtests/screenshots and the system temp area.
+
+    Read-only: scans the two fixed evidence directories for ``*.png`` files
+    and reports name, absolute path, size in bytes, and modification time
+    (ISO 8601), newest first, capped at 50 entries. It never deletes,
+    renames, or rewrites anything.
+    """
+    try:
+        screenshots = _evidence_records()
+    except OSError as exc:
+        LOGGER.warning("Evidence gallery scan failed: %s", type(exc).__name__)
+        return "Error: the screenshot evidence directories could not be scanned."
+    payload = {
+        "title": "Aurora evidence gallery",
+        "count": len(screenshots),
+        "limit": EVIDENCE_LIMIT,
+        "directories": [str(directory) for directory in EVIDENCE_DIRECTORIES],
+        "screenshots": screenshots,
+    }
+    return _format(payload, response_format)
+
+
+@mcp.tool(
+    name="aurora_agent_control",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+)
+async def aurora_agent_control(
+    max_seconds: Annotated[int, Field(ge=10, le=120, description="Overall bound for the whole scenario in seconds.")] = 120,
+    screenshot_path: Annotated[str | None, Field(max_length=400, description="Optional absolute path for the captured PNG; defaults to a file under the system temp directory.")] = None,
+) -> str:
+    """Launch the native platformer with the agent control plane and drive one bounded scenario.
+
+    Starts ``cargo run -q -p platformer`` with ``AURORA_AGENT_PORT`` bound to a
+    free loopback port (20000-40000 preferred), drives the start-and-move
+    scenario over the documented agent protocol, captures a screenshot, and
+    always terminates the game process group. Dev-only: the control plane is
+    loopback-only and opt-in per launch via the environment variable, and the
+    tool never leaves a game process behind. Requires an engine build that
+    speaks the AURORA_AGENT_PORT protocol.
+    """
+    shot = _default_agent_screenshot()
+    if screenshot_path:
+        candidate = Path(screenshot_path).expanduser()
+        if not candidate.is_absolute():
+            return "Error: screenshot_path must be an absolute path."
+        shot = candidate
+
+    port = free_port()
+    env = os.environ.copy()
+    env["AURORA_AGENT_PORT"] = str(port)
+    try:
+        process = subprocess.Popen(
+            list(AGENT_GAME_COMMAND),
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        LOGGER.warning("Agent game could not start: %s", type(exc).__name__)
+        return "Error: Cargo could not start the platformer. Confirm Rust is installed and that demos/platformer builds."
+
+    try:
+        transcript = await asyncio.wait_for(
+            asyncio.to_thread(
+                drive_platformer,
+                port,
+                shot,
+                max(float(max_seconds) - AGENT_CLEANUP_SLACK_S, 5.0),
+            ),
+            timeout=float(max_seconds),
+        )
+    except (asyncio.TimeoutError, AgentControlError, OSError, ValueError) as exc:
+        LOGGER.warning("Agent control scenario failed: %s", type(exc).__name__)
+        return _format(
+            {
+                "title": "Agent control scenario failed",
+                "port": port,
+                "error": (
+                    f"{exc}. Confirm the engine build supports the AURORA_AGENT_PORT "
+                    "agent control plane and that demos/platformer compiles."
+                ),
+            },
+            ResponseFormat.JSON,
+        )
+    finally:
+        _terminate_process_group(process)
+
+    return _format(transcript, ResponseFormat.JSON)
+
+
+@mcp.tool(
+    name="aurora_agent_scenario",
+    description=(
+        "Run a custom agent-authored scenario against the platformer's agent control plane. "
+        "Each step is one object: a protocol command (cmd/state/inject_key/inject_pad_button/"
+        "inject_pad_stick/"
+        "inject_mouse_button/inject_mouse_move/inject_scroll/screenshot/game with its args) plus "
+        "optional control directives (wait_seconds, poll_state + poll_timeout_s). With launch=true "
+        "(default) the game is started on a free loopback port and always cleaned up; with "
+        "launch=false, attach to an already-running game on the given AURORA_AGENT_PORT. "
+        "Dev-only: loopback, bounded, never leaves a process behind."
+    ),
+)
+async def aurora_agent_scenario(
+    commands: Annotated[list[dict], Field(
+        description="Ordered scenario steps, e.g. "
+                    "[{\"cmd\": \"inject_key\", \"key\": \"Space\", \"down\": true}, "
+                    "{\"poll_state\": {\"screen\": \"playing\"}}, "
+                    "{\"cmd\": \"inject_key\", \"key\": \"KeyD\", \"down\": true}, "
+                    "{\"poll_state\": {\"collected\": 1}, \"poll_timeout_s\": 20}]",
+        max_length=64,
+    )],
+    max_seconds: Annotated[int, Field(ge=10, le=240, description="Overall bound for the scenario in seconds.")] = 120,
+    launch: Annotated[bool, Field(description="Start a fresh game (true) or attach to a running one (false).")] = True,
+    port: Annotated[int | None, Field(ge=1024, le=65535, description="Attach port when launch=false (the game's AURORA_AGENT_PORT).")] = None,
+) -> str:
+    """Compose and run an arbitrary bounded scenario over the agent protocol.
+
+    This is the open-ended counterpart to aurora_agent_control: agents author
+    their own plans (start a level, drive to a pickup, teleport, verify state,
+    capture evidence) and get a full transcript back.
+    """
+    try:
+        plan = validate_scenario(list(commands))
+    except AgentControlError as exc:
+        return f"Error: {exc}"
+
+    if launch:
+        attach_port = free_port()
+        env = os.environ.copy()
+        env["AURORA_AGENT_PORT"] = str(attach_port)
+        try:
+            process = subprocess.Popen(
+                list(AGENT_GAME_COMMAND),
+                cwd=REPO_ROOT,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            LOGGER.warning("Agent game could not start")
+            return "Error: Cargo could not start the platformer. Confirm demos/platformer builds."
+    else:
+        if port is None:
+            return "Error: launch=false requires the port of a running game's AURORA_AGENT_PORT."
+        attach_port = int(port)
+
+    try:
+        transcript = await asyncio.wait_for(
+            asyncio.to_thread(
+                drive_scenario,
+                attach_port,
+                plan,
+                None,
+                max(float(max_seconds) - AGENT_CLEANUP_SLACK_S, 5.0),
+            ),
+            timeout=float(max_seconds),
+        )
+    except (asyncio.TimeoutError, AgentControlError, OSError, ValueError) as exc:
+        LOGGER.warning("Agent scenario failed: %s", type(exc).__name__)
+        return _format(
+            {
+                "title": "Agent scenario failed",
+                "port": attach_port,
+                "error": str(exc),
+                "hint": (
+                    "Verify the engine build supports the AURORA_AGENT_PORT control plane "
+                    "and that every poll_state expectation is reachable."
+                ),
+            },
+            ResponseFormat.JSON,
+        )
+    finally:
+        if launch:
+            _terminate_process_group(process)
+
+    return _format(transcript, ResponseFormat.JSON)
 
 
 if __name__ == "__main__":

@@ -134,7 +134,8 @@ impl Camera2D {
     }
 }
 
-/// A reusable camera controller with smooth follow, world bounds, and transient shake.
+/// A reusable camera controller with smooth follow, world bounds, transient shake,
+/// and optional velocity look-ahead.
 #[derive(Debug, Clone)]
 pub struct CameraRig {
     /// World-space point to keep near the camera center.
@@ -145,7 +146,13 @@ pub struct CameraRig {
     pub dead_zone: Vec2,
     /// Optional limits for the unshaken camera view.
     pub bounds: Option<Aabb>,
+    /// Optional world-space velocity of the followed subject (platformers set
+    /// this from the player body). The rig leads toward it by [`Self::look_ahead`].
+    pub target_velocity: Vec2,
+    /// Maximum lead distance in world units. Zero disables look-ahead.
+    pub look_ahead: f32,
     anchor: Option<Vec2>,
+    lead: Vec2,
     shake: CameraShake,
 }
 
@@ -171,7 +178,10 @@ impl CameraRig {
             follow_speed: 12.0,
             dead_zone: Vec2::splat(32.0),
             bounds: None,
+            target_velocity: Vec2::ZERO,
+            look_ahead: 0.0,
             anchor: None,
+            lead: Vec2::ZERO,
             shake: CameraShake::default(),
         }
     }
@@ -201,8 +211,28 @@ impl CameraRig {
     /// Advance the rig and apply its result to the supplied camera.
     pub fn update(&mut self, camera: &mut Camera2D, delta_seconds: f32) {
         let dt = delta_seconds.max(0.0);
+
+        // Smooth velocity look-ahead: ease the lead toward the subject's
+        // motion direction so quick direction flips do not snap the camera.
+        let look_target = if self.look_ahead > 0.0 && self.target_velocity.is_finite() {
+            let magnitude = self.target_velocity.length();
+            if magnitude > f32::EPSILON {
+                self.target_velocity / magnitude * (magnitude.min(self.look_ahead))
+            } else {
+                Vec2::ZERO
+            }
+        } else {
+            Vec2::ZERO
+        };
+        let lead_blend = 1.0 - (-6.0 * dt).exp();
+        self.lead = self.lead.lerp(look_target, lead_blend);
+        // Kill lead drift from idle float error so a stopped player centers.
+        if look_target == Vec2::ZERO && self.lead.length() < 0.5 {
+            self.lead = Vec2::ZERO;
+        }
+
         let current = self.anchor.unwrap_or(camera.position);
-        let offset = self.target - current;
+        let offset = (self.target + self.lead) - current;
         let desired = current
             + Vec2::new(
                 Self::outside_dead_zone(offset.x, self.dead_zone.x.max(0.0)),
@@ -318,5 +348,37 @@ mod rig_tests {
         rig.update(&mut camera, 1.0);
         assert_eq!(camera.position, Vec2::new(50.0, 50.0));
         assert!(!rig.is_shaking());
+    }
+
+    #[test]
+    fn look_ahead_leads_toward_motion_and_returns_when_still() {
+        let mut camera = Camera2D::new(400.0, 400.0);
+        let mut rig = CameraRig::new(Vec2::ZERO);
+        rig.follow_speed = 10_000.0;
+        rig.dead_zone = Vec2::ZERO;
+        rig.look_ahead = 80.0;
+        rig.target_velocity = Vec2::new(600.0, 0.0);
+        rig.snap_to_target(&mut camera);
+
+        // A few frames of motion: the anchor drifts ahead of the target.
+        for _ in 0..30 {
+            rig.update(&mut camera, 1.0 / 60.0);
+        }
+        assert!(
+            camera.position.x > 40.0,
+            "camera leads into motion (x={})",
+            camera.position.x
+        );
+
+        // Once the subject stops, the lead decays back toward center.
+        rig.target_velocity = Vec2::ZERO;
+        for _ in 0..90 {
+            rig.update(&mut camera, 1.0 / 60.0);
+        }
+        assert!(
+            camera.position.x.abs() < 8.0,
+            "lead decays after stopping (x={})",
+            camera.position.x
+        );
     }
 }

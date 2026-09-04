@@ -1,57 +1,95 @@
 {
   "schema_version": 1,
-  "iteration": "FOUNDRY-006",
-  "title": "Allocation-stable deterministic combat loop",
+  "iteration": "ENGINE-017",
+  "title": "Engine upgrade galore: culling, atlas packing, speed lines, debug shapes, collision events, water, emitters, themes, power-ups, boss, authoring loop",
   "status": "passed",
-  "date": "2026-07-19",
+  "date": "2026-08-29",
   "acceptance": {
-    "combat_snapshot_reused": true,
-    "combat_attack_buffer_reused": true,
-    "combat_buffer_growths": 0,
-    "canonical_hash_contract_preserved": true,
-    "canonical_victory_preserved": true,
-    "browser_regression_lane_preserved": true
+    "sprite_culling_tested_with_stats": true,
+    "atlas_packer_tested_no_overlap_deterministic": true,
+    "speed_streaks_post_pass": true,
+    "debug_shapes_api": true,
+    "collision_event_stream_tested": true,
+    "water_buoyancy_tested": true,
+    "rate_emitters_tested": true,
+    "level_themes_applied_all_levels": true,
+    "powerups_double_jump_long_dash_tested": true,
+    "boss_arena_bot_verified": true,
+    "five_levels_replay_identical": true,
+    "mcp_level_author_and_gallery": true,
+    "browser_specs_passed": true,
+    "canonical_hash_contract_preserved": true
   },
   "evidence": {
     "cargo_fmt_check": "passed",
     "cargo_clippy_all_targets_all_features": "passed",
     "cargo_test_workspace": {
       "status": "passed",
-      "tests": 69
+      "tests": 431
     },
-    "last_light_tests": 20,
+    "engine_tests": 215,
+    "platformer_tests": 32,
     "wasm_workspace_check": "passed",
-    "trunk_release_build_last_light": "passed",
-    "mcp_stdio_smoke_test": "passed",
-    "npm_audit_high": "0 vulnerabilities",
-    "playwright_projects": 2,
-    "browser_checkpoints_per_project": 3,
-    "browser_screenshots": 6,
-    "browser_png_dimensions": ["1280x720", "2560x1440"],
-    "combat_buffer_capacity": {
-      "snapshot": 32,
-      "attacks": 32,
-      "ticks_observed": 3600,
-      "capacity_changes": 0
+    "trunk_release_build_platformer": "passed",
+    "platformer_web_budget": {
+      "wasm_bytes": 695439,
+      "budget_bytes": 3145728
     },
-    "deterministic_scenario": "last_light.reclaim.relay_production",
-    "deterministic_ticks_per_run": 3600,
-    "deterministic_commands": 8,
-    "deterministic_replay_runs": 2,
-    "determinism_mismatches": 0,
-    "deterministic_outcome": "victory",
-    "mcp_scenario_id": "last_light.reclaim.relay_production",
-    "browser_smoke": {
-      "status": "passed",
-      "browser": "Chromium headless with WebGPU",
-      "actions": ["mission select", "deploy", "tactical pause", "resume", "queue Warden"],
-      "observed": ["DPR-scaled backing stores", "six screenshots", "safe zones separated", "production command card visible", "no console errors"]
+    "mcp_stdio_smoke_test": "passed",
+    "mcp_tools": 12,
+    "renderer": {
+      "sprite_culling": "half-diagonal circle test, culled_sprites stat",
+      "atlas_pack": "shelf packer, pow2, deterministic, half-texel uvs",
+      "speed_streaks": "radial hash streaks keyed off dash state",
+      "debug_shapes": "aabb/ray/grid queue, cleared per frame"
+    },
+    "simulation": {
+      "collision_events": "physics_step_events: floor/wall/ceiling x world/platform/oneway/slope",
+      "water": "gravity 0.35x, drag 2.5/s, terminal 240, in_water flag",
+      "emitters": "RateEmitter deterministic accumulation + emit_single"
+    },
+    "gameplay": {
+      "themes": "5 authored palettes (navy/teal/violet/dusk/crimson)",
+      "powerups": "double_jump + long_dash with air-jump budget",
+      "boss": "CORE arena: hp 3, speed ramp per hit, bounce-to-shelf loop, bot-verified 10.0s",
+      "levels": 5
+    },
+    "platformer_playthroughs": {
+      "crystal_run": {
+        "won": true
+      },
+      "conduit_climb": {
+        "won": true
+      },
+      "windlift": {
+        "won": true
+      },
+      "skyline": {
+        "won": true
+      },
+      "core": {
+        "won": true,
+        "sim_seconds": 10.0
+      },
+      "replay_bit_identical": [
+        "crystal-run",
+        "conduit-climb",
+        "windlift",
+        "skyline",
+        "core"
+      ]
+    },
+    "browser": {
+      "agent_specs": "2 passed",
+      "browser": "Chromium headless with WebGPU"
     }
   },
   "known_gaps": [
-    "GitHub-hosted CI execution remains unobserved until these commits are pushed",
-    "Path-following still collects active path ids into a temporary vector",
-    "HUD command-card row construction still allocates strings and a vector per frame"
+    "GitHub-hosted CI execution remains unobserved",
+    "crates.io publish pending account credentials",
+    "IBL on the 3D path remains open",
+    "in-engine level editor preview remains open",
+    "water surface rendering is flat tint (no waves)"
   ],
-  "next_task": "FOUNDRY-007"
+  "next_task": "ENGINE-018"
 }

@@ -127,6 +127,9 @@ pub enum MissionLandmarkKind {
 }
 
 impl MissionLandmarkKind {
+    /// Kept for HUD/debug tooling that renders landmark tags directly from
+    /// mission data; not every build reads it today.
+    #[allow(dead_code)]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Objective => "OBJECTIVE",
@@ -144,6 +147,8 @@ impl MissionLandmarkKind {
 pub struct MissionLandmark {
     pub kind: MissionLandmarkKind,
     pub position: Vec2,
+    /// Human-readable tag mirrored by [`MissionLandmarkKind::label`].
+    #[allow(dead_code)]
     pub label: &'static str,
 }
 

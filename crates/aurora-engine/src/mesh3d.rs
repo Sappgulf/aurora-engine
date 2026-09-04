@@ -28,6 +28,16 @@ pub enum MeshError {
     IndexOutOfBounds,
 }
 
+impl std::fmt::Display for MeshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyVertices => write!(f, "mesh has no vertices"),
+            Self::NonTriangleIndices => write!(f, "mesh index count is not a multiple of three"),
+            Self::IndexOutOfBounds => write!(f, "mesh index references a missing vertex"),
+        }
+    }
+}
+
 impl Mesh3D {
     pub fn new(vertices: Vec<MeshVertex>, indices: Vec<u32>) -> Result<Self, MeshError> {
         if vertices.is_empty() {
@@ -165,8 +175,7 @@ impl Mesh3D {
         let radius = 0.5;
 
         let vertex_capacity = {
-            let Some(vertex_count) = u64::from(segments + 1)
-                .checked_mul(u64::from(rings + 1))
+            let Some(vertex_count) = u64::from(segments + 1).checked_mul(u64::from(rings + 1))
             else {
                 panic!("uv sphere segment/ring count overflows capacity");
             };

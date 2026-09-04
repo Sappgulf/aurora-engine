@@ -1,2 +1,4 @@
 # Official Python SDK for the Model Context Protocol server in aurora_mcp.py.
 mcp>=1.12,<2
+# agent_control.py and the helper tests in test_protocol.py use only the
+# Python standard library; no additional packages are required for them.

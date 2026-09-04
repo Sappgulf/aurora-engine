@@ -1,0 +1,11 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[watch]
+watch = ["../../crates/aurora-engine", ".", "levels"]
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8082
+open = false

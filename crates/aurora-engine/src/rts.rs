@@ -105,7 +105,11 @@ impl FlubberBlob {
 
     fn apply_slap(&mut self, impulse: Vec2) {
         let mass = self.mass.max(0.001);
-        let impulse = if impulse.is_finite() { impulse } else { Vec2::ZERO };
+        let impulse = if impulse.is_finite() {
+            impulse
+        } else {
+            Vec2::ZERO
+        };
         self.velocity += impulse / mass;
         // Split the impact between rigid motion and local deformation so the
         // blob feels both velocity and visible squash.
@@ -377,17 +381,19 @@ impl TechGraph {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DamageType {
+    #[default]
     Normal,
     Concussive,
     Explosive,
     Energy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ArmorClass {
     Small,
+    #[default]
     Medium,
     Large,
     Structure,
@@ -404,18 +410,6 @@ impl DamageType {
             (Self::Explosive, ArmorClass::Structure) => 0.75,
             _ => 1.0,
         }
-    }
-}
-
-impl Default for DamageType {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
-
-impl Default for ArmorClass {
-    fn default() -> Self {
-        Self::Medium
     }
 }
 
@@ -1053,17 +1047,12 @@ impl SpatialUnitIndex {
         }
     }
 
-    fn clear(&mut self) {
-        self.buckets.clear();
-        self.alive_units.clear();
-    }
-
     fn build(&mut self, units: &[RtsUnit]) {
         self.buckets.clear();
         self.alive_units.clear();
 
         for unit in units {
-            if !unit.alive() {
+            if !unit.alive() || !unit.position.is_finite() {
                 continue;
             }
             let cell = self.cell(unit.position);
@@ -1101,11 +1090,22 @@ impl SpatialUnitIndex {
     }
 
     fn query_cell_ids(&self, position: Vec2, radius: f32) -> Vec<UnitId> {
+        let mut ids = Vec::new();
+        self.query_cell_ids_into(position, radius, &mut ids);
+        ids
+    }
+
+    fn query_cell_ids_into(&self, position: Vec2, radius: f32, ids: &mut Vec<UnitId>) {
+        ids.clear();
+        if !position.is_finite() || radius.is_nan() {
+            return;
+        }
+
         let radius = radius.max(0.0);
         if radius.is_infinite() {
-            let mut all: Vec<UnitId> = self.alive_units.iter().copied().collect();
-            all.sort_by_key(|id| id.0);
-            return all;
+            ids.extend(self.alive_units.iter().copied());
+            ids.sort_by_key(|id| id.0);
+            return;
         }
 
         let min = position - Vec2::splat(radius);
@@ -1114,10 +1114,9 @@ impl SpatialUnitIndex {
         let max_cell = self.cell(max);
 
         if min_cell > max_cell {
-            return Vec::new();
+            return;
         }
 
-        let mut ids = Vec::new();
         for y in min_cell.1..=max_cell.1 {
             for x in min_cell.0..=max_cell.0 {
                 if let Some(bucket) = self.buckets.get(&(x, y)) {
@@ -1125,7 +1124,6 @@ impl SpatialUnitIndex {
                 }
             }
         }
-        ids
     }
 }
 
@@ -1371,6 +1369,12 @@ pub struct RtsUnit {
     pub combat: CombatProfile,
     pub order: UnitOrder,
     pub queued_orders: VecDeque<UnitOrder>,
+    /// Consecutive update ticks without measurable progress toward the active
+    /// movement order. [`RtsWorld::update`] completes a wedged leg best-effort
+    /// once this crosses the stall limit so queued routes keep flowing. The
+    /// counter is transient simulation bookkeeping, never part of state-hash
+    /// contracts.
+    pub stall_ticks: u32,
 }
 
 impl RtsUnit {
@@ -1394,6 +1398,7 @@ impl RtsUnit {
             combat: CombatProfile::default(),
             order: UnitOrder::Idle,
             queued_orders: VecDeque::new(),
+            stall_ticks: 0,
         }
     }
 
@@ -1487,7 +1492,8 @@ impl RtsWorld {
     const BOUNDS_SELECT_PADDING: f32 = 192.0;
 
     pub fn spawn(&mut self, faction: FactionId, position: Vec2) -> UnitId {
-        self.try_spawn(faction, position).expect("RTS unit ID allocator exhausted")
+        self.try_spawn(faction, position)
+            .expect("RTS unit ID allocator exhausted")
     }
 
     pub fn try_spawn(
@@ -1495,7 +1501,11 @@ impl RtsWorld {
         faction: FactionId,
         position: Vec2,
     ) -> Result<UnitId, RtsSpawnError> {
-        let position = if position.is_finite() { position } else { Vec2::ZERO };
+        let position = if position.is_finite() {
+            position
+        } else {
+            Vec2::ZERO
+        };
         let id = (self.next_id != u32::MAX).then_some(UnitId(self.next_id));
         let id = id.ok_or(RtsSpawnError::UnitIdExhausted)?;
         self.next_id = self
@@ -1554,9 +1564,8 @@ impl RtsWorld {
             }
         }
 
-        best.map(|id| {
+        best.inspect(|_| {
             self.blobs.swap_remove(best_index);
-            id
         })
     }
 
@@ -1600,9 +1609,8 @@ impl RtsWorld {
                 }
             }
         }
-        best.map(|id| {
+        best.inspect(|_| {
             self.blocks.swap_remove(best_index);
-            id
         })
     }
 
@@ -1653,8 +1661,16 @@ impl RtsWorld {
 
         let split_offset = split_radius + 2.0;
         let split_impulse = (source.velocity + direction * 80.0) * 0.9;
-        let mut left = FlubberBlob::new(first_id, source.position + direction * split_offset, split_radius);
-        let mut right = FlubberBlob::new(second_id, source.position - direction * split_offset, split_radius);
+        let mut left = FlubberBlob::new(
+            first_id,
+            source.position + direction * split_offset,
+            split_radius,
+        );
+        let mut right = FlubberBlob::new(
+            second_id,
+            source.position - direction * split_offset,
+            split_radius,
+        );
 
         left.mass = source.mass * 0.5;
         right.mass = source.mass * 0.5;
@@ -1709,10 +1725,18 @@ impl RtsWorld {
             let Some(flubber) = self.flubber_mut(id) else {
                 return false;
             };
-            let impulse_magnitude = if impulse.is_finite() { impulse.length() } else { 0.0 };
+            let impulse_magnitude = if impulse.is_finite() {
+                impulse.length()
+            } else {
+                0.0
+            };
             let should_split = flubber.radius > 26.0 && impulse_magnitude > flubber.split_threshold;
             let split_impulse = if should_split { impulse } else { Vec2::ZERO };
-            flubber.apply_slap(if impulse.is_finite() { impulse } else { Vec2::ZERO });
+            flubber.apply_slap(if impulse.is_finite() {
+                impulse
+            } else {
+                Vec2::ZERO
+            });
             (should_split, split_impulse)
         };
         if split {
@@ -1753,12 +1777,8 @@ impl RtsWorld {
             }
         }
 
-        let Some(id) = best else {
-            return None;
-        };
-        let Some(flubber) = self.flubbers.get(best_index).copied() else {
-            return None;
-        };
+        let id = best?;
+        let flubber = self.flubbers.get(best_index).copied()?;
 
         let mut direction = flubber.position - point;
         if direction.length_squared() <= f32::EPSILON {
@@ -1787,7 +1807,9 @@ impl RtsWorld {
 
         let radius = radius.max(0.0);
         for unit in self.units.iter().filter(|unit| unit.alive()) {
-            if unit.position.is_finite() && unit.position.distance(position) <= radius + unit.radius.max(0.0) {
+            if unit.position.is_finite()
+                && unit.position.distance(position) <= radius + unit.radius.max(0.0)
+            {
                 return Err(PlacementError::Obstructed);
             }
         }
@@ -1801,36 +1823,21 @@ impl RtsWorld {
         Ok(())
     }
 
-    fn is_position_in_blobs(
-        position: Vec2,
-        radius: f32,
-        blobs: &[MotionBlob],
-    ) -> bool {
+    fn is_position_in_blobs(position: Vec2, radius: f32, blobs: &[MotionBlob]) -> bool {
         let radius = radius.max(0.0);
         blobs
             .iter()
             .any(|blob| position.distance(blob.center) <= radius + blob.radius.max(0.0))
     }
 
-    fn is_position_in_blocks(
-        position: Vec2,
-        radius: f32,
-        blocks: &[MotionBlock],
-    ) -> bool {
+    fn is_position_in_blocks(position: Vec2, radius: f32, blocks: &[MotionBlock]) -> bool {
         let radius = radius.max(0.0);
-        blocks.iter().any(|block| {
-            block
-                .bounds
-                .inflated(radius)
-                .contains_point(position)
-        })
+        blocks
+            .iter()
+            .any(|block| block.bounds.inflated(radius).contains_point(position))
     }
 
-    fn block_penetration_push(
-        position: Vec2,
-        radius: f32,
-        block: MotionBlock,
-    ) -> Vec2 {
+    fn block_penetration_push(position: Vec2, radius: f32, block: MotionBlock) -> Vec2 {
         let bounds = block.bounds.inflated(radius.max(0.0));
         if !Self::point_in_aabb(bounds, position) {
             return Vec2::ZERO;
@@ -1868,7 +1875,7 @@ impl RtsWorld {
                     if distance <= f32::EPSILON {
                         away = Vec2::X;
                     } else {
-                        away = away / distance;
+                        away /= distance;
                     }
                     resolved += away * (threshold - distance).max(0.0);
                 }
@@ -1947,7 +1954,8 @@ impl RtsWorld {
                 } else {
                     away /= distance;
                 }
-                let falloff = ((clear + separation_radius) - distance) / (clear + separation_radius.max(f32::EPSILON));
+                let falloff = ((clear + separation_radius) - distance)
+                    / (clear + separation_radius.max(f32::EPSILON));
                 impulse += away * (strength * falloff);
             }
         }
@@ -1967,7 +1975,7 @@ impl RtsWorld {
     }
 
     fn update_flubbers(
-        &mut self,
+        flubbers: &mut Vec<FlubberBlob>,
         dt: f32,
         blobs: &[MotionBlob],
         blocks: &[MotionBlock],
@@ -1975,7 +1983,7 @@ impl RtsWorld {
         let dt = dt.max(0.0);
         let mut moved = false;
 
-        for flubber in &mut self.flubbers {
+        for flubber in flubbers.iter_mut() {
             let previous_position = flubber.position;
             if !flubber.position.is_finite() {
                 flubber.position = Vec2::ZERO;
@@ -2019,12 +2027,8 @@ impl RtsWorld {
             }
 
             let next_position = flubber.position + desired_velocity * dt;
-            let resolved_position = Self::resolve_motion_obstacle_push(
-                next_position,
-                effective_radius,
-                blobs,
-                blocks,
-            );
+            let resolved_position =
+                Self::resolve_motion_obstacle_push(next_position, effective_radius, blobs, blocks);
 
             if resolved_position != next_position {
                 flubber.velocity = -desired_velocity * flubber.restitution;
@@ -2039,19 +2043,22 @@ impl RtsWorld {
         }
 
         let mut i = 0_usize;
-        while i < self.flubbers.len() {
+        while i < flubbers.len() {
             let mut j = i + 1;
-            while j < self.flubbers.len() {
+            while j < flubbers.len() {
                 let mut merged = None;
                 {
-                    let (left, right) = self.flubbers.split_at_mut(j);
+                    let (left, right) = flubbers.split_at_mut(j);
                     let a = &mut left[i];
                     let b = &mut right[0];
 
                     let delta = b.position - a.position;
                     let distance = delta.length();
                     let minimum_distance = a.effective_radius() + b.effective_radius();
-                    if distance >= minimum_distance || distance <= f32::EPSILON || !minimum_distance.is_finite() {
+                    if distance >= minimum_distance
+                        || distance <= f32::EPSILON
+                        || !minimum_distance.is_finite()
+                    {
                         j += 1;
                         continue;
                     }
@@ -2109,8 +2116,8 @@ impl RtsWorld {
                 }
 
                 if let Some(merged_blob) = merged {
-                    self.flubbers[i] = merged_blob;
-                    self.flubbers.swap_remove(j);
+                    flubbers[i] = merged_blob;
+                    flubbers.swap_remove(j);
                     moved = true;
                 } else {
                     j += 1;
@@ -2119,7 +2126,7 @@ impl RtsWorld {
             i += 1;
         }
 
-        for flubber in &mut self.flubbers {
+        for flubber in flubbers.iter_mut() {
             let speed_cap = flubber.speed_cap.max(1.0);
             let speed = flubber.velocity.length();
             if speed > speed_cap {
@@ -2133,15 +2140,22 @@ impl RtsWorld {
         let total_mass = left.mass.max(0.001) + right.mass.max(0.001);
         let left_share = left.mass.max(0.001) / total_mass;
         let right_share = right.mass.max(0.001) / total_mass;
-        let merged_radius = (left.radius * left.radius + right.radius * right.radius).sqrt().max(1.0);
-        let mut merged = FlubberBlob::new(left.id, left.position * left_share + right.position * right_share, merged_radius);
+        let merged_radius = (left.radius * left.radius + right.radius * right.radius)
+            .sqrt()
+            .max(1.0);
+        let mut merged = FlubberBlob::new(
+            left.id,
+            left.position * left_share + right.position * right_share,
+            merged_radius,
+        );
         merged.mass = total_mass;
         merged.radius = merged_radius;
         merged.rest_radius = merged_radius;
         merged.max_stretch = merged_radius * 3.0;
         merged.velocity = left.velocity * left_share + right.velocity * right_share;
         merged.stretch = left.stretch * left_share + right.stretch * right_share;
-        merged.stretch_velocity = left.stretch_velocity * left_share + right.stretch_velocity * right_share;
+        merged.stretch_velocity =
+            left.stretch_velocity * left_share + right.stretch_velocity * right_share;
         merged.elasticity = (left.elasticity + right.elasticity) * 0.5;
         merged.damping = (left.damping + right.damping) * 0.5;
         merged.restitution = (left.restitution + right.restitution) * 0.5;
@@ -2587,17 +2601,35 @@ impl RtsWorld {
 
     pub fn update(&mut self, dt: f32) {
         let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
-        let blob_obstacles = self.blobs.clone();
-        let block_obstacles = self.blocks.clone();
-        let flubbers_moved = self.update_flubbers(dt, &blob_obstacles, &block_obstacles);
-        let neighbors: Vec<(UnitId, Vec2, f32)> = self
-            .units
-            .iter()
-            .filter(|unit| unit.alive() && unit.position.is_finite())
-            .map(|unit| (unit.id, unit.position, unit.radius.max(0.0)))
-            .collect();
+        // Disjoint field borrows replace per-tick obstacle clones: the
+        // flubber pass mutates `flubbers` while reading `blobs`/`blocks`,
+        // and the unit loop below mutates `units` the same way.
+        let flubbers_moved =
+            Self::update_flubbers(&mut self.flubbers, dt, &self.blobs, &self.blocks);
+        self.rebuild_spatial_index_if_dirty();
+        let mut neighbor_snapshot = HashMap::new();
+        let mut neighbor_order = HashMap::new();
+        let mut max_snapshot_radius = 0.0_f32;
+        for (order, unit) in self.units.iter().enumerate() {
+            if !unit.alive() || !unit.position.is_finite() {
+                continue;
+            }
+            let radius = unit.radius.max(0.0);
+            neighbor_snapshot.insert(unit.id, (unit.position, radius));
+            neighbor_order.insert(unit.id, order);
+            if radius.is_finite() {
+                max_snapshot_radius = max_snapshot_radius.max(radius);
+            } else if radius.is_infinite() {
+                max_snapshot_radius = f32::INFINITY;
+            }
+        }
+        let blob_obstacles = &self.blobs;
+        let block_obstacles = &self.blocks;
+        let units = &mut self.units;
+        let mut candidate_ids = Vec::new();
+        let mut local_neighbors = Vec::new();
         let mut moved = false;
-        for unit in &mut self.units {
+        for unit in units {
             let previous_position = unit.position;
             if !unit.alive() {
                 unit.velocity = Vec2::ZERO;
@@ -2608,21 +2640,27 @@ impl RtsWorld {
                 unit.velocity = Vec2::ZERO;
                 continue;
             }
+            candidate_ids.clear();
+            let query_radius =
+                unit.radius.max(0.0) + unit.separation_radius.max(0.0) + max_snapshot_radius;
+            {
+                let index = self.spatial_index.borrow();
+                index.query_cell_ids_into(unit.position, query_radius, &mut candidate_ids);
+            }
+            candidate_ids
+                .sort_unstable_by_key(|id| neighbor_order.get(id).copied().unwrap_or(usize::MAX));
+            local_neighbors.clear();
+            local_neighbors.extend(candidate_ids.iter().filter_map(|id| {
+                neighbor_snapshot
+                    .get(id)
+                    .map(|(position, radius)| (*id, *position, *radius))
+            }));
             let target = match unit.order {
                 UnitOrder::Move(target)
                 | UnitOrder::AttackMove(target)
                 | UnitOrder::Interact(target) => Some(target),
-                UnitOrder::Attack(id) => {
-                    neighbors
-                        .iter()
-                        .find(|(candidate, _, _)| *candidate == id)
-                        .map(|(_, position, _)| *position)
-                }
-                UnitOrder::Follow(id) => {
-                    neighbors
-                        .iter()
-                        .find(|(candidate, _, _)| *candidate == id)
-                        .map(|(_, position, _)| *position)
+                UnitOrder::Attack(id) | UnitOrder::Follow(id) => {
+                    neighbor_snapshot.get(&id).map(|(position, _)| *position)
                 }
                 UnitOrder::Patrol(first, _) => Some(first),
                 UnitOrder::Idle | UnitOrder::Hold => None,
@@ -2634,15 +2672,18 @@ impl RtsWorld {
             if matches!(unit.order, UnitOrder::Attack(_) | UnitOrder::Follow(_)) && target.is_none()
             {
                 unit.velocity = Vec2::ZERO;
+                unit.stall_ticks = 0;
                 unit.order = unit.queued_orders.pop_front().unwrap_or(UnitOrder::Idle);
                 continue;
             }
             let Some(target) = target else {
                 unit.velocity = Vec2::ZERO;
+                unit.stall_ticks = 0;
                 continue;
             };
             if !target.is_finite() {
                 unit.velocity = Vec2::ZERO;
+                unit.stall_ticks = 0;
                 continue;
             }
             let offset = target - unit.position;
@@ -2698,13 +2739,13 @@ impl RtsWorld {
                 radius,
                 unit.separation_radius.max(0.0),
                 unit.separation_strength.max(0.0),
-                &neighbors,
+                &local_neighbors,
             ) * (1.0 + steering);
             desired_velocity += Self::obstacle_repulsion(
                 unit.position,
                 radius,
-                &blob_obstacles,
-                &block_obstacles,
+                blob_obstacles,
+                block_obstacles,
                 18.0,
                 unit.separation_strength.max(0.0) + steering,
             );
@@ -2725,12 +2766,13 @@ impl RtsWorld {
                     unit.velocity = desired_velocity;
                 } else {
                     let dv_step = (accel * dt).min(dv_len);
-                    unit.velocity = unit.velocity + dv / dv_len * dv_step;
+                    unit.velocity += dv / dv_len * dv_step;
                 }
             } else {
                 unit.velocity = Vec2::ZERO;
             }
-            if remaining_to_stop <= f32::EPSILON || remaining_to_stop <= unit.velocity.length() * dt {
+            if remaining_to_stop <= f32::EPSILON || remaining_to_stop <= unit.velocity.length() * dt
+            {
                 if engagement_range > arrival_radius {
                     if distance > engagement_range && distance > f32::EPSILON {
                         // Place the unit exactly on the near edge of its firing
@@ -2758,13 +2800,38 @@ impl RtsWorld {
                 let resolved_position = Self::resolve_motion_obstacle_push(
                     next_position,
                     radius,
-                    &blob_obstacles,
-                    &block_obstacles,
+                    blob_obstacles,
+                    block_obstacles,
                 );
                 if resolved_position != next_position {
                     unit.velocity *= 0.25;
                 }
                 unit.position = resolved_position;
+            }
+            // Best-effort arrival for wedged movers. A unit pinned against
+            // geometry can make no positional progress, so its leg can never
+            // complete through the normal arrival branch and its queued
+            // route dies silently. After MOTION_STALL_TICKS consecutive
+            // stalled steps the leg ends where the unit stands. Movement
+            // outside a move-family order (combat stance pushes, patrol
+            // swaps) is untouched.
+            const MOTION_STALL_TICKS: u32 = 45;
+            const MOTION_STALL_EPSILON: f32 = 0.01;
+            let moved_this_step = unit.position.distance(previous_position);
+            let movement_order = matches!(
+                unit.order,
+                UnitOrder::Move(_) | UnitOrder::AttackMove(_) | UnitOrder::Interact(_)
+            );
+            if movement_order && moved_this_step <= MOTION_STALL_EPSILON && distance > stop_distance
+            {
+                unit.stall_ticks += 1;
+                if unit.stall_ticks >= MOTION_STALL_TICKS {
+                    unit.stall_ticks = 0;
+                    unit.velocity = Vec2::ZERO;
+                    unit.order = unit.queued_orders.pop_front().unwrap_or(UnitOrder::Idle);
+                }
+            } else {
+                unit.stall_ticks = 0;
             }
             if unit.position != previous_position {
                 moved = true;
@@ -2906,15 +2973,27 @@ impl NavGrid {
         }
         let start = self.world_to_cell(start_world);
         let goal = self.world_to_cell(goal_world);
-        let (Some(start_index), Some(goal_index)) = (self.index(start), self.index(goal)) else {
+        // Painted footprints can overshoot their real geometry by up to a
+        // cell (see `mark_obstacles`), so a unit standing beside a structure
+        // often starts on a painted-but-walkable cell. Snapping the *start*
+        // keeps those requests routable. A blocked *goal* is resolved by the
+        // search itself (approximate-goal expansion below), which finds the
+        // truly reachable open cell with the lowest arrival cost instead of
+        // trusting geometric proximity across obstacle belts.
+        const SNAP_SEARCH_RADIUS: u32 = 6;
+        let Some(start) = self.nearest_open_cell(start, SNAP_SEARCH_RADIUS) else {
             return Vec::new();
         };
-        if self.blocked[start_index] {
+        let Some(start_index) = self.index(start) else {
             return Vec::new();
-        }
-        if self.blocked[goal_index] {
+        };
+        let Some(goal_index) = self.index(goal) else {
             return Vec::new();
-        }
+        };
+        let goal_cell_open = !self.blocked[goal_index];
+        // Fallback searches may roam this many cells beyond the goal before
+        // they stop expanding, bounding the belt-crossing detours.
+        const APPROX_GOAL_SPAN: i32 = (SNAP_SEARCH_RADIUS as i32) * 2;
 
         #[derive(Debug, Clone, Copy)]
         struct SearchState {
@@ -2958,7 +3037,7 @@ impl NavGrid {
             let dx = (a.x - b.x).abs() as f32;
             let dy = (a.y - b.y).abs() as f32;
             let (dx, dy) = if dx < dy { (dx, dy) } else { (dy, dx) };
-            (1.414_213_6 - 2.0) * dx + (dx + dy)
+            (std::f32::consts::SQRT_2 - 2.0) * dx + (dx + dy)
         }
 
         let mut frontier = BinaryHeap::new();
@@ -2977,11 +3056,17 @@ impl NavGrid {
             (IVec2::new(-1, 0), 1.0),
             (IVec2::new(0, 1), 1.0),
             (IVec2::new(0, -1), 1.0),
-            (IVec2::new(1, 1), 1.414_213_6),
-            (IVec2::new(1, -1), 1.414_213_6),
-            (IVec2::new(-1, 1), 1.414_213_6),
-            (IVec2::new(-1, -1), 1.414_213_6),
+            (IVec2::new(1, 1), std::f32::consts::SQRT_2),
+            (IVec2::new(1, -1), std::f32::consts::SQRT_2),
+            (IVec2::new(-1, 1), std::f32::consts::SQRT_2),
+            (IVec2::new(-1, -1), std::f32::consts::SQRT_2),
         ];
+        // When the goal cell itself is blocked, the search does not know a
+        // concrete destination. Every settled open cell near the goal is a
+        // terminal candidate scored by arrival cost plus the remaining
+        // straight-line distance to the requested world point. The best
+        // candidate (deterministic tie-break) becomes the route end.
+        let mut approx_goal: Option<(f32, IVec2)> = None;
         while let Some(SearchState {
             estimated: _,
             cost,
@@ -2994,8 +3079,28 @@ impl NavGrid {
             if cost > cost_so_far[cell_index] {
                 continue;
             }
-            if cell == goal {
+            if cell == goal && goal_cell_open {
                 break;
+            }
+            if !goal_cell_open {
+                let offset = cell - goal;
+                let chebyshev = offset.x.abs().max(offset.y.abs());
+                // Exploration stays global so detours around obstacle belts
+                // remain reachable; only terminal candidacy is local.
+                if chebyshev <= APPROX_GOAL_SPAN {
+                    let total = cost + self.cell_center(cell).distance(goal_world);
+                    let better = match approx_goal {
+                        None => true,
+                        Some((best_total, best_cell)) => {
+                            total < best_total
+                                || (total == best_total
+                                    && (cell.y, cell.x) < (best_cell.y, best_cell.x))
+                        }
+                    };
+                    if better {
+                        approx_goal = Some((total, cell));
+                    }
+                }
             }
             for (offset, step_cost) in neighbors {
                 let neighbor = cell + offset;
@@ -3031,11 +3136,19 @@ impl NavGrid {
                 });
             }
         }
-        if came_from[goal_index].is_none() {
-            return Vec::new();
-        }
-        let mut cells = vec![goal];
-        let mut current = goal;
+        let end_cell = if goal_cell_open {
+            if came_from[goal_index].is_none() {
+                return Vec::new();
+            }
+            goal
+        } else {
+            match approx_goal {
+                Some((_, cell)) => cell,
+                None => return Vec::new(),
+            }
+        };
+        let mut cells = vec![end_cell];
+        let mut current = end_cell;
         while current != start {
             let Some(previous) = came_from[self.index(current).unwrap()] else {
                 return Vec::new();
@@ -3051,16 +3164,20 @@ impl NavGrid {
             .collect();
 
         // Collapse the raw cell-center route into the longest visible segments.
-        // This keeps BFS's deterministic ordering while avoiding a stop-start
-        // movement cadence on every cardinal cell.
+        // Consecutive A* waypoints are adjacent (corner-cut prevention
+        // guarantees mutual visibility), so scanning candidates from the end
+        // and taking the first visible one yields the same furthest-visible
+        // waypoint as a full ascending scan, in O(w) instead of O(w²) segment
+        // probes on open routes.
         let mut path = Vec::with_capacity(cell_waypoints.len() + 1);
         let mut anchor = start_world;
         let mut next = 0;
         while next < cell_waypoints.len() {
             let mut furthest = next;
-            for (candidate, waypoint) in cell_waypoints.iter().enumerate().skip(next) {
-                if !self.segment_blocked(anchor, *waypoint) {
+            for candidate in (next..cell_waypoints.len()).rev() {
+                if !self.segment_blocked(anchor, cell_waypoints[candidate]) {
                     furthest = candidate;
+                    break;
                 }
             }
             let waypoint = cell_waypoints[furthest];
@@ -3069,11 +3186,25 @@ impl NavGrid {
             next = furthest + 1;
         }
 
-        // Cell centers are only an intermediate navigation representation. The
-        // caller's world-space destination is always the final target when its
-        // final segment is clear (which it is for an unblocked goal cell).
-        if anchor.distance(goal_world) > f32::EPSILON && !self.segment_blocked(anchor, goal_world) {
-            path.push(goal_world);
+        // Cell centers are only an intermediate navigation representation;
+        // a route must always hand its caller a reachable terminal.
+        // Open-goal requests finish exactly on the requested point. Should
+        // geometry make the last leg impassable, movers complete wedged legs
+        // best-effort instead of wedging forever, so the explicit terminal
+        // stays safe. Blocked-goal requests (structure footprints painting
+        // the cell) finish on the reachable cell the search selected.
+        if goal_cell_open {
+            if path.last().copied() != Some(goal_world) {
+                path.push(goal_world);
+            }
+        } else {
+            let final_anchor = *path.last().unwrap_or(&start_world);
+            let end_center = self.cell_center(end_cell);
+            if path.last().copied() != Some(end_center)
+                && !self.segment_blocked(final_anchor, end_center)
+            {
+                path.push(end_center);
+            }
         }
         path
     }
@@ -3093,6 +3224,40 @@ impl NavGrid {
         let max_x = (self.width as i32) - 1;
         let max_y = (self.height as i32) - 1;
         IVec2::new(cell.x.clamp(0, max_x), cell.y.clamp(0, max_y))
+    }
+
+    /// Finds the closest unblocked cell to `cell` by scanning outward in
+    /// expanding Chebyshev rings with a fixed iteration order. The ring
+    /// order is deliberate: results stay bit-stable across calls, which the
+    /// semantic trace replay contract depends on.
+    fn nearest_open_cell(&self, cell: IVec2, radius: u32) -> Option<IVec2> {
+        if self.index(cell).is_some_and(|index| !self.blocked[index]) {
+            return Some(cell);
+        }
+        for ring in 1..=radius as i32 {
+            // Deterministic scan: fixed y band then x per edge.
+            for dy in -ring..=ring {
+                for dx in [-ring, ring] {
+                    let candidate = cell + IVec2::new(dx, dy);
+                    if let Some(index) = self.index(candidate) {
+                        if !self.blocked[index] {
+                            return Some(candidate);
+                        }
+                    }
+                }
+            }
+            for dx in (-ring + 1)..=(ring - 1) {
+                for dy in [-ring, ring] {
+                    let candidate = cell + IVec2::new(dx, dy);
+                    if let Some(index) = self.index(candidate) {
+                        if !self.blocked[index] {
+                            return Some(candidate);
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
@@ -3166,6 +3331,57 @@ impl FogOfWar {
 }
 
 #[cfg(test)]
+mod nav_regression {
+    use super::*;
+    #[test]
+    fn find_path_survives_blocked_start_cells_and_belt_goals() {
+        // Replicate MissionSimulation::from_mission's grid for mission 3.
+        let map_size = Vec2::new(3600.0, 2200.0);
+        let mut nav = NavGrid::new(
+            (map_size.x / 40.0).ceil() as usize,
+            (map_size.y / 40.0).ceil() as usize,
+            -map_size * 0.5,
+            40.0,
+        );
+        let obstacles = vec![
+            Aabb::from_center_size(Vec2::new(-500.0, 480.0), Vec2::new(1400.0, 90.0)),
+            Aabb::from_center_size(Vec2::new(-500.0, -60.0), Vec2::new(1400.0, 90.0)),
+            Aabb::from_center_size(Vec2::new(250.0, 210.0), Vec2::new(90.0, 500.0)),
+            Aabb::from_center_size(Vec2::new(650.0, -260.0), Vec2::new(90.0, 400.0)),
+            // fabricator footprint added by flubber wave
+            Aabb::from_center_size(Vec2::new(-1100.0, 380.0), Vec2::splat(210.0)),
+        ];
+        crate::mark_obstacles(&mut nav, &obstacles);
+        let start = Vec2::new(-980.0, 300.0);
+        let goal = Vec2::new(-980.0, -200.0);
+        // Paint overshoot from the structure footprint swallows the start
+        // cell; routing must still succeed.
+        assert!(
+            nav.is_blocked_at(start),
+            "regression guard: start must be painted"
+        );
+        assert!(!nav.is_blocked_at(goal));
+        let path = nav.find_path(start, goal);
+        assert!(
+            !path.is_empty(),
+            "blocked start cell must not disable routing"
+        );
+        assert_eq!(
+            path.last().copied(),
+            Some(goal),
+            "open-goal routes terminate exactly on the requested point"
+        );
+        let deduped = path.len();
+        assert_eq!(
+            path.iter().filter(|p| **p == goal).count(),
+            1,
+            "the terminal waypoint appears exactly once"
+        );
+        let _ = deduped;
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3202,6 +3418,108 @@ mod tests {
         let panel = transform.world_to_panel(world);
         assert!(transform.panel_to_world(panel).unwrap().distance(world) < 0.01);
         assert_eq!(transform.panel_to_world(Vec2::ZERO), None);
+    }
+
+    #[test]
+    fn spatial_queries_match_allocating_results_and_ignore_non_finite_inputs() {
+        let units = [
+            RtsUnit::new(UnitId(0), PLAYER, Vec2::new(1.0, 1.0)),
+            RtsUnit::new(UnitId(1), PLAYER, Vec2::new(21.0, 1.0)),
+            RtsUnit::new(UnitId(2), PLAYER, Vec2::new(100.0, 100.0)),
+            RtsUnit::new(UnitId(3), PLAYER, Vec2::new(f32::NAN, 0.0)),
+        ];
+        let mut index = SpatialUnitIndex::new(10.0);
+        index.build(&units);
+
+        let allocated = index.query_cell_ids(Vec2::new(1.0, 1.0), 25.0);
+        let mut reused = vec![UnitId(99)];
+        index.query_cell_ids_into(Vec2::new(1.0, 1.0), 25.0, &mut reused);
+        assert_eq!(reused, allocated);
+        assert!(!reused.contains(&UnitId(3)));
+
+        index.query_cell_ids_into(Vec2::new(f32::NAN, 0.0), 25.0, &mut reused);
+        assert!(reused.is_empty());
+        index.query_cell_ids_into(Vec2::ZERO, f32::NAN, &mut reused);
+        assert!(reused.is_empty());
+    }
+
+    #[test]
+    fn spatially_indexed_updates_preserve_near_separation_and_far_targets() {
+        fn make_world(far_position: Vec2) -> (RtsWorld, [UnitId; 7]) {
+            let mut world = RtsWorld::default();
+            let mover = world.spawn(PLAYER, Vec2::ZERO);
+            // Spawn the right-side neighbor first so spatial cell traversal
+            // differs from simulation insertion order.
+            let near_right = world.spawn(PLAYER, Vec2::new(120.0, -18.0));
+            let near_left = world.spawn(PLAYER, Vec2::new(-120.0, 18.0));
+            let far = world.spawn(PLAYER, far_position);
+            let attacker = world.spawn(PLAYER, Vec2::new(-1000.0, 0.0));
+            let follower = world.spawn(PLAYER, Vec2::new(-900.0, 0.0));
+            let target = world.spawn(FactionId(2), Vec2::new(-400.0, 0.0));
+
+            let mover_unit = world.unit_mut(mover).unwrap();
+            mover_unit.order = UnitOrder::Move(Vec2::new(250.0, 0.0));
+            mover_unit.separation_radius = 180.0;
+            mover_unit.separation_strength = 90.0;
+
+            world.unit_mut(attacker).unwrap().order = UnitOrder::Attack(target);
+            world.unit_mut(follower).unwrap().order = UnitOrder::Follow(target);
+
+            (
+                world,
+                [
+                    mover, near_right, near_left, far, attacker, follower, target,
+                ],
+            )
+        }
+
+        let (mut left_world, left_ids) = make_world(Vec2::new(-10_000.0, 0.0));
+        let (mut right_world, right_ids) = make_world(Vec2::new(10_000.0, 0.0));
+        left_world.update(0.25);
+        right_world.update(0.25);
+
+        for (left_id, right_id) in [
+            (left_ids[0], right_ids[0]),
+            (left_ids[4], right_ids[4]),
+            (left_ids[5], right_ids[5]),
+        ] {
+            let left = left_world.unit(left_id).unwrap();
+            let right = right_world.unit(right_id).unwrap();
+            assert_eq!(left.position, right.position);
+            assert_eq!(left.velocity, right.velocity);
+        }
+
+        let mover = left_world.unit(left_ids[0]).unwrap();
+        assert!(mover.position.x > 0.0);
+        assert!(mover.velocity.is_finite());
+
+        let attacker = left_world.unit(left_ids[4]).unwrap();
+        assert!(attacker.position.x > -1000.0);
+        assert_eq!(attacker.order, UnitOrder::Attack(left_ids[6]));
+
+        let follower = left_world.unit(left_ids[5]).unwrap();
+        assert!(follower.position.x > -900.0);
+        assert_eq!(follower.order, UnitOrder::Follow(left_ids[6]));
+    }
+
+    #[test]
+    fn sparse_spatial_queries_keep_candidate_counts_local() {
+        let mut units = Vec::with_capacity(4096);
+        for index in 0..4096_u32 {
+            units.push(RtsUnit::new(
+                UnitId(index),
+                PLAYER,
+                Vec2::new(index as f32 * 1000.0, 0.0),
+            ));
+        }
+
+        let mut index = SpatialUnitIndex::new(RtsWorld::UNIT_SPATIAL_CELL_SIZE);
+        index.build(&units);
+        let mut candidates = Vec::new();
+        index.query_cell_ids_into(Vec2::ZERO, 64.0, &mut candidates);
+
+        assert_eq!(candidates, [UnitId(0)]);
+        assert!(candidates.len() < units.len() / 100);
     }
 
     const PLAYER: FactionId = FactionId(1);
@@ -3337,10 +3655,25 @@ mod tests {
             max_power_distance: 150.0,
         };
 
-        assert_eq!(world.can_place_building(&rules, Vec2::new(0.0, 0.0), 10.0), Err(PlacementError::Obstructed));
-        assert_eq!(world.can_place_building(&rules, Vec2::new(60.0, 60.0), 10.0), Err(PlacementError::Obstructed));
-        assert_eq!(world.can_place_building(&rules, Vec2::new(-100.0, -100.0), 10.0), Err(PlacementError::OutsideBuildArea));
-        assert_eq!(world.can_place_building(&rules, Vec2::new(10.0, 10.0), 5.0), Ok(()));
+        assert_eq!(
+            world.can_place_building(&rules, Vec2::new(0.0, 0.0), 10.0),
+            Err(PlacementError::Obstructed)
+        );
+        assert_eq!(
+            world.can_place_building(&rules, Vec2::new(60.0, 60.0), 10.0),
+            Err(PlacementError::Obstructed)
+        );
+        assert_eq!(
+            world.can_place_building(&rules, Vec2::new(-100.0, -100.0), 10.0),
+            Err(PlacementError::OutsideBuildArea)
+        );
+        // Clearance bookkeeping: the blob (r=20) plus the placed footprint
+        // (r=5) require the site more than 25 units from the origin, and the
+        // block inflated by the footprint covers x/y in [45, 75].
+        assert_eq!(
+            world.can_place_building(&rules, Vec2::new(-40.0, -40.0), 5.0),
+            Ok(())
+        );
     }
 
     #[test]

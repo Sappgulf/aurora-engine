@@ -225,8 +225,16 @@ pub struct TraceRunReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceStepRecord {
+    /// Fixed tick whose completed state this record describes.
     pub tick: u64,
+    /// Alias of [`Self::tick`] kept for explicitness in replay tooling.
     pub fixed_tick: u64,
+    /// Number of trace commands consumed *before* this state was produced.
+    ///
+    /// A command scheduled at tick `t` is applied immediately before the
+    /// step that produces state `t + 1`, so it first appears in the record
+    /// labeled `t + 1`. This matches the command-to-step adjacency that
+    /// every checked-in gameplay trace replays against.
     pub commands_applied: usize,
     pub state_hash: StateHash,
 }
@@ -569,7 +577,11 @@ mod tests {
         assert!(!journal.is_empty());
         assert_eq!(journal.records[0].tick, 1);
         assert_eq!(journal.records[0].fixed_tick, 1);
-        assert_eq!(journal.records[0].commands_applied, 1);
+        // The command is scheduled at tick 1 and therefore applied before
+        // the step that produces state 2; the state-1 record still shows a
+        // clean pre-application count.
+        assert_eq!(journal.records[0].commands_applied, 0);
+        assert_eq!(journal.records[1].commands_applied, 1);
         assert_eq!(journal.final_hash(), Some(report.final_state_hash));
     }
 }

@@ -12,7 +12,8 @@ categories = ["game-engines", "graphics", "wasm"]
 
 [features]
 default = []
-3d = []
+3d = ["dep:gltf"]
+ecs = ["dep:hecs"]
 
 [dependencies]
 wgpu = { workspace = true }
@@ -24,11 +25,15 @@ cfg-if = { workspace = true }
 image = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ab_glyph = { workspace = true }
+gltf = { workspace = true, optional = true }
+hecs = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = { workspace = true }
 env_logger = { workspace = true }
 rodio = { workspace = true }
+gilrs = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = { workspace = true }
@@ -53,5 +58,12 @@ web-sys = { workspace = true, features = [
     "OscillatorNode",
     "OscillatorType",
     "Storage",
+    "Gamepad",
+    "GamepadButton",
+    "GamepadMappingType",
+    "GamepadHapticActuator",
+    "GamepadHapticEffectType",
+    "GamepadEffectParameters",
+    "Navigator",
 ] }
 js-sys = "0.3"

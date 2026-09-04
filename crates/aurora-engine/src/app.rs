@@ -334,8 +334,8 @@ impl PadBackend {
                 slot
             });
             if used_slots[slot] {
-                if let Some(free_slot) = (0..crate::input::MAX_GAMEPADS)
-                    .find(|candidate| !used_slots[*candidate])
+                if let Some(free_slot) =
+                    (0..crate::input::MAX_GAMEPADS).find(|candidate| !used_slots[*candidate])
                 {
                     slot = free_slot;
                 } else {

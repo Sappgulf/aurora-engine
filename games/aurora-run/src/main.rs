@@ -3,9 +3,10 @@
 mod save;
 
 use aurora_engine::{
-    run, Aabb, ActionId, Animation, BitmapText, Color, FrameCtx, Game, GameFlow, InputMap,
-    KeyBinding, MenuCommand, MenuInput, MenuScreen, MenuState, ParticleSystem, PointLight,
-    Renderer, RngLite, Sprite, Texture, TextureAtlas, TextureHandle, XorShift32,
+    motion_intensity, run, Aabb, ActionId, Animation, BitmapText, Color, EngineProfile, FrameCtx,
+    Game, GameFlow, InputMap, KeyBinding, MenuCommand, MenuInput, MenuNavigator, MenuScreen,
+    MenuState, PadButton, ParticleSystem, PointLight, Renderer, RngLite, Sprite, Texture,
+    TextureAtlas, TextureHandle, XorShift32,
 };
 use glam::Vec2;
 use save::{RunSave, RunStore};
@@ -77,6 +78,7 @@ struct AuroraRun {
     dash_charges: u32,
     facing: Vec2,
     menu: MenuState,
+    menu_navigator: MenuNavigator,
     save: RunSave,
     save_store: RunStore,
     run_recorded: bool,
@@ -117,6 +119,7 @@ impl AuroraRun {
             dash_charges: 2,
             facing: Vec2::Y,
             menu: MenuState::new(),
+            menu_navigator: MenuNavigator::new(0.35, 0.1),
             save: RunSave::default(),
             save_store: RunStore::new("aurora-run", "profile"),
             run_recorded: false,
@@ -194,7 +197,7 @@ impl AuroraRun {
         Aabb::from_center_size(self.player, Vec2::splat(PLAYER_SIZE * 0.7))
     }
 
-    fn menu_input(ctx: &FrameCtx<'_>) -> Option<MenuInput> {
+    fn menu_input(&mut self, ctx: &FrameCtx<'_>) -> Option<MenuInput> {
         let mut map = InputMap::default();
         let up = ActionId::new("aurora_run.menu.up");
         let down = ActionId::new("aurora_run.menu.down");
@@ -210,33 +213,60 @@ impl AuroraRun {
             map.bind_key(confirm.clone(), KeyBinding::key(key));
         }
         map.bind_key(back.clone(), KeyBinding::key(KeyCode::Escape));
-        if ctx.input.action_pressed(&map, &up) {
+        map.bind_pad(up.clone(), None, PadButton::DpadUp);
+        map.bind_pad(down.clone(), None, PadButton::DpadDown);
+        map.bind_pad(confirm.clone(), None, PadButton::South);
+        map.bind_pad(back.clone(), None, PadButton::East);
+
+        let navigation_axis = ctx.input.navigation_axis(None);
+        let held_direction = if ctx.input.action_down(&map, &up) || navigation_axis.y > 0.55 {
             Some(MenuInput::Up)
-        } else if ctx.input.action_pressed(&map, &down) {
+        } else if ctx.input.action_down(&map, &down) || navigation_axis.y < -0.55 {
             Some(MenuInput::Down)
-        } else if ctx.input.action_pressed(&map, &confirm) {
-            Some(MenuInput::Confirm)
-        } else if ctx.input.action_pressed(&map, &back) {
-            Some(MenuInput::Back)
         } else {
             None
-        }
+        };
+        let repeated_direction = if self.menu.screen().is_some() {
+            self.menu_navigator.poll(held_direction, ctx.time.fixed_dt)
+        } else {
+            self.menu_navigator.reset();
+            None
+        };
+        repeated_direction.or_else(|| {
+            if ctx.input.action_pressed(&map, &confirm) {
+                Some(MenuInput::Confirm)
+            } else if ctx.input.action_pressed(&map, &back) {
+                Some(MenuInput::Back)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn shake_for(profile: &EngineProfile, base: f32) -> f32 {
+        motion_intensity(
+            base * profile.accessibility.screen_shake,
+            profile.accessibility.reduced_motion,
+        )
     }
 
     fn handle_menu_command(&mut self, command: MenuCommand, ctx: &mut FrameCtx<'_>) {
         match command {
             MenuCommand::StartRun | MenuCommand::RestartRun => self.reset(true, ctx.audio),
-            MenuCommand::Resume => self.shake = 0.05,
+            MenuCommand::Resume => self.shake = Self::shake_for(ctx.profile, 0.05),
             MenuCommand::TogglePostFx => {
+                ctx.profile.display.post_fx_enabled = self.menu.post_fx;
                 self.save.settings.post_fx_enabled = self.menu.post_fx;
-                ctx.renderer.post_fx.enabled = self.menu.post_fx;
+                self.save.profile = Some(*ctx.profile);
                 self.persist_save();
             }
             MenuCommand::ToggleReducedMotion => {
+                ctx.profile.accessibility.reduced_motion = self.menu.reduced_motion;
                 self.save.settings.reduced_motion = self.menu.reduced_motion;
                 if self.menu.reduced_motion {
                     self.shake = 0.0;
                 }
+                self.save.profile = Some(*ctx.profile);
                 self.persist_save();
             }
             MenuCommand::EndRun | MenuCommand::ReturnToMain => {
@@ -288,6 +318,8 @@ impl AuroraRun {
     fn draw_menu(&self, ctx: &mut FrameCtx<'_>, screen: MenuScreen, t: f32) {
         let camera = ctx.renderer.camera.position;
         let view = ctx.renderer.camera.visible_world_size();
+        let text_scale = ctx.profile.accessibility.text_scale;
+        let high_contrast = ctx.profile.accessibility.high_contrast;
         let panel_size = Vec2::new(
             (view.x * 0.82).clamp(520.0, 840.0),
             (view.y * 0.84).clamp(390.0, 560.0),
@@ -320,8 +352,12 @@ impl AuroraRun {
             ctx.renderer,
             title,
             camera + Vec2::new(-260.0, 170.0),
-            title_pixel,
-            Color::rgba(0.25, 1.8, 1.5, 0.95 + 0.05 * (t * 2.0).sin()),
+            title_pixel * text_scale,
+            if high_contrast {
+                Color::WHITE
+            } else {
+                Color::rgba(0.25, 1.8, 1.5, 0.95 + 0.05 * (t * 2.0).sin())
+            },
             11.0,
         );
 
@@ -346,12 +382,16 @@ impl AuroraRun {
         };
         for (index, item) in items.iter().enumerate() {
             let selected = index == self.menu.selected() && !matches!(screen, MenuScreen::HowTo);
-            let y = 78.0 - index as f32 * 57.0;
+            let y = 78.0 - index as f32 * 57.0 * text_scale;
             if selected {
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
                     Sprite::new(camera + Vec2::new(0.0, y + 5.0), Vec2::new(520.0, 38.0))
-                        .with_color(Color::rgba(0.05, 0.85, 0.72, 0.18))
+                        .with_color(if high_contrast {
+                            Color::rgba(1.0, 1.0, 1.0, 0.3)
+                        } else {
+                            Color::rgba(0.05, 0.85, 0.72, 0.18)
+                        })
                         .with_z(10.2),
                 );
             }
@@ -364,9 +404,15 @@ impl AuroraRun {
                 ctx.renderer,
                 &label,
                 camera + Vec2::new(-235.0, y),
-                6.0,
+                6.0 * text_scale,
                 if selected {
-                    Color::rgb(0.9, 1.7, 1.35)
+                    if high_contrast {
+                        Color::WHITE
+                    } else {
+                        Color::rgb(0.9, 1.7, 1.35)
+                    }
+                } else if high_contrast {
+                    Color::WHITE
                 } else {
                     Color::rgba(0.62, 0.78, 0.9, 0.9)
                 },
@@ -378,8 +424,12 @@ impl AuroraRun {
                 ctx.renderer,
                 &format!("SCORE {}  WAVE {}", self.score, self.wave),
                 camera + Vec2::new(-235.0, -140.0),
-                5.0,
-                Color::rgb(1.5, 0.85, 0.25),
+                5.0 * text_scale,
+                if high_contrast {
+                    Color::WHITE
+                } else {
+                    Color::rgb(1.5, 0.85, 0.25)
+                },
                 11.0,
             );
         }
@@ -387,8 +437,12 @@ impl AuroraRun {
             ctx.renderer,
             "ARROWS OR WASD  ENTER SELECT  ESC BACK",
             camera + Vec2::new(-300.0, -220.0),
-            3.5,
-            Color::rgba(0.35, 0.65, 0.82, 0.75),
+            3.5 * text_scale,
+            if high_contrast {
+                Color::WHITE
+            } else {
+                Color::rgba(0.35, 0.65, 0.82, 0.75)
+            },
             11.0,
         );
     }
@@ -454,10 +508,31 @@ impl Game for AuroraRun {
         log::info!("Aurora Run — title menu ready. Arrows/WASD navigate, Enter/Space select.");
     }
 
+    fn on_profile_loaded(&mut self, profile: &mut EngineProfile, is_new: bool) {
+        let before = self.save.clone();
+        if is_new {
+            if let Some(saved_profile) = self.save.profile {
+                *profile = saved_profile;
+            } else {
+                profile.display.post_fx_enabled = self.save.settings.post_fx_enabled;
+                profile.accessibility.reduced_motion = self.save.settings.reduced_motion;
+            }
+        }
+        *profile = profile.normalized();
+        self.menu.post_fx = profile.display.post_fx_enabled;
+        self.menu.reduced_motion = profile.accessibility.reduced_motion;
+        self.save.settings.post_fx_enabled = profile.display.post_fx_enabled;
+        self.save.settings.reduced_motion = profile.accessibility.reduced_motion;
+        self.save.profile = Some(*profile);
+        if self.save != before {
+            self.persist_save();
+        }
+    }
+
     fn on_fixed_update(&mut self, ctx: &mut FrameCtx<'_>) {
         let dt = ctx.time.fixed_dt;
 
-        if let Some(input) = Self::menu_input(ctx) {
+        if let Some(input) = self.menu_input(ctx) {
             let command = self.menu.handle(input);
             self.handle_menu_command(command, ctx);
             return;
@@ -474,7 +549,8 @@ impl Game for AuroraRun {
             return;
         }
         if ctx.input.key_pressed(KeyCode::KeyP) {
-            ctx.renderer.post_fx.enabled = !ctx.renderer.post_fx.enabled;
+            ctx.profile.display.post_fx_enabled = !ctx.profile.display.post_fx_enabled;
+            self.menu.post_fx = ctx.profile.display.post_fx_enabled;
         }
         if self.game_over || self.win {
             self.menu.open(MenuScreen::Results);
@@ -500,7 +576,7 @@ impl Game for AuroraRun {
             self.dash_cooldown = 0.48;
             self.hurt_cooldown = self.hurt_cooldown.max(0.25);
             self.player_velocity = self.facing * 980.0;
-            self.shake = 0.15;
+            self.shake = Self::shake_for(ctx.profile, 0.15);
             self.particles.emit_burst(
                 self.player,
                 34,
@@ -585,7 +661,7 @@ impl Game for AuroraRun {
                     self.dash_timer = 0.0;
                     self.dash_cooldown = 0.75;
                     self.player_velocity = (self.player - h.pos).normalize_or_zero() * 620.0;
-                    self.shake = 0.22;
+                    self.shake = Self::shake_for(ctx.profile, 0.22);
                     ctx.audio.hurt();
                     self.particles.emit_burst(
                         h.pos,
@@ -681,7 +757,7 @@ impl Game for AuroraRun {
                     self.hurt_cooldown = 1.0;
                     self.combo = 0;
                     self.combo_timer = 0.0;
-                    self.shake = 0.45;
+                    self.shake = Self::shake_for(ctx.profile, 0.45);
                     ctx.audio.hurt();
                     ctx.renderer.post_fx.chromatic = 0.018;
                     self.particles.emit_burst(

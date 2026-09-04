@@ -11,3 +11,4 @@ web/pkg/
 node_modules/
 test-results/
 playtests/screenshots/
+.vercel

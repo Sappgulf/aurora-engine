@@ -32,6 +32,7 @@ pub enum TextureAsset {
     NeedleAttack,
     CanticleCommand,
     BellMineArm,
+    BellMineDetonation,
     HitReactions,
     DownReactions,
     Structures,
@@ -173,7 +174,7 @@ impl ArtStateSpec {
 /// measurable: a state cannot be accidentally “implemented” by a caller that
 /// forgot to register its clip or fallback.
 #[allow(dead_code)]
-pub const PLAYER_VISIBLE_ART_STATES: [ArtStateSpec; 27] = [
+pub const PLAYER_VISIBLE_ART_STATES: [ArtStateSpec; 28] = [
     ArtStateSpec::atlas(
         "warden.idle",
         TextureAsset::Units,
@@ -334,6 +335,13 @@ pub const PLAYER_VISIBLE_ART_STATES: [ArtStateSpec; 27] = [
         0,
         6,
         "warning arcs and armed recoil",
+    ),
+    ArtStateSpec::atlas(
+        "bell_mine.detonate",
+        TextureAsset::BellMineDetonation,
+        0,
+        6,
+        "generated and normalized six-frame one-shot shockwave",
     ),
     ArtStateSpec::atlas(
         "structure.online",
@@ -502,7 +510,7 @@ impl TextureSpec {
 }
 
 impl TextureAsset {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::ReactorSector,
         Self::ReactorSectorReclaim,
         Self::ReactorSectorVoice,
@@ -523,6 +531,7 @@ impl TextureAsset {
         Self::NeedleAttack,
         Self::CanticleCommand,
         Self::BellMineArm,
+        Self::BellMineDetonation,
         Self::HitReactions,
         Self::DownReactions,
         Self::Structures,
@@ -556,6 +565,7 @@ impl TextureAsset {
             Self::NeedleAttack => "choir.needle.attack",
             Self::CanticleCommand => "choir.canticle.command",
             Self::BellMineArm => "choir.bell_mine.arm",
+            Self::BellMineDetonation => "choir.bell_mine.detonation",
             Self::HitReactions => "units.reactions.hit",
             Self::DownReactions => "units.reactions.down",
             Self::Structures => "structures.reactor_sector",
@@ -572,18 +582,19 @@ impl TextureAsset {
     /// Return the authoritative runtime texture contract.
     ///
     /// These values intentionally describe the files in `assets/`, including
-    /// the high-resolution Warden strip. The atlas UVs remain normalized, so
-    /// preserving source dimensions avoids resampling already-approved art.
+    /// the high-resolution Warden strip and each production environment plate.
+    /// The atlas UVs remain normalized, so optimized plate resolution does not
+    /// shift world-space anchors or tactical geometry.
     pub const fn spec(self) -> TextureSpec {
         let (role, pixel_size, grid) = match self {
             Self::ReactorSector => (TextureRole::EnvironmentPlate, (1672, 941), (1, 1)),
             Self::ReactorSectorReclaim
             | Self::ReactorSectorVoice
-            | Self::ReactorSectorTerms
             | Self::ReactorSectorGarden
             | Self::ReactorSectorChoir
             | Self::ReactorSectorVesper
             | Self::ReactorSectorHollow => (TextureRole::EnvironmentPlate, (1672, 941), (1, 1)),
+            Self::ReactorSectorTerms => (TextureRole::EnvironmentPlate, (836, 470), (1, 1)),
             Self::Units => (TextureRole::UnitAtlas, (1536, 1024), (3, 2)),
             Self::WardenMove => (TextureRole::AnimationStrip, (2172, 724), (6, 1)),
             Self::WardenAttack => (TextureRole::AnimationStrip, (1280, 256), (5, 1)),
@@ -593,7 +604,8 @@ impl TextureAsset {
             | Self::SurveyorMove
             | Self::NeedleAttack
             | Self::CanticleCommand
-            | Self::BellMineArm => (TextureRole::AnimationStrip, (1536, 256), (6, 1)),
+            | Self::BellMineArm
+            | Self::BellMineDetonation => (TextureRole::AnimationStrip, (1536, 256), (6, 1)),
             Self::SurveyorScan => (TextureRole::AnimationStrip, (1536, 256), (6, 1)),
             Self::SurveyorMark => (TextureRole::AnimationStrip, (1024, 256), (4, 1)),
             Self::HitReactions | Self::DownReactions => {
@@ -659,23 +671,24 @@ impl TextureAsset {
             Self::ReactorSector => "reactor-sector-v001.png",
             Self::ReactorSectorReclaim => "reactor-sector-reclaim-v001.png",
             Self::ReactorSectorVoice => "reactor-sector-voice-v001.png",
-            Self::ReactorSectorTerms => "reactor-sector-terms-v001.png",
-            Self::ReactorSectorGarden => "reactor-sector-garden-v001.png",
+            Self::ReactorSectorTerms => "reactor-sector-terms-v003.png",
+            Self::ReactorSectorGarden => "reactor-sector-garden-v003.png",
             Self::ReactorSectorChoir => "reactor-sector-choir-v001.png",
-            Self::ReactorSectorVesper => "reactor-sector-vesper-v001.png",
+            Self::ReactorSectorVesper => "reactor-sector-vesper-v003.png",
             Self::ReactorSectorHollow => "reactor-sector-hollow-v001.png",
             Self::Units => "last-light-units-atlas-v001.png",
             Self::WardenMove => "warden-move-strip-v001.png",
             Self::WardenAttack => "warden-attack-strip-v001.png",
             Self::EngineerMove => "engineer-move-strip-v001.png",
             Self::EngineerRepair => "engineer-repair-strip-v001.png",
-            Self::EngineerBuild => "engineer-build-strip-v001.png",
+            Self::EngineerBuild => "engineer-build-strip-v002.png",
             Self::SurveyorMove => "surveyor-move-strip-v001.png",
-            Self::SurveyorScan => "surveyor-scan-strip-v001.png",
+            Self::SurveyorScan => "surveyor-scan-strip-v002.png",
             Self::SurveyorMark => "surveyor-mark-strip-v001.png",
             Self::NeedleAttack => "needle-attack-strip-v001.png",
             Self::CanticleCommand => "canticle-command-strip-v001.png",
             Self::BellMineArm => "bell-mine-arm-strip-v001.png",
+            Self::BellMineDetonation => "bell-mine-detonation-strip-v001.png",
             Self::HitReactions => "unit-hit-reactions-atlas-v001.png",
             Self::DownReactions => "unit-down-reactions-atlas-v001.png",
             Self::Structures => "last-light-structures-atlas-v001.png",
@@ -695,23 +708,26 @@ impl TextureAsset {
                 include_bytes!("../assets/reactor-sector-reclaim-v001.png")
             }
             Self::ReactorSectorVoice => include_bytes!("../assets/reactor-sector-voice-v001.png"),
-            Self::ReactorSectorTerms => include_bytes!("../assets/reactor-sector-terms-v001.png"),
-            Self::ReactorSectorGarden => include_bytes!("../assets/reactor-sector-garden-v001.png"),
+            Self::ReactorSectorTerms => include_bytes!("../assets/reactor-sector-terms-v003.png"),
+            Self::ReactorSectorGarden => include_bytes!("../assets/reactor-sector-garden-v003.png"),
             Self::ReactorSectorChoir => include_bytes!("../assets/reactor-sector-choir-v001.png"),
-            Self::ReactorSectorVesper => include_bytes!("../assets/reactor-sector-vesper-v001.png"),
+            Self::ReactorSectorVesper => include_bytes!("../assets/reactor-sector-vesper-v003.png"),
             Self::ReactorSectorHollow => include_bytes!("../assets/reactor-sector-hollow-v001.png"),
             Self::Units => include_bytes!("../assets/last-light-units-atlas-v001.png"),
             Self::WardenMove => include_bytes!("../assets/warden-move-strip-v001.png"),
             Self::WardenAttack => include_bytes!("../assets/warden-attack-strip-v001.png"),
             Self::EngineerMove => include_bytes!("../assets/engineer-move-strip-v001.png"),
             Self::EngineerRepair => include_bytes!("../assets/engineer-repair-strip-v001.png"),
-            Self::EngineerBuild => include_bytes!("../assets/engineer-build-strip-v001.png"),
+            Self::EngineerBuild => include_bytes!("../assets/engineer-build-strip-v002.png"),
             Self::SurveyorMove => include_bytes!("../assets/surveyor-move-strip-v001.png"),
-            Self::SurveyorScan => include_bytes!("../assets/surveyor-scan-strip-v001.png"),
+            Self::SurveyorScan => include_bytes!("../assets/surveyor-scan-strip-v002.png"),
             Self::SurveyorMark => include_bytes!("../assets/surveyor-mark-strip-v001.png"),
             Self::NeedleAttack => include_bytes!("../assets/needle-attack-strip-v001.png"),
             Self::CanticleCommand => include_bytes!("../assets/canticle-command-strip-v001.png"),
             Self::BellMineArm => include_bytes!("../assets/bell-mine-arm-strip-v001.png"),
+            Self::BellMineDetonation => {
+                include_bytes!("../assets/bell-mine-detonation-strip-v001.png")
+            }
             Self::HitReactions => include_bytes!("../assets/unit-hit-reactions-atlas-v001.png"),
             Self::DownReactions => include_bytes!("../assets/unit-down-reactions-atlas-v001.png"),
             Self::Structures => include_bytes!("../assets/last-light-structures-atlas-v001.png"),
@@ -769,6 +785,14 @@ mod tests {
         ))
     }
 
+    fn png_color_type(bytes: &[u8]) -> Option<u8> {
+        const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+        if bytes.len() < 26 || &bytes[..8] != PNG_SIGNATURE || &bytes[12..16] != b"IHDR" {
+            return None;
+        }
+        bytes.get(25).copied()
+    }
+
     #[test]
     fn catalog_has_unique_safe_asset_keys() {
         assert_eq!(manifest().len(), TextureAsset::ALL.len());
@@ -801,6 +825,71 @@ mod tests {
             );
             assert!(spec.frame_size().0 > 0 && spec.frame_size().1 > 0);
         }
+    }
+
+    #[test]
+    fn generated_assets_keep_their_role_specific_pixel_contracts() {
+        for (asset, path, pixel_size) in [
+            (
+                TextureAsset::ReactorSectorTerms,
+                "reactor-sector-terms-v003.png",
+                (836, 470),
+            ),
+            (
+                TextureAsset::ReactorSectorGarden,
+                "reactor-sector-garden-v003.png",
+                (1672, 941),
+            ),
+            (
+                TextureAsset::ReactorSectorVesper,
+                "reactor-sector-vesper-v003.png",
+                (1672, 941),
+            ),
+        ] {
+            assert_eq!(asset.path(), path);
+            assert_eq!(asset.spec().role, TextureRole::EnvironmentPlate);
+            assert_eq!(asset.spec().pixel_size, pixel_size);
+            assert_eq!(
+                png_color_type(asset.bytes_for_validation()),
+                Some(3),
+                "large environment plates must use indexed color"
+            );
+        }
+
+        let engineer_build = TextureAsset::EngineerBuild;
+        assert_eq!(engineer_build.path(), "engineer-build-strip-v002.png");
+        assert_eq!(engineer_build.spec().role, TextureRole::AnimationStrip);
+        assert_eq!(engineer_build.spec().grid, (8, 1));
+        assert_eq!(engineer_build.spec().frame_size(), (256, 256));
+        assert_eq!(
+            png_color_type(engineer_build.bytes_for_validation()),
+            Some(6)
+        );
+
+        let surveyor_scan = TextureAsset::SurveyorScan;
+        assert_eq!(surveyor_scan.path(), "surveyor-scan-strip-v002.png");
+        assert_eq!(surveyor_scan.spec().grid, (6, 1));
+        assert_eq!(surveyor_scan.spec().frame_size(), (256, 256));
+        assert_eq!(
+            png_color_type(surveyor_scan.bytes_for_validation()),
+            Some(6)
+        );
+
+        let bell_mine_detonation = TextureAsset::BellMineDetonation;
+        assert_eq!(
+            bell_mine_detonation.path(),
+            "bell-mine-detonation-strip-v001.png"
+        );
+        assert_eq!(
+            bell_mine_detonation.spec().role,
+            TextureRole::AnimationStrip
+        );
+        assert_eq!(bell_mine_detonation.spec().grid, (6, 1));
+        assert_eq!(bell_mine_detonation.spec().frame_size(), (256, 256));
+        assert_eq!(
+            png_color_type(bell_mine_detonation.bytes_for_validation()),
+            Some(6)
+        );
     }
 
     #[test]

@@ -111,6 +111,8 @@ pub struct SaveData {
 }
 
 pub type CampaignStore = SaveStore<SaveData>;
+/// Convenience loader retained for tooling that only needs the payload.
+#[allow(dead_code)]
 pub fn load(store: &CampaignStore) -> Result<Option<SaveData>, SaveError> {
     store
         .load_with(SAVE_VERSION, Ok)

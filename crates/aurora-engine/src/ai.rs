@@ -225,32 +225,28 @@ impl SimpleAggroAi {
             }
 
             let chosen = if should_retarget {
-                candidates
-                    .iter()
-                    .filter(|(_, target_position, _)| {
-                        target_position.distance(position) <= params.aggro_radius
-                    })
-                    .copied()
-                    .min_by(|a, b| {
-                        score(
-                            position,
-                            *a,
-                            &assigned_counts,
-                            self.target_pressure
-                                .get(&a.0)
-                                .map_or(0.0, |pressure| pressure.value),
-                            params,
-                        )
-                        .total_cmp(&score(
-                            position,
-                            *b,
-                            &assigned_counts,
-                            self.target_pressure
-                                .get(&b.0)
-                                .map_or(0.0, |pressure| pressure.value),
-                            params,
-                        ))
-                    })
+                // Single scored pass: evaluating each candidate exactly once
+                // halves comparator work versus a two-sided `min_by` closure
+                // while preserving first-minimum tie-breaking.
+                let mut best: Option<(f32, (UnitId, Vec2, f32))> = None;
+                for &candidate in &candidates {
+                    if candidate.1.distance(position) > params.aggro_radius {
+                        continue;
+                    }
+                    let candidate_score = score(
+                        position,
+                        candidate,
+                        &assigned_counts,
+                        self.target_pressure
+                            .get(&candidate.0)
+                            .map_or(0.0, |pressure| pressure.value),
+                        params,
+                    );
+                    if best.is_none_or(|(best_score, _)| candidate_score < best_score) {
+                        best = Some((candidate_score, candidate));
+                    }
+                }
+                best.map(|(_, candidate)| candidate)
             } else {
                 current_valid
             };

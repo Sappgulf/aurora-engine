@@ -201,10 +201,7 @@ impl TileMap {
         for (index, tile) in layer.tiles.iter().enumerate() {
             let Some(frame) = tile else { continue };
             let index = index as u32;
-            let cell = IVec2::new(
-                (index % self.width) as i32,
-                (index / self.width) as i32,
-            );
+            let cell = IVec2::new((index % self.width) as i32, (index / self.width) as i32);
             let position = self.origin + (cell.as_vec2() + Vec2::splat(0.5)) * self.tile_size;
             let sprite = atlas
                 .sprite(position, self.tile_size, *frame)

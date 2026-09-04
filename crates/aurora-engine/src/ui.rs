@@ -5,6 +5,8 @@
 
 use glam::Vec2;
 
+use crate::profile::EngineProfile;
+
 /// High-level screens shared by title, pause, settings, and results flows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuScreen {
@@ -29,6 +31,117 @@ pub enum MenuInput {
     Down,
     Confirm,
     Back,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MenuNavigator {
+    direction: Option<MenuInput>,
+    elapsed: f32,
+    initial_fired: bool,
+    initial_delay: f32,
+    repeat_interval: f32,
+}
+
+impl MenuNavigator {
+    pub fn new(initial_delay: f32, repeat_interval: f32) -> Self {
+        Self {
+            direction: None,
+            elapsed: 0.0,
+            initial_fired: false,
+            initial_delay: normalize_repeat_value(initial_delay, 0.35, 0.1),
+            repeat_interval: normalize_repeat_value(repeat_interval, 0.1, 0.03),
+        }
+    }
+
+    pub fn poll(&mut self, direction: Option<MenuInput>, delta: f32) -> Option<MenuInput> {
+        let Some(direction) = direction else {
+            self.reset();
+            return None;
+        };
+        if !matches!(direction, MenuInput::Up | MenuInput::Down) {
+            self.reset();
+            return Some(direction);
+        }
+        if self.direction != Some(direction) {
+            self.direction = Some(direction);
+            self.elapsed = 0.0;
+            return Some(direction);
+        }
+
+        self.elapsed += if delta.is_finite() && delta > 0.0 {
+            delta
+        } else {
+            0.0
+        };
+        const REPEAT_EPSILON: f32 = 1.0e-5;
+        if !self.initial_fired {
+            if self.elapsed + REPEAT_EPSILON < self.initial_delay {
+                return None;
+            }
+            self.elapsed -= self.initial_delay;
+            self.initial_fired = true;
+            return Some(direction);
+        }
+
+        let mut emitted = None;
+        let mut repeats = 0;
+        while self.elapsed + REPEAT_EPSILON >= self.repeat_interval && repeats < 8 {
+            self.elapsed -= self.repeat_interval;
+            repeats += 1;
+            emitted = Some(direction);
+        }
+        emitted
+    }
+
+    pub fn reset(&mut self) {
+        self.direction = None;
+        self.elapsed = 0.0;
+        self.initial_fired = false;
+    }
+}
+
+/// Reversible settings editing for menus and platform-native settings views.
+///
+/// The engine commits the returned value only after [`Self::apply`]; previews
+/// are deliberately isolated so Cancel can always restore the original
+/// snapshot without trying to reverse individual field edits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SettingsTransaction {
+    original: EngineProfile,
+    previewed: EngineProfile,
+}
+
+impl SettingsTransaction {
+    pub fn begin(profile: EngineProfile) -> Self {
+        Self {
+            original: profile,
+            previewed: profile,
+        }
+    }
+
+    pub fn preview(&mut self, profile: EngineProfile) {
+        self.previewed = profile;
+    }
+
+    pub fn previewed(&self) -> EngineProfile {
+        self.previewed
+    }
+
+    pub fn apply(self) -> EngineProfile {
+        self.previewed.normalized()
+    }
+
+    pub fn cancel(self) -> EngineProfile {
+        self.original
+    }
+}
+
+fn normalize_repeat_value(value: f32, fallback: f32, minimum: f32) -> f32 {
+    if value.is_finite() {
+        value.max(minimum)
+    } else {
+        fallback.max(minimum)
+    }
 }
 
 /// Intent returned by [`MenuState::handle`]. The host game performs the effect.
@@ -412,5 +525,61 @@ mod tests {
         let cells = BitmapText::glyphs("A\n?", Vec2::ZERO, 2.0);
         assert!(!cells.is_empty());
         assert!(cells.iter().all(|cell| cell.position.y <= 0.0));
+    }
+
+    #[test]
+    fn menu_navigation_repeats_after_initial_delay() {
+        let mut navigator = MenuNavigator::new(0.35, 0.10);
+        assert_eq!(
+            navigator.poll(Some(MenuInput::Down), 0.0),
+            Some(MenuInput::Down)
+        );
+        assert_eq!(navigator.poll(Some(MenuInput::Down), 0.34), None);
+        assert_eq!(
+            navigator.poll(Some(MenuInput::Down), 0.01),
+            Some(MenuInput::Down)
+        );
+        assert_eq!(navigator.poll(Some(MenuInput::Down), 0.09), None);
+        assert_eq!(
+            navigator.poll(Some(MenuInput::Down), 0.01),
+            Some(MenuInput::Down)
+        );
+    }
+
+    #[test]
+    fn changing_direction_and_release_reset_repeat_state() {
+        let mut navigator = MenuNavigator::new(0.35, 0.10);
+        assert_eq!(
+            navigator.poll(Some(MenuInput::Down), 0.0),
+            Some(MenuInput::Down)
+        );
+        assert_eq!(
+            navigator.poll(Some(MenuInput::Up), 0.0),
+            Some(MenuInput::Up)
+        );
+        assert_eq!(navigator.poll(None, 1.0), None);
+        assert_eq!(
+            navigator.poll(Some(MenuInput::Up), 0.0),
+            Some(MenuInput::Up)
+        );
+    }
+
+    #[test]
+    fn settings_transaction_supports_preview_apply_and_cancel() {
+        let original = EngineProfile::default();
+        let mut edited = original;
+        edited.display.render_scale = 0.25;
+        edited.accessibility.text_scale = 1.5;
+
+        let mut transaction = SettingsTransaction::begin(original);
+        transaction.preview(edited);
+        assert_eq!(transaction.previewed(), edited);
+        assert_eq!(transaction.cancel(), original);
+
+        let mut transaction = SettingsTransaction::begin(original);
+        transaction.preview(edited);
+        let applied = transaction.apply();
+        assert_eq!(applied.display.render_scale, 0.5);
+        assert_eq!(applied.accessibility.text_scale, 1.5);
     }
 }

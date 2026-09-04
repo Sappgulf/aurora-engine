@@ -161,14 +161,21 @@ impl Game for FlubberDemo {
         self.tex_ui = Some(renderer.add_texture(ui_texture));
 
         self.world = RtsWorld::default();
-        self.world
-            .add_block_obstacle(Aabb::from_center_size(Vec2::new(-250.0, 0.0), Vec2::new(90.0, 260.0)));
-        self.world
-            .add_block_obstacle(Aabb::from_center_size(Vec2::new(220.0, -60.0), Vec2::new(140.0, 170.0)));
-        self.world
-            .add_block_obstacle(Aabb::from_center_size(Vec2::new(0.0, 250.0), Vec2::new(260.0, 80.0)));
+        self.world.add_block_obstacle(Aabb::from_center_size(
+            Vec2::new(-250.0, 0.0),
+            Vec2::new(90.0, 260.0),
+        ));
+        self.world.add_block_obstacle(Aabb::from_center_size(
+            Vec2::new(220.0, -60.0),
+            Vec2::new(140.0, 170.0),
+        ));
+        self.world.add_block_obstacle(Aabb::from_center_size(
+            Vec2::new(0.0, 250.0),
+            Vec2::new(260.0, 80.0),
+        ));
 
-        self.world.add_blob_obstacle(Vec2::new(-180.0, -120.0), 38.0);
+        self.world
+            .add_blob_obstacle(Vec2::new(-180.0, -120.0), 38.0);
         self.world.add_blob_obstacle(Vec2::new(190.0, 150.0), 34.0);
 
         let _ = self.world.add_flubber(Vec2::new(40.0, 40.0), 56.0);
@@ -242,9 +249,9 @@ impl Game for FlubberDemo {
         if ctx.input.mouse_pressed(MouseButton::Right) {
             match self.mode {
                 DemoMode::Flubber => {
-                    if let Some(id) = self
-                        .world
-                        .slap_flubber_at(mouse_world, 250.0, 3900.0 * boop_scale)
+                    if let Some(id) =
+                        self.world
+                            .slap_flubber_at(mouse_world, 250.0, 3900.0 * boop_scale)
                     {
                         self.selected_flubber = Some(id);
                     }
@@ -288,28 +295,21 @@ impl Game for FlubberDemo {
             for blob in self.world.blob_obstacles() {
                 ctx.renderer.draw_sprite(
                     blob_tex,
-                    Sprite::new(
-                        blob.center,
-                        Vec2::splat(blob.radius * 2.0 * 2.2),
-                    )
-                    .with_color(Color::rgb(0.56, 0.62, 0.84))
-                    .with_z(1.0),
+                    Sprite::new(blob.center, Vec2::splat(blob.radius * 2.0 * 2.2))
+                        .with_color(Color::rgb(0.56, 0.62, 0.84))
+                        .with_z(1.0),
                 );
             }
 
             for flubber in self.world.flubbers() {
-                let stretch_ratio = flubber
-                    .stretch
-                    .length()
-                    .min(flubber.max_stretch)
+                let stretch_ratio = flubber.stretch.length().min(flubber.max_stretch)
                     / flubber.max_stretch.max(1.0);
-                let radius = (flubber.radius + flubber.stretch.length().min(flubber.max_stretch)) * 2.0;
+                let radius =
+                    (flubber.radius + flubber.stretch.length().min(flubber.max_stretch)) * 2.0;
                 let outer_size = Vec2::splat(radius * 1.12);
                 let core_size = Vec2::splat((radius * 0.35).max(16.0));
                 let shade = 0.28 + stretch_ratio * 0.72;
-                let is_selected = self
-                    .selected_flubber
-                    .is_some_and(|id| id == flubber.id);
+                let is_selected = self.selected_flubber.is_some_and(|id| id == flubber.id);
                 let tint = if is_selected {
                     Color::rgb(1.0, 1.0, 0.6)
                 } else {
@@ -335,15 +335,20 @@ impl Game for FlubberDemo {
                 );
             }
 
-            self.draw_text(ctx.renderer, "AURORA ENGINE — FLUBBER LAB", Vec2::new(-700.0, 360.0), 4.4, Color::rgb(0.16, 1.0, 1.0));
+            self.draw_text(
+                ctx.renderer,
+                "AURORA ENGINE — FLUBBER LAB",
+                Vec2::new(-700.0, 360.0),
+                4.4,
+                Color::rgb(0.16, 1.0, 1.0),
+            );
             let mode_line = format!(
                 "MODE: {}  (B: toggle | C: clear obstacles)",
                 self.mode.label()
             );
             let scale_line = format!("SCALE: {build_scale:.2} | BOOP: {boop_scale:.2}");
-            let selected_line = if let Some(flubber) = self
-                .selected_flubber
-                .and_then(|id| self.world.flubber(id))
+            let selected_line = if let Some(flubber) =
+                self.selected_flubber.and_then(|id| self.world.flubber(id))
             {
                 format!(
                     "SELECTED F#{:03}  |  E:{:.1}  D:{:.1}  R:{:.2}  SPD:{:.0}  SPLIT:{:.0}",
@@ -360,11 +365,41 @@ impl Game for FlubberDemo {
             let controls = "LMB slap/spawn block | RMB boop/spawn blob | MMB spawn flubber | SHIFT+MMB remove obstacle | SHIFT+LMB remove block in build mode | KEYE energy pulse";
             let tuning = "[/-] elast  [ / ] damping  ,/. restitution  ;/' speedcap  Q/W split";
 
-            self.draw_text(ctx.renderer, &mode_line, Vec2::new(-700.0, 332.0), 2.9, Color::rgb(0.9, 0.99, 1.0));
-            self.draw_text(ctx.renderer, &scale_line, Vec2::new(-700.0, 309.0), 2.4, Color::rgb(0.85, 0.92, 1.0));
-            self.draw_text(ctx.renderer, &selected_line, Vec2::new(-700.0, 286.0), 2.4, Color::rgb(0.85, 0.92, 1.0));
-            self.draw_text(ctx.renderer, controls, Vec2::new(-700.0, 263.0), 2.0, Color::rgb(0.6, 0.78, 1.0));
-            self.draw_text(ctx.renderer, tuning, Vec2::new(-700.0, 241.0), 2.0, Color::rgb(0.6, 0.78, 1.0));
+            self.draw_text(
+                ctx.renderer,
+                &mode_line,
+                Vec2::new(-700.0, 332.0),
+                2.9,
+                Color::rgb(0.9, 0.99, 1.0),
+            );
+            self.draw_text(
+                ctx.renderer,
+                &scale_line,
+                Vec2::new(-700.0, 309.0),
+                2.4,
+                Color::rgb(0.85, 0.92, 1.0),
+            );
+            self.draw_text(
+                ctx.renderer,
+                &selected_line,
+                Vec2::new(-700.0, 286.0),
+                2.4,
+                Color::rgb(0.85, 0.92, 1.0),
+            );
+            self.draw_text(
+                ctx.renderer,
+                controls,
+                Vec2::new(-700.0, 263.0),
+                2.0,
+                Color::rgb(0.6, 0.78, 1.0),
+            );
+            self.draw_text(
+                ctx.renderer,
+                tuning,
+                Vec2::new(-700.0, 241.0),
+                2.0,
+                Color::rgb(0.6, 0.78, 1.0),
+            );
         }
     }
 }

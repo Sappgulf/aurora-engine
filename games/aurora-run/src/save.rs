@@ -1,6 +1,6 @@
 //! Aurora Run's deliberately small, game-owned progression schema.
 
-use aurora_engine::{SaveEnvelope, SaveError, SaveStore};
+use aurora_engine::{EngineProfile, SaveEnvelope, SaveError, SaveStore};
 use serde::{Deserialize, Serialize};
 
 pub const SAVE_VERSION: u32 = 1;
@@ -22,6 +22,10 @@ pub struct RunSave {
     pub settings: RunSettings,
     pub high_score: u64,
     pub runs_completed: u32,
+    /// Compatibility mirror for installs that predate the engine profile.
+    /// The engine-owned profile is authoritative after migration.
+    #[serde(default)]
+    pub profile: Option<EngineProfile>,
 }
 impl RunSave {
     pub fn record_run(&mut self, score: u64) -> bool {

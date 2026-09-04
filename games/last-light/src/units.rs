@@ -26,6 +26,10 @@ pub enum UnitKind {
 pub struct CombatProfile {
     pub range: f32,
     pub damage_per_second: f32,
+    /// Seconds between authored weapon pulses. Damage remains tuned as DPS;
+    /// the simulation converts it into one pulse so animation, audio, and hit
+    /// reactions receive meaningful beats instead of a 60 Hz damage stream.
+    pub attack_period: f32,
     pub damage_type: DamageType,
     pub armor_class: ArmorClass,
     pub armor: f32,
@@ -194,6 +198,7 @@ impl UnitKind {
             Self::Warden => CombatProfile {
                 range: 155.0,
                 damage_per_second: 32.0,
+                attack_period: 0.50,
                 damage_type: DamageType::Normal,
                 armor_class: ArmorClass::Large,
                 armor: 2.0,
@@ -202,6 +207,7 @@ impl UnitKind {
             Self::Engineer => CombatProfile {
                 range: 90.0,
                 damage_per_second: 10.0,
+                attack_period: 0.70,
                 damage_type: DamageType::Concussive,
                 armor_class: ArmorClass::Medium,
                 armor: 1.0,
@@ -210,6 +216,7 @@ impl UnitKind {
             Self::Surveyor => CombatProfile {
                 range: 225.0,
                 damage_per_second: 15.0,
+                attack_period: 0.65,
                 damage_type: DamageType::Explosive,
                 armor_class: ArmorClass::Small,
                 armor: 0.0,
@@ -218,6 +225,7 @@ impl UnitKind {
             Self::Needle => CombatProfile {
                 range: 170.0,
                 damage_per_second: 11.0,
+                attack_period: 0.55,
                 damage_type: DamageType::Concussive,
                 armor_class: ArmorClass::Small,
                 armor: 1.0,
@@ -226,6 +234,7 @@ impl UnitKind {
             Self::Canticle => CombatProfile {
                 range: 250.0,
                 damage_per_second: 16.0,
+                attack_period: 0.80,
                 damage_type: DamageType::Explosive,
                 armor_class: ArmorClass::Large,
                 armor: 4.0,
@@ -234,6 +243,7 @@ impl UnitKind {
             Self::BellMine => CombatProfile {
                 range: 105.0,
                 damage_per_second: 24.0,
+                attack_period: 0.70,
                 damage_type: DamageType::Explosive,
                 armor_class: ArmorClass::Structure,
                 armor: 3.0,
@@ -294,5 +304,7 @@ mod tests {
         assert!(bell_mine.damage_per_second > surveyor.damage_per_second);
         assert!(bell_mine.range < warden.range);
         assert!(warden.damage_per_second > UnitKind::Canticle.combat().damage_per_second);
+        assert!(warden.attack_period > 0.0);
+        assert!(UnitKind::Canticle.combat().attack_period > warden.attack_period);
     }
 }

@@ -26,6 +26,10 @@ pub struct PostFxSettings {
     pub bloom_intensity: f32,
     pub vignette: f32,
     pub chromatic: f32,
+    /// Animated film-grain strength in `0..=1`; `0` (the default) disables it.
+    pub film_grain: f32,
+    /// Radial dash-streak strength in `0..=1`; `0` (the default) disables it.
+    pub speed_streaks: f32,
     /// Enables analytic point-light composition before bloom and tonemapping.
     pub lighting: bool,
 }
@@ -38,6 +42,8 @@ impl Default for PostFxSettings {
             bloom_intensity: 0.85,
             vignette: 0.55,
             chromatic: 0.004,
+            film_grain: 0.0,
+            speed_streaks: 0.0,
             lighting: true,
         }
     }
@@ -55,7 +61,9 @@ pub(crate) struct PostUniforms {
     pub texel_x: f32,
     pub texel_y: f32,
     pub light_count: f32,
-    pub _pad: [f32; 3],
+    pub film_grain: f32,
+    pub speed_streaks: f32,
+    pub _pad: [f32; 1],
     pub lights: [[f32; 4]; MAX_POINT_LIGHTS],
     pub light_colors: [[f32; 4]; MAX_POINT_LIGHTS],
 }
@@ -82,7 +90,9 @@ impl PostUniforms {
             } else {
                 0.0
             },
-            _pad: [0.0; 3],
+            film_grain: s.film_grain.clamp(0.0, 1.0),
+            speed_streaks: s.speed_streaks.clamp(0.0, 1.0),
+            _pad: [0.0; 1],
             lights: [[0.0; 4]; MAX_POINT_LIGHTS],
             light_colors: [[0.0; 4]; MAX_POINT_LIGHTS],
         };
@@ -185,45 +195,12 @@ impl PostPipeline {
             &uniform_buffer,
         );
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Post Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/post.wgsl").into()),
-        });
-
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Post PL"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Post Pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        let pipeline = build_post_pipeline(
+            device,
+            &bind_group_layout,
+            surface_format,
+            include_str!("../shaders/post.wgsl"),
+        );
 
         Self {
             scene_texture,
@@ -275,6 +252,55 @@ fn create_scene_target(
     (texture, view)
 }
 
+/// Builds the post pipeline from a WGSL source so shader hot reload can swap
+/// it without touching the scene target or bind group.
+pub(crate) fn build_post_pipeline(
+    device: &wgpu::Device,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    surface_format: wgpu::TextureFormat,
+    source: &str,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Post Shader"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Post PL"),
+        bind_group_layouts: &[bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Post Pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
 fn make_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -300,4 +326,34 @@ fn make_bind_group(
             },
         ],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PostFxSettings, PostUniforms};
+
+    #[test]
+    fn speed_streaks_default_to_disabled() {
+        let settings = PostFxSettings::default();
+        assert_eq!(settings.speed_streaks, 0.0);
+        let uniforms = PostUniforms::from_settings(&settings, 0.0, 1280, 720, &[]);
+        assert_eq!(uniforms.speed_streaks, 0.0);
+    }
+
+    #[test]
+    fn speed_streaks_clamp_into_the_unit_range_when_mapped_to_uniforms() {
+        let settings = PostFxSettings {
+            speed_streaks: 2.5,
+            ..Default::default()
+        };
+        let uniforms = PostUniforms::from_settings(&settings, 0.0, 1280, 720, &[]);
+        assert_eq!(uniforms.speed_streaks, 1.0);
+
+        let settings = PostFxSettings {
+            speed_streaks: -1.0,
+            ..Default::default()
+        };
+        let uniforms = PostUniforms::from_settings(&settings, 0.0, 1280, 720, &[]);
+        assert_eq!(uniforms.speed_streaks, 0.0);
+    }
 }

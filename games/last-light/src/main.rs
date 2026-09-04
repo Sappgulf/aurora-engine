@@ -13,10 +13,11 @@ use std::collections::{HashMap, VecDeque};
 
 use assets::TextureAsset;
 use aurora_engine::{
-    run, Aabb, AiParams, AnimationClip, AnimationPlayer, BitmapText, Color, FogOfWar, FogState,
-    FrameCtx, Game, MinimapTransform, PlacementError, PlacementRules, PointLight, PowerNodeId,
-    QueueError, Renderer, SelectionBox, SimpleAggroAi, Sprite, TerrainClass, TerrainZone, Texture,
-    TextureAtlas, TextureHandle, UnitId, UnitOrder,
+    motion_intensity, run, Aabb, AiParams, AnimationClip, AnimationPlayer, AssetManifest,
+    AudioChannel, BitmapText, Color, EngineProfile, FogOfWar, FogState, FrameCtx, Game, Melody,
+    MenuInput, MenuNavigator, MinimapTransform, Note, PadButton, PlacementError, PlacementRules,
+    PointLight, PowerNodeId, QueueError, Renderer, SelectionBox, Sequencer, SimpleAggroAi, Sprite,
+    TerrainClass, TerrainZone, Texture, TextureAtlas, TextureHandle, UnitId, UnitOrder,
 };
 use campaign::*;
 use glam::Vec2;
@@ -46,6 +47,35 @@ const FRIENDLY_CLICK_RADIUS_MIN: f32 = 44.0;
 const FRIENDLY_HOVER_RADIUS_SCALE: f32 = 1.3;
 const FRIENDLY_HOVER_RADIUS_MIN: f32 = 28.0;
 const RESOURCE_CLICK_RADIUS: f32 = 130.0;
+const CONTROLLER_CURSOR_SPEED: f32 = 760.0;
+const CONTROLLER_CURSOR_MARGIN: f32 = 28.0;
+const CONTROLLER_NAV_THRESHOLD: f32 = 0.55;
+const CONTROLLER_CURSOR_SENSITIVITY_MIN: f32 = 0.5;
+const CONTROLLER_CURSOR_SENSITIVITY_MAX: f32 = 1.75;
+const CONTROLLER_CURSOR_SENSITIVITY_STEP: f32 = 0.25;
+const CONTROLLER_DEAD_ZONE_STEP: f32 = 0.03;
+const SETTINGS_ROW_COUNT: usize = 6;
+const SETTINGS_PANEL_WIDTH: f32 = 720.0;
+const SETTINGS_PANEL_HEIGHT: f32 = 440.0;
+const SETTINGS_ROW_WIDTH: f32 = 640.0;
+const SETTINGS_ROW_HEIGHT: f32 = 40.0;
+const SETTINGS_ROW_SPACING: f32 = 48.0;
+const SETTINGS_ROW_START_Y: f32 = 122.0;
+const ATTACK_FLASH_DURATION: f32 = 0.18;
+const DAMAGE_FLASH_DURATION: f32 = 0.34;
+const DESTRUCTION_FX_DURATION: f32 = 0.78;
+const BELL_MINE_DETONATION_DURATION: f32 = 0.72;
+const COMBAT_AUDIO_GATE: f32 = 0.075;
+const FOG_EXPLORED_ALPHA: f32 = 0.30;
+const FOG_HIDDEN_ALPHA: f32 = 0.74;
+/// Keep combat contacts inside a readable screen-space band without pulling
+/// the camera across the map for a distant attack order.
+const COMBAT_CAMERA_SAFE_PADDING: f32 = 96.0;
+const COMBAT_CAMERA_FOLLOW_SPEED: f32 = 6.0;
+const COMBAT_CAMERA_MAX_SPEED: f32 = 720.0;
+const COMBAT_CAMERA_EXPANDED_VIEW_SCALE: f32 = 1.35;
+const THREAT_INDICATOR_PADDING: f32 = 34.0;
+const THREAT_INDICATOR_MAX: usize = 5;
 /// The shipped unit strips are authored facing the lower edge of the screen
 /// (world-space -Y). Keep that art convention explicit so movement rotation
 /// cannot silently turn every unit 180 degrees away from its travel direction.
@@ -67,6 +97,17 @@ const HUD_SCALE_MAX: f32 = 0.82;
 /// At dense zoom levels the HUD should prioritize command clarity over
 /// always-showing telemetry, so command and info overlays compress.
 const HUD_DENSE_ZOOM: f32 = 1.45;
+/// Shared logical spacing for screen-anchored tactical surfaces. These values
+/// are multiplied by the viewport-aware HUD scale, not by camera zoom alone.
+const HUD_LAYOUT_GUTTER: f32 = 24.0;
+const HUD_TOP_OFFSET: f32 = 28.0;
+const HUD_BOTTOM_BASELINE: f32 = 18.0;
+const HUD_TELEMETRY_INSET: f32 = 18.0;
+const HUD_TELEMETRY_TEXT_TRAILING_GUTTER: f32 = 8.0;
+const HUD_TELEMETRY_CHIP_INSET: f32 = 12.0;
+const HUD_MINIMAP_CENTER_Y: f32 = HUD_BOTTOM_BASELINE + 75.0;
+const HUD_UNIT_CARD_X: f32 = 300.0;
+const HUD_COMMAND_CARD_TEXT_Y: f32 = HUD_BOTTOM_BASELINE + 176.0;
 // The command card is deliberately smaller than the selection card.  It is a
 // contextual mini-menu, not a second dashboard: the playfield should remain
 // the dominant surface while a player reads the next three verbs.
@@ -123,14 +164,6 @@ const MOTION_PRESETS: [MotionProfile; 5] = [
         separation_strength: 100.0,
     },
 ];
-
-/// Edge-triggered input may be consumed once per rendered frame even when the
-/// fixed-step loop catches up with several simulation ticks. Continuous
-/// movement, combat, and economy deliberately do not use this gate.
-#[inline]
-fn edge_input_allowed(input_handled_this_frame: bool) -> bool {
-    !input_handled_this_frame
-}
 
 /// Source atlas for a tactical unit card portrait.
 ///
@@ -206,6 +239,131 @@ fn ability_cooldown_fraction(ability: SpecialAbility, remaining: f32) -> f32 {
     normalized_fraction(remaining.max(0.0), ability.cooldown_seconds())
 }
 
+/// Fog hides tactical information by suppressing contacts separately, so the
+/// environment plate can retain enough luminance to communicate lanes and
+/// landmarks without revealing enemies in unexplored space.
+fn fog_overlay_alpha(state: FogState) -> Option<f32> {
+    match state {
+        FogState::Visible => None,
+        FogState::Explored => Some(FOG_EXPLORED_ALPHA),
+        FogState::Hidden => Some(FOG_HIDDEN_ALPHA),
+    }
+}
+
+fn agent_unit_kind(label: &str) -> Option<UnitKind> {
+    match label {
+        "warden" => Some(UnitKind::Warden),
+        "engineer" => Some(UnitKind::Engineer),
+        "surveyor" => Some(UnitKind::Surveyor),
+        "needle" => Some(UnitKind::Needle),
+        "canticle" => Some(UnitKind::Canticle),
+        "bell_mine" => Some(UnitKind::BellMine),
+        _ => None,
+    }
+}
+
+/// A restrained eight-second industrial bed. Notes are intentionally sparse so
+/// weapon pulses, radio, and UI feedback retain the foreground; the fixed-step
+/// sequencer keeps the same mission trace audible in native and web builds.
+fn last_light_ambient_melody() -> Melody {
+    Melody::new(
+        8.0,
+        vec![
+            Note::new(0.75, 110.0, 0.32, 0.045),
+            Note::new(1.5, 146.83, 0.24, 0.035),
+            Note::new(2.25, 164.81, 0.3, 0.04),
+            Note::new(3.5, 123.47, 0.34, 0.04),
+            Note::new(4.25, 110.0, 0.28, 0.045),
+            Note::new(5.0, 184.99, 0.22, 0.032),
+            Note::new(6.5, 146.83, 0.36, 0.04),
+            Note::new(7.5, 98.0, 0.42, 0.05),
+        ],
+    )
+}
+
+/// Convert a two-dimensional menu axis into the campaign's linear focus flow.
+/// Horizontal input deliberately mirrors vertical input because mission and
+/// command-card rows are visually stacked even when a briefing uses columns.
+fn controller_menu_direction(axis: Vec2) -> Option<MenuInput> {
+    if !axis.is_finite() || axis.abs().max_element() < CONTROLLER_NAV_THRESHOLD {
+        return None;
+    }
+    if axis.x.abs() > axis.y.abs() {
+        Some(if axis.x < 0.0 {
+            MenuInput::Up
+        } else {
+            MenuInput::Down
+        })
+    } else {
+        Some(if axis.y > 0.0 {
+            MenuInput::Up
+        } else {
+            MenuInput::Down
+        })
+    }
+}
+
+/// Move a screen-space tactical cursor at a zoom-independent speed and keep
+/// the complete reticle inside the logical viewport.
+fn step_controller_cursor_with_sensitivity(
+    cursor: Vec2,
+    stick: Vec2,
+    viewport: Vec2,
+    dt: f32,
+    sensitivity: f32,
+) -> Vec2 {
+    let safe_viewport = viewport.max(Vec2::splat(CONTROLLER_CURSOR_MARGIN * 2.0 + 1.0));
+    let fallback = safe_viewport * 0.5;
+    let origin = if cursor.is_finite() { cursor } else { fallback };
+    let sensitivity = if sensitivity.is_finite() {
+        sensitivity.clamp(
+            CONTROLLER_CURSOR_SENSITIVITY_MIN,
+            CONTROLLER_CURSOR_SENSITIVITY_MAX,
+        )
+    } else {
+        1.0
+    };
+    let delta = if stick.is_finite() && dt.is_finite() && dt > 0.0 {
+        stick * CONTROLLER_CURSOR_SPEED * sensitivity * dt
+    } else {
+        Vec2::ZERO
+    };
+    (origin + delta).clamp(
+        Vec2::splat(CONTROLLER_CURSOR_MARGIN),
+        safe_viewport - Vec2::splat(CONTROLLER_CURSOR_MARGIN),
+    )
+}
+
+/// Find the point on the inset viewport edge that points toward an off-screen
+/// world contact. The returned direction is in screen space, which lets the
+/// presentation layer draw a stable chevron without duplicating camera math.
+fn edge_indicator_anchor(screen: Vec2, viewport: Vec2, padding: f32) -> Option<(Vec2, Vec2)> {
+    if !screen.is_finite() || !viewport.is_finite() || viewport.min_element() <= 1.0 {
+        return None;
+    }
+    let margin = padding.max(0.0).min(viewport.x.min(viewport.y) * 0.45);
+    let safe_half = viewport * 0.5 - Vec2::splat(margin);
+    let center = viewport * 0.5;
+    let delta = screen - center;
+    if delta.length_squared() <= f32::EPSILON
+        || (delta.x.abs() <= safe_half.x && delta.y.abs() <= safe_half.y)
+    {
+        return None;
+    }
+    let x_scale = if delta.x.abs() > f32::EPSILON {
+        safe_half.x / delta.x.abs()
+    } else {
+        f32::INFINITY
+    };
+    let y_scale = if delta.y.abs() > f32::EPSILON {
+        safe_half.y / delta.y.abs()
+    } else {
+        f32::INFINITY
+    };
+    let scale = x_scale.min(y_scale).clamp(0.0, 1.0);
+    Some((center + delta * scale, delta.normalize()))
+}
+
 /// Presentation state shared by animation playback and atlas selection.
 /// Keeping one decision tree for both paths prevents a stale strip from
 /// surviving a state change (for example, a Surveyor showing its scan fan
@@ -236,6 +394,103 @@ enum ObjectiveStage {
     Escort,
 }
 
+/// Single source of truth for the screen-anchored tactical HUD.
+///
+/// Last Light draws in world coordinates, so every HUD element needs an
+/// anchor derived from the camera before it can be rendered. Keeping those
+/// anchors together makes the visual layout and pointer hit-testing agree at
+/// native, browser, and dense-zoom resolutions.
+#[derive(Debug, Clone, Copy)]
+struct TacticalHudLayout {
+    scale: f32,
+    dense: bool,
+    top_left: Vec2,
+    top_right: Vec2,
+    minimap_panel: Aabb,
+    unit_card_origin: Vec2,
+    command_card_text_origin: Vec2,
+    pause_center: Vec2,
+    telemetry_width: f32,
+}
+
+impl TacticalHudLayout {
+    fn new(renderer: &Renderer) -> Self {
+        let scale = LastLight::hud_scale(renderer);
+        let dense = LastLight::hud_dense_layout(renderer);
+        let top_left = renderer
+            .camera
+            .world_from_viewport_fraction(Vec2::new(0.0, 1.0))
+            + Vec2::new(HUD_LAYOUT_GUTTER, -HUD_TOP_OFFSET) * scale;
+        let top_right = renderer
+            .camera
+            .world_from_viewport_fraction(Vec2::new(1.0, 1.0));
+        let bottom_left = renderer
+            .camera
+            .world_from_viewport_fraction(Vec2::new(0.0, 0.0));
+        let bottom_right = renderer
+            .camera
+            .world_from_viewport_fraction(Vec2::new(1.0, 0.0));
+        let command_card_scale = LastLight::command_card_scale(renderer);
+        let command_card_width = COMMAND_CARD_PANEL_WIDTH * command_card_scale;
+        let unit_card_right = bottom_left.x + (HUD_UNIT_CARD_X + 420.0) * scale;
+        let preferred_command_card_left = unit_card_right + HUD_LAYOUT_GUTTER * scale;
+        let right_safe_command_card_left =
+            bottom_right.x - HUD_LAYOUT_GUTTER * scale - command_card_width;
+        let command_card_left = preferred_command_card_left.min(right_safe_command_card_left);
+
+        Self {
+            scale,
+            dense,
+            top_left,
+            top_right,
+            minimap_panel: Aabb::from_center_size(
+                bottom_left + Vec2::new(150.0, HUD_MINIMAP_CENTER_Y) * scale,
+                Vec2::new(260.0, 138.0) * scale,
+            ),
+            unit_card_origin: bottom_left + Vec2::new(HUD_UNIT_CARD_X, HUD_BOTTOM_BASELINE) * scale,
+            command_card_text_origin: Vec2::new(
+                command_card_left,
+                bottom_right.y + HUD_COMMAND_CARD_TEXT_Y * command_card_scale,
+            ),
+            pause_center: top_right + Vec2::new(-44.0, -44.0) * scale,
+            telemetry_width: if dense { 540.0 } else { 590.0 },
+        }
+    }
+
+    fn telemetry_panel_center(self, height: f32) -> Vec2 {
+        self.top_left
+            + Vec2::new(
+                self.telemetry_width * 0.5 - HUD_TELEMETRY_INSET,
+                -(height * 0.5 - 2.0),
+            ) * self.scale
+    }
+
+    fn telemetry_chip_origin(self, y: f32, width: f32) -> Vec2 {
+        self.top_left
+            + Vec2::new(
+                self.telemetry_width - HUD_TELEMETRY_INSET - HUD_TELEMETRY_CHIP_INSET - width,
+                y,
+            ) * self.scale
+    }
+
+    fn telemetry_text_width(self) -> f32 {
+        (self.telemetry_width - HUD_TELEMETRY_INSET - HUD_TELEMETRY_TEXT_TRAILING_GUTTER)
+            * self.scale
+    }
+
+    fn radio_origin(self, slide: f32) -> Vec2 {
+        self.top_right + Vec2::new(-540.0 + slide, -42.0) * self.scale
+    }
+
+    fn toast_origin(self) -> Vec2 {
+        self.top_left
+            + Vec2::new(
+                self.telemetry_width * 0.5 - HUD_TELEMETRY_INSET - 238.0,
+                -112.0,
+            ) * self.scale
+    }
+}
+
 /// Result of applying a Fabricator rally to a newly deployed Surveyor.
 ///
 /// Keeping the non-assignment cases explicit lets the HUD explain why a
@@ -248,6 +503,33 @@ enum RallyHarvestOutcome {
     Saturated(usize),
     Dry(usize),
     NotResource,
+}
+
+/// Presentation-only lifetime for the Bell Mine's authored one-shot blast.
+/// The simulation owns the trigger and damage; this short-lived object owns
+/// the atlas playback and keeps the renderer from inferring timing from unit
+/// health or the later wreck state.
+#[derive(Debug)]
+struct DetonationFx {
+    position: Vec2,
+    player: AnimationPlayer,
+    remaining: f32,
+}
+
+impl DetonationFx {
+    fn new(position: Vec2) -> Self {
+        let mut player = AnimationPlayer::default();
+        player.play(AnimationClip::once(
+            "bell_mine_detonation",
+            [0, 1, 2, 3, 4, 5],
+            10.0,
+        ));
+        Self {
+            position,
+            player,
+            remaining: BELL_MINE_DETONATION_DURATION,
+        }
+    }
 }
 
 struct LastLight {
@@ -265,6 +547,7 @@ struct LastLight {
     tex_needle_attack: TextureHandle,
     tex_canticle_command: TextureHandle,
     tex_bell_mine_arm: TextureHandle,
+    tex_bell_mine_detonation: TextureHandle,
     tex_hit_reactions: TextureHandle,
     tex_down_reactions: TextureHandle,
     tex_structures: TextureHandle,
@@ -290,6 +573,7 @@ struct LastLight {
     needle_attack_atlas: TextureAtlas,
     canticle_command_atlas: TextureAtlas,
     bell_mine_arm_atlas: TextureAtlas,
+    bell_mine_detonation_atlas: TextureAtlas,
     hit_reactions_atlas: TextureAtlas,
     down_reactions_atlas: TextureAtlas,
     animation_players: HashMap<UnitId, AnimationPlayer>,
@@ -302,12 +586,21 @@ struct LastLight {
     specialist_module_atlas: TextureAtlas,
     building_command_atlas: TextureAtlas,
     simulation: MissionSimulation,
-    attack_flash: HashMap<UnitId, f32>,
+    /// Stable target snapshots for visible weapon pulses. Orders may change
+    /// on the hit tick, so presentation must not have to rediscover a target.
+    attack_flash: HashMap<UnitId, (UnitId, f32)>,
+    /// Charge cues arrive before the next authored weapon pulse.
+    weapon_windups: HashMap<UnitId, (UnitId, f32, f32)>,
     damage_flash: HashMap<UnitId, f32>,
     repair_flash: HashMap<UnitId, (UnitId, f32)>,
     build_flash: HashMap<UnitId, f32>,
     mark_flash: HashMap<UnitId, f32>,
     down_units: HashMap<UnitId, f32>,
+    detonation_fx: Vec<DetonationFx>,
+    combat_pulse_count: u64,
+    detonation_count: u64,
+    combat_audio_cooldown: f32,
+    ambient_music: Sequencer,
     fog: FogOfWar,
     drag: Option<SelectionBox>,
     order_marker: Option<(Vec2, f32)>,
@@ -325,24 +618,16 @@ struct LastLight {
     command_card_compact: bool,
     command_card_page: usize,
     minimal_hud: bool,
+    profile_snapshot: EngineProfile,
     save_store: CampaignStore,
     save_data: SaveData,
     victory_saved: bool,
     mission_select: bool,
     mission_cursor: usize,
-    /// Set the first time `on_fixed_update` handles input each rendered
-    /// frame, cleared once per frame in `on_update`. The fixed-step
-    /// catch-up loop can run `on_fixed_update` several times in one
-    /// rendered frame after a hitch, but `key_pressed`/`mouse_pressed` stay
-    /// true for the whole frame — without this, a single click or keypress
-    /// could fire twice (e.g. queuing two units off one click, or cascading
-    /// through mission-select *and* straight out of the briefing). All
-    /// edge-triggered input handling below is gated on this being false;
-    /// continuous simulation (movement, combat, economy) still runs every
-    /// fixed step regardless.
-    input_handled_this_frame: bool,
     briefing: bool,
     paused: bool,
+    settings_open: bool,
+    settings_cursor: usize,
     victory: bool,
     defeat: bool,
     enemy_think: f32,
@@ -378,6 +663,16 @@ struct LastLight {
     /// playfield quiet. F1 can reopen it without permanently spending HUD
     /// space on a controls manual.
     controls_hint_remaining: f32,
+    /// Controller prompts and the virtual tactical cursor activate only after
+    /// pad input, so a connected idle controller never competes with a mouse.
+    controller_mode: bool,
+    controller_cursor_screen: Vec2,
+    controller_cursor_initialized: bool,
+    controller_command_mode: bool,
+    controller_command_cursor: usize,
+    controller_command_alternate: bool,
+    controller_briefing_cursor: usize,
+    controller_navigator: MenuNavigator,
 }
 
 impl LastLight {
@@ -445,6 +740,7 @@ impl LastLight {
             tex_needle_attack: TextureHandle::default(),
             tex_canticle_command: TextureHandle::default(),
             tex_bell_mine_arm: TextureHandle::default(),
+            tex_bell_mine_detonation: TextureHandle::default(),
             tex_hit_reactions: TextureHandle::default(),
             tex_down_reactions: TextureHandle::default(),
             tex_structures: TextureHandle::default(),
@@ -473,6 +769,8 @@ impl LastLight {
             canticle_command_atlas: TextureAsset::CanticleCommand
                 .runtime_atlas(TextureHandle::default()),
             bell_mine_arm_atlas: TextureAsset::BellMineArm.runtime_atlas(TextureHandle::default()),
+            bell_mine_detonation_atlas: TextureAsset::BellMineDetonation
+                .runtime_atlas(TextureHandle::default()),
             hit_reactions_atlas: TextureAsset::HitReactions.runtime_atlas(TextureHandle::default()),
             down_reactions_atlas: TextureAsset::DownReactions
                 .runtime_atlas(TextureHandle::default()),
@@ -491,11 +789,17 @@ impl LastLight {
                 .runtime_atlas(TextureHandle::default()),
             simulation,
             attack_flash: HashMap::new(),
+            weapon_windups: HashMap::new(),
             damage_flash: HashMap::new(),
             repair_flash: HashMap::new(),
             build_flash: HashMap::new(),
             mark_flash: HashMap::new(),
             down_units: HashMap::new(),
+            detonation_fx: Vec::new(),
+            combat_pulse_count: 0,
+            detonation_count: 0,
+            combat_audio_cooldown: 0.0,
+            ambient_music: Sequencer::new(last_light_ambient_melody()),
             fog: Self::new_fog(),
             drag: None,
             order_marker: None,
@@ -513,14 +817,16 @@ impl LastLight {
             command_card_compact: true,
             command_card_page: 0,
             minimal_hud: false,
+            profile_snapshot: EngineProfile::default(),
             save_store,
             save_data,
             victory_saved: false,
             mission_select: true,
             mission_cursor,
-            input_handled_this_frame: false,
             briefing: false,
             paused: false,
+            settings_open: false,
+            settings_cursor: 0,
             victory: false,
             defeat: false,
             enemy_think: 0.0,
@@ -540,6 +846,14 @@ impl LastLight {
             last_transmission: None,
             target_feedback: None,
             controls_hint_remaining: 0.0,
+            controller_mode: false,
+            controller_cursor_screen: Vec2::ZERO,
+            controller_cursor_initialized: false,
+            controller_command_mode: false,
+            controller_command_cursor: 0,
+            controller_command_alternate: false,
+            controller_briefing_cursor: 0,
+            controller_navigator: MenuNavigator::new(0.32, 0.11),
         }
     }
 
@@ -559,10 +873,16 @@ impl LastLight {
                 .map(|id| (*id, AnimationPlayer::default())),
         );
         self.attack_flash.clear();
+        self.weapon_windups.clear();
         self.damage_flash.clear();
         self.build_flash.clear();
         self.mark_flash.clear();
         self.down_units.clear();
+        self.detonation_fx.clear();
+        self.combat_pulse_count = 0;
+        self.detonation_count = 0;
+        self.combat_audio_cooldown = 0.0;
+        self.ambient_music = Sequencer::new(last_light_ambient_melody());
         self.fog = Self::new_fog();
         self.drag = None;
         self.order_marker = None;
@@ -606,10 +926,18 @@ impl LastLight {
         self.last_transmission = None;
         self.target_feedback = None;
         self.controls_hint_remaining = 1.5;
+        self.controller_cursor_initialized = false;
+        self.controller_command_mode = false;
+        self.controller_command_cursor = 0;
+        self.controller_command_alternate = false;
+        self.controller_briefing_cursor = 0;
+        self.controller_navigator.reset();
 
         self.victory_saved = false;
         self.briefing = true;
         self.paused = false;
+        self.settings_open = false;
+        self.settings_cursor = 0;
         self.victory = false;
         self.defeat = false;
         self.enemy_think = 0.0;
@@ -630,6 +958,498 @@ impl LastLight {
             -MAP_SIZE * 0.5,
             CELL,
         )
+    }
+
+    fn controller_button_pressed(ctx: &FrameCtx<'_>, button: PadButton) -> bool {
+        ctx.input
+            .first_pad()
+            .is_some_and(|slot| ctx.input.pad_button_pressed(slot, button))
+    }
+
+    /// Switch presentation modes from actual device activity. Mouse movement
+    /// immediately restores pointer presentation; an idle connected pad does
+    /// not force controller glyphs or a reticle onto the screen.
+    fn update_controller_mode(&mut self, ctx: &FrameCtx<'_>) {
+        let mouse_active = ctx.input.mouse_delta.length_squared() > 0.25
+            || ctx.input.scroll.abs() > f32::EPSILON
+            || ctx.input.mouse_pressed(MouseButton::Left)
+            || ctx.input.mouse_pressed(MouseButton::Right)
+            || ctx.input.mouse_pressed(MouseButton::Middle);
+        if mouse_active {
+            self.controller_mode = false;
+            self.controller_command_mode = false;
+            self.controller_navigator.reset();
+            return;
+        }
+
+        let Some(slot) = ctx.input.first_pad() else {
+            self.controller_mode = false;
+            self.controller_command_mode = false;
+            return;
+        };
+        let pad_active = ctx.input.pad_left_stick(slot).length_squared() > 0.01
+            || ctx.input.pad_right_stick(slot).length_squared() > 0.01
+            || PadButton::ALL
+                .into_iter()
+                .any(|button| ctx.input.pad_button_pressed(slot, button));
+        if !pad_active {
+            return;
+        }
+
+        if !self.controller_mode {
+            self.controls_hint_remaining = 5.0;
+            self.controller_navigator.reset();
+        }
+        self.controller_mode = true;
+        if !self.controller_cursor_initialized {
+            self.controller_cursor_screen = ctx.renderer.camera.viewport() * 0.5;
+            self.controller_cursor_initialized = true;
+        }
+    }
+
+    fn poll_controller_menu(&mut self, ctx: &FrameCtx<'_>) -> Option<MenuInput> {
+        let direction = ctx
+            .input
+            .first_pad()
+            .and_then(|slot| controller_menu_direction(ctx.input.navigation_axis(Some(slot))));
+        self.controller_navigator.poll(direction, ctx.time.fixed_dt)
+    }
+
+    fn update_controller_cursor(&mut self, ctx: &FrameCtx<'_>, dt: f32) {
+        if !self.controller_mode
+            || self.controller_command_mode
+            || self.mission_select
+            || self.briefing
+            || self.paused
+            || self.victory
+            || self.defeat
+        {
+            return;
+        }
+        let Some(slot) = ctx.input.first_pad() else {
+            return;
+        };
+        self.controller_cursor_screen = step_controller_cursor_with_sensitivity(
+            self.controller_cursor_screen,
+            ctx.input.pad_right_stick(slot),
+            ctx.renderer.camera.viewport(),
+            dt,
+            ctx.profile.controller.cursor_sensitivity,
+        );
+    }
+
+    fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+        if !paused {
+            self.settings_open = false;
+        }
+    }
+
+    fn toggle_paused(&mut self) {
+        self.set_paused(!self.paused);
+        if self.paused {
+            self.exit_controller_command_mode();
+        }
+    }
+
+    fn open_settings(&mut self) {
+        self.set_paused(true);
+        self.settings_open = true;
+        self.settings_cursor = 0;
+        self.placing_beacon = false;
+        self.attack_move_mode = false;
+        self.patrol_mode = false;
+        self.follow_mode = false;
+        self.exit_controller_command_mode();
+        self.status = None;
+    }
+
+    fn close_settings(&mut self) {
+        self.settings_open = false;
+        self.settings_cursor = 0;
+        self.controller_navigator.reset();
+    }
+
+    fn settings_panel_bounds(center: Vec2, scale: f32) -> Aabb {
+        Aabb::from_center_size(
+            center,
+            Vec2::new(SETTINGS_PANEL_WIDTH, SETTINGS_PANEL_HEIGHT) * scale,
+        )
+    }
+
+    fn settings_row_rect(center: Vec2, scale: f32, index: usize) -> Aabb {
+        let row_center = center
+            + Vec2::new(
+                0.0,
+                SETTINGS_ROW_START_Y - index as f32 * SETTINGS_ROW_SPACING,
+            ) * scale;
+        Aabb::from_center_size(
+            row_center,
+            Vec2::new(SETTINGS_ROW_WIDTH, SETTINGS_ROW_HEIGHT) * scale,
+        )
+    }
+
+    fn pause_settings_button_rect(renderer: &Renderer) -> Aabb {
+        let scale = Self::hud_scale(renderer);
+        Aabb::from_center_size(
+            renderer.camera.position + Vec2::new(0.0, -204.0) * scale,
+            Vec2::new(560.0, 42.0) * scale,
+        )
+    }
+
+    fn settings_label(index: usize) -> &'static str {
+        match index {
+            0 => "RIGHT STICK SENSITIVITY",
+            1 => "STICK DEAD ZONE",
+            2 => "CAMERA Y AXIS",
+            3 => "MENU Y AXIS",
+            4 => "VIBRATION",
+            5 => "REDUCED MOTION",
+            _ => "UNKNOWN",
+        }
+    }
+
+    fn settings_value(profile: EngineProfile, index: usize) -> String {
+        let profile = profile.normalized();
+        match index {
+            0 => format!(
+                "{}%",
+                (profile.controller.cursor_sensitivity * 100.0).round() as u32
+            ),
+            1 => format!("{}%", (profile.controller.dead_zone * 100.0).round() as u32),
+            2 => {
+                if profile.controller.invert_right_y {
+                    "INVERTED".to_owned()
+                } else {
+                    "NORMAL".to_owned()
+                }
+            }
+            3 => {
+                if profile.controller.invert_left_y {
+                    "INVERTED".to_owned()
+                } else {
+                    "NORMAL".to_owned()
+                }
+            }
+            4 => {
+                if profile.controller.vibration {
+                    "ON".to_owned()
+                } else {
+                    "OFF".to_owned()
+                }
+            }
+            5 => {
+                if profile.accessibility.reduced_motion {
+                    "ON".to_owned()
+                } else {
+                    "OFF".to_owned()
+                }
+            }
+            _ => "—".to_owned(),
+        }
+    }
+
+    fn settings_meter_fraction(profile: EngineProfile, index: usize) -> Option<f32> {
+        let profile = profile.normalized();
+        match index {
+            0 => Some(
+                (profile.controller.cursor_sensitivity - CONTROLLER_CURSOR_SENSITIVITY_MIN)
+                    / (CONTROLLER_CURSOR_SENSITIVITY_MAX - CONTROLLER_CURSOR_SENSITIVITY_MIN),
+            ),
+            1 => Some(profile.controller.dead_zone / 0.9),
+            _ => None,
+        }
+        .map(|fraction| fraction.clamp(0.0, 1.0))
+    }
+
+    fn adjust_settings(profile: &mut EngineProfile, index: usize, direction: i32) -> bool {
+        if direction == 0 || index >= SETTINGS_ROW_COUNT {
+            return false;
+        }
+        let before = *profile;
+        let sign = if direction.is_positive() { 1.0 } else { -1.0 };
+        match index {
+            0 => {
+                profile.controller.cursor_sensitivity = (profile.controller.cursor_sensitivity
+                    + sign * CONTROLLER_CURSOR_SENSITIVITY_STEP)
+                    .clamp(
+                        CONTROLLER_CURSOR_SENSITIVITY_MIN,
+                        CONTROLLER_CURSOR_SENSITIVITY_MAX,
+                    );
+            }
+            1 => {
+                profile.controller.dead_zone = (profile.controller.dead_zone
+                    + sign * CONTROLLER_DEAD_ZONE_STEP)
+                    .clamp(0.0, 0.9);
+            }
+            2 => profile.controller.invert_right_y = !profile.controller.invert_right_y,
+            3 => profile.controller.invert_left_y = !profile.controller.invert_left_y,
+            4 => profile.controller.vibration = !profile.controller.vibration,
+            5 => profile.accessibility.reduced_motion = !profile.accessibility.reduced_motion,
+            _ => {}
+        }
+        *profile = profile.normalized();
+        *profile != before
+    }
+
+    fn set_settings_slider_from_mouse(
+        profile: &mut EngineProfile,
+        index: usize,
+        row: Aabb,
+        mouse_x: f32,
+    ) -> bool {
+        if !matches!(index, 0 | 1) || !mouse_x.is_finite() {
+            return false;
+        }
+        let fraction = ((mouse_x - row.min.x) / row.size().x).clamp(0.0, 1.0);
+        let before = *profile;
+        match index {
+            0 => {
+                let steps = ((CONTROLLER_CURSOR_SENSITIVITY_MAX
+                    - CONTROLLER_CURSOR_SENSITIVITY_MIN)
+                    / CONTROLLER_CURSOR_SENSITIVITY_STEP)
+                    .round();
+                profile.controller.cursor_sensitivity = CONTROLLER_CURSOR_SENSITIVITY_MIN
+                    + (fraction * steps).round() * CONTROLLER_CURSOR_SENSITIVITY_STEP;
+            }
+            1 => {
+                profile.controller.dead_zone = (fraction * 0.9 * 30.0).round() / 30.0;
+            }
+            _ => {}
+        }
+        *profile = profile.normalized();
+        *profile != before
+    }
+
+    fn handle_settings_input(&mut self, ctx: &mut FrameCtx<'_>) {
+        if ctx.input.key_pressed(KeyCode::F2) || ctx.input.key_pressed(KeyCode::Escape) {
+            self.close_settings();
+            return;
+        }
+
+        let mut changed = false;
+        if ctx.input.key_pressed(KeyCode::ArrowUp) {
+            self.settings_cursor =
+                (self.settings_cursor + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
+        }
+        if ctx.input.key_pressed(KeyCode::ArrowDown) {
+            self.settings_cursor = (self.settings_cursor + 1) % SETTINGS_ROW_COUNT;
+        }
+        if ctx.input.key_pressed(KeyCode::ArrowLeft) {
+            changed |= Self::adjust_settings(ctx.profile, self.settings_cursor, -1);
+        }
+        if ctx.input.key_pressed(KeyCode::ArrowRight)
+            || ctx.input.key_pressed(KeyCode::Enter)
+            || ctx.input.key_pressed(KeyCode::Space)
+        {
+            changed |= Self::adjust_settings(ctx.profile, self.settings_cursor, 1);
+        }
+
+        if self.controller_mode {
+            if let Some(slot) = ctx.input.first_pad() {
+                let vertical = if ctx.input.pad_button_down(slot, PadButton::DpadUp) {
+                    Vec2::Y
+                } else if ctx.input.pad_button_down(slot, PadButton::DpadDown) {
+                    -Vec2::Y
+                } else {
+                    Vec2::new(0.0, ctx.input.pad_left_stick(slot).y)
+                };
+                match self
+                    .controller_navigator
+                    .poll(controller_menu_direction(vertical), ctx.time.fixed_dt)
+                {
+                    Some(MenuInput::Up) => {
+                        self.settings_cursor =
+                            (self.settings_cursor + SETTINGS_ROW_COUNT - 1) % SETTINGS_ROW_COUNT;
+                    }
+                    Some(MenuInput::Down) => {
+                        self.settings_cursor = (self.settings_cursor + 1) % SETTINGS_ROW_COUNT;
+                    }
+                    _ => {}
+                }
+                if ctx.input.pad_button_pressed(slot, PadButton::DpadLeft) {
+                    changed |= Self::adjust_settings(ctx.profile, self.settings_cursor, -1);
+                }
+                if ctx.input.pad_button_pressed(slot, PadButton::DpadRight)
+                    || ctx.input.pad_button_pressed(slot, PadButton::South)
+                {
+                    changed |= Self::adjust_settings(ctx.profile, self.settings_cursor, 1);
+                }
+                if ctx.input.pad_button_pressed(slot, PadButton::East)
+                    || ctx.input.pad_button_pressed(slot, PadButton::West)
+                {
+                    self.close_settings();
+                    return;
+                }
+            }
+        }
+
+        let scale = Self::hud_scale(ctx.renderer);
+        let center = ctx.renderer.camera.position;
+        let mouse_world = ctx
+            .renderer
+            .camera
+            .screen_to_world(ctx.input.mouse_position);
+        if !self.controller_mode {
+            for index in 0..SETTINGS_ROW_COUNT {
+                if Self::settings_row_rect(center, scale, index).contains_point(mouse_world) {
+                    self.settings_cursor = index;
+                    break;
+                }
+            }
+            if ctx.input.mouse_pressed(MouseButton::Left) {
+                let row = Self::settings_row_rect(center, scale, self.settings_cursor);
+                if row.contains_point(mouse_world) {
+                    if matches!(self.settings_cursor, 0 | 1) {
+                        changed |= Self::set_settings_slider_from_mouse(
+                            ctx.profile,
+                            self.settings_cursor,
+                            row,
+                            mouse_world.x,
+                        );
+                    } else {
+                        changed |= Self::adjust_settings(ctx.profile, self.settings_cursor, 1);
+                    }
+                }
+            }
+        }
+
+        if changed {
+            self.profile_snapshot = *ctx.profile;
+        }
+    }
+
+    fn draw_settings_panel(&self, ctx: &mut FrameCtx<'_>) {
+        let scale = Self::hud_scale(ctx.renderer);
+        let center = ctx.renderer.camera.position;
+        let bounds = Self::settings_panel_bounds(center, scale);
+        ctx.renderer.draw_sprite(
+            self.tex_ui,
+            Sprite::new(bounds.center(), bounds.size())
+                .with_color(Color::rgba(0.012, 0.045, 0.065, 0.98))
+                .with_z(10.0),
+        );
+        self.draw_hud_panel_frame(
+            ctx.renderer,
+            bounds,
+            Color::rgb(0.25, 1.25, 1.12),
+            10.08,
+            true,
+        );
+        self.draw_text_shadowed(
+            ctx.renderer,
+            "CONTROL DECK",
+            bounds.min + Vec2::new(30.0, 405.0) * scale,
+            3.2 * scale,
+            Color::rgb(0.35, 1.45, 1.25),
+            10.2,
+        );
+        self.draw_text_shadowed(
+            ctx.renderer,
+            "LIVE PROFILE // SAVES AFTER APPLY",
+            bounds.min + Vec2::new(32.0, 376.0) * scale,
+            1.35 * scale,
+            Color::rgba(0.58, 0.78, 0.82, 0.9),
+            10.2,
+        );
+        let mouse_world = ctx
+            .renderer
+            .camera
+            .screen_to_world(ctx.input.mouse_position);
+        let profile = ctx.profile.normalized();
+        for index in 0..SETTINGS_ROW_COUNT {
+            let row = Self::settings_row_rect(center, scale, index);
+            let hovered = !self.controller_mode && row.contains_point(mouse_world);
+            let focused = self.settings_cursor == index;
+            ctx.renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(row.center(), row.size())
+                    .with_color(if focused {
+                        Color::rgba(0.12, 0.48, 0.5, 0.82)
+                    } else if hovered {
+                        Color::rgba(0.09, 0.3, 0.34, 0.68)
+                    } else {
+                        Color::rgba(0.025, 0.1, 0.13, 0.72)
+                    })
+                    .with_z(10.1),
+            );
+            if focused {
+                self.draw_hud_panel_frame(
+                    ctx.renderer,
+                    row,
+                    Color::rgb(1.22, 0.82, 0.28),
+                    10.18,
+                    false,
+                );
+            }
+            self.draw_text_shadowed(
+                ctx.renderer,
+                Self::settings_label(index),
+                row.min + Vec2::new(22.0, 12.0) * scale,
+                1.75 * scale,
+                Color::rgb(0.82, 0.92, 0.94),
+                10.2,
+            );
+            if let Some(fraction) = Self::settings_meter_fraction(profile, index) {
+                let meter_center = row.min + Vec2::new(432.0, 20.0) * scale;
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(meter_center, Vec2::new(112.0, 6.0) * scale)
+                        .with_color(Color::rgba(0.01, 0.03, 0.04, 0.9))
+                        .with_z(10.2),
+                );
+                if fraction > 0.0 {
+                    ctx.renderer.draw_sprite(
+                        self.tex_ui,
+                        Sprite::new(
+                            meter_center + Vec2::new(-56.0 + 56.0 * fraction, 0.0) * scale,
+                            Vec2::new(112.0 * fraction, 4.0) * scale,
+                        )
+                        .with_color(Color::rgb(0.25, 1.3, 1.18))
+                        .with_z(10.22),
+                    );
+                }
+            }
+            self.draw_text_shadowed(
+                ctx.renderer,
+                &Self::settings_value(profile, index),
+                row.min + Vec2::new(538.0, 12.0) * scale,
+                1.75 * scale,
+                if focused {
+                    Color::rgb(1.28, 0.88, 0.32)
+                } else {
+                    Color::rgb(0.42, 1.22, 1.12)
+                },
+                10.2,
+            );
+        }
+    }
+
+    fn controller_cursor_world(&self, renderer: &Renderer) -> Vec2 {
+        renderer
+            .camera
+            .screen_to_world(self.controller_cursor_screen)
+    }
+
+    fn exit_controller_command_mode(&mut self) {
+        self.controller_command_mode = false;
+        self.controller_command_cursor = 0;
+        self.controller_command_alternate = false;
+        self.controller_navigator.reset();
+    }
+
+    fn cancel_controller_action(&mut self) -> bool {
+        let had_mode = self.placing_beacon
+            || self.attack_move_mode
+            || self.patrol_mode
+            || self.follow_mode
+            || self.controller_command_mode;
+        self.placing_beacon = false;
+        self.attack_move_mode = false;
+        self.patrol_mode = false;
+        self.follow_mode = false;
+        self.exit_controller_command_mode();
+        had_mode
     }
 
     fn simulation_modifiers(&self) -> SimulationModifiers {
@@ -737,6 +1557,14 @@ impl LastLight {
         BEACON_COST.saturating_sub(smith_discount + charter_discount)
     }
 
+    fn beacon_placement_hint(&self) -> &'static str {
+        if self.controller_mode {
+            "BEACON PLACEMENT — SOUTH DEPLOY / EAST CANCEL"
+        } else {
+            "BEACON PLACEMENT — LEFT CLICK / ESC CANCEL"
+        }
+    }
+
     fn relay_income(&self) -> u32 {
         let lattice_bonus = u32::from(self.specialist_module(OLAN, OLAN_LATTICE) == OLAN_LATTICE);
         let witness_bonus = u32::from(self.lumen_protocol() == Some(LUMEN_WITNESS));
@@ -815,11 +1643,21 @@ impl LastLight {
             .iter()
             .position(|&index| index == self.mission_cursor)
             .unwrap_or(0);
-        if ctx.input.key_pressed(KeyCode::ArrowUp) || ctx.input.key_pressed(KeyCode::ArrowLeft) {
+        let controller_nav = self
+            .controller_mode
+            .then(|| self.poll_controller_menu(ctx))
+            .flatten();
+        if ctx.input.key_pressed(KeyCode::ArrowUp)
+            || ctx.input.key_pressed(KeyCode::ArrowLeft)
+            || controller_nav == Some(MenuInput::Up)
+        {
             let previous = (cursor_slot + unlocked.len() - 1) % unlocked.len();
             self.mission_cursor = unlocked[previous];
         }
-        if ctx.input.key_pressed(KeyCode::ArrowDown) || ctx.input.key_pressed(KeyCode::ArrowRight) {
+        if ctx.input.key_pressed(KeyCode::ArrowDown)
+            || ctx.input.key_pressed(KeyCode::ArrowRight)
+            || controller_nav == Some(MenuInput::Down)
+        {
             let next = (cursor_slot + 1) % unlocked.len();
             self.mission_cursor = unlocked[next];
         }
@@ -831,16 +1669,19 @@ impl LastLight {
             .renderer
             .camera
             .screen_to_world(ctx.input.mouse_position);
-        for &index in &unlocked {
-            if Self::mission_entry_rect(ctx.renderer.camera.position, index, menu_scale)
-                .contains_point(mouse_world)
-            {
-                self.mission_cursor = index;
-                break;
+        if !self.controller_mode {
+            for &index in &unlocked {
+                if Self::mission_entry_rect(ctx.renderer.camera.position, index, menu_scale)
+                    .contains_point(mouse_world)
+                {
+                    self.mission_cursor = index;
+                    break;
+                }
             }
         }
-        let mut confirmed =
-            ctx.input.key_pressed(KeyCode::Space) || ctx.input.key_pressed(KeyCode::Enter);
+        let mut confirmed = ctx.input.key_pressed(KeyCode::Space)
+            || ctx.input.key_pressed(KeyCode::Enter)
+            || (self.controller_mode && Self::controller_button_pressed(ctx, PadButton::South));
         if ctx.input.mouse_pressed(MouseButton::Left) {
             for &index in &unlocked {
                 if Self::mission_entry_rect(ctx.renderer.camera.position, index, menu_scale)
@@ -857,6 +1698,7 @@ impl LastLight {
                 self.mission_select = false;
                 self.start_mission(chosen);
                 ctx.audio.start();
+                ctx.input.rumble_first(0.18, 0.3, 0.08);
             }
         }
     }
@@ -1061,19 +1903,38 @@ impl LastLight {
                 self.apply_briefing_action(key);
             }
         }
+        let rows = self.briefing_rows();
+        if self.controller_mode && !rows.is_empty() {
+            match self.poll_controller_menu(ctx) {
+                Some(MenuInput::Up) => {
+                    self.controller_briefing_cursor =
+                        (self.controller_briefing_cursor + rows.len() - 1) % rows.len();
+                    ctx.input.rumble_first(0.04, 0.08, 0.035);
+                }
+                Some(MenuInput::Down) => {
+                    self.controller_briefing_cursor =
+                        (self.controller_briefing_cursor + 1) % rows.len();
+                    ctx.input.rumble_first(0.04, 0.08, 0.035);
+                }
+                _ => {}
+            }
+            if Self::controller_button_pressed(ctx, PadButton::South) {
+                let key = rows[self.controller_briefing_cursor.min(rows.len() - 1)].0;
+                self.apply_briefing_action(key);
+                ctx.input.rumble_first(0.12, 0.22, 0.07);
+            }
+        }
         if ctx.input.mouse_pressed(MouseButton::Left) {
             let mouse_world = ctx
                 .renderer
                 .camera
                 .screen_to_world(ctx.input.mouse_position);
-            let row_count = self.briefing_rows().len();
             let scale = Self::hud_scale(ctx.renderer);
-            for index in 0..row_count {
+            for (index, (key, _, _)) in rows.iter().enumerate() {
                 if Self::briefing_row_rect(ctx.renderer.camera.position, index, scale)
                     .contains_point(mouse_world)
                 {
-                    let key = self.briefing_rows()[index].0;
-                    self.apply_briefing_action(key);
+                    self.apply_briefing_action(*key);
                     break;
                 }
             }
@@ -1114,16 +1975,10 @@ impl LastLight {
     }
 
     fn minimap_transform(&self, renderer: &Renderer) -> MinimapTransform {
-        let scale = Self::hud_scale(renderer);
-        let bottom_left = renderer
-            .camera
-            .world_from_viewport_fraction(Vec2::new(0.0, 0.0));
+        let layout = TacticalHudLayout::new(renderer);
         MinimapTransform {
             world: Aabb::from_center_size(Vec2::ZERO, MAP_SIZE),
-            panel: Aabb::from_center_size(
-                bottom_left + Vec2::new(150.0, 92.0) * scale,
-                Vec2::new(260.0, 138.0) * scale,
-            ),
+            panel: layout.minimap_panel,
         }
     }
 
@@ -1309,9 +2164,24 @@ impl LastLight {
             .collect()
     }
 
+    /// Controller focus contains executable verbs only. Mouse/keyboard cards
+    /// may still show compact informational rows, but a pad focus ring must
+    /// never land on copy that cannot respond to the confirm button.
+    fn controller_command_rows(&self) -> Vec<usize> {
+        self.command_card_rows()
+            .into_iter()
+            .filter(|&index| self.command_card_key(index).is_some())
+            .collect()
+    }
+
     fn command_card_page_count(&self) -> usize {
-        let rows = self.command_card_rows().len().max(1);
-        (rows + COMMAND_CARD_COMPACT_ROWS - 1) / COMMAND_CARD_COMPACT_ROWS
+        let rows = if self.controller_command_mode {
+            self.controller_command_rows().len()
+        } else {
+            self.command_card_rows().len()
+        }
+        .max(1);
+        rows.div_ceil(COMMAND_CARD_COMPACT_ROWS)
     }
 
     fn command_card_visible_page(&self) -> usize {
@@ -1320,11 +2190,17 @@ impl LastLight {
     }
 
     fn command_card_should_paginate(&self, renderer: &Renderer) -> bool {
+        let row_count = if self.controller_command_mode {
+            self.controller_command_rows().len()
+        } else {
+            self.command_card_rows().len()
+        };
         self.command_card_visible()
-            && !self.command_card_compact
-            && !self.minimal_hud
-            && !Self::hud_dense_layout(renderer)
-            && self.command_card_rows().len() > COMMAND_CARD_COMPACT_ROWS
+            && (self.controller_command_mode
+                || (!self.command_card_compact
+                    && !self.minimal_hud
+                    && !Self::hud_dense_layout(renderer)))
+            && row_count > COMMAND_CARD_COMPACT_ROWS
     }
 
     /// Compact mode keeps the command card readable in browser zooms by
@@ -1344,15 +2220,23 @@ impl LastLight {
     }
 
     fn visible_command_card_rows_for_display(&self, renderer: &Renderer) -> Vec<usize> {
-        let rows = self.command_card_rows();
-        if self.command_card_compact || self.minimal_hud || Self::hud_dense_layout(renderer) {
-            rows.into_iter().take(COMMAND_CARD_COMPACT_ROWS).collect()
+        let rows = if self.controller_command_mode {
+            self.controller_command_rows()
         } else {
+            self.command_card_rows()
+        };
+        if self.controller_command_mode
+            || (!self.command_card_compact
+                && !self.minimal_hud
+                && !Self::hud_dense_layout(renderer))
+        {
             let start = self.command_card_visible_page() * COMMAND_CARD_COMPACT_ROWS;
             rows.into_iter()
                 .skip(start)
                 .take(COMMAND_CARD_COMPACT_ROWS)
                 .collect()
+        } else {
+            rows.into_iter().take(COMMAND_CARD_COMPACT_ROWS).collect()
         }
     }
 
@@ -1429,7 +2313,14 @@ impl LastLight {
             role_counts[0], role_counts[1], role_counts[2]
         );
         if self.controls_hint_remaining > 0.0 {
-            format!("{counts}   // CLICK PORTRAIT TO SPLIT")
+            format!(
+                "{counts}   // {}",
+                if self.controller_mode {
+                    "LB/RB CYCLE  Y COMMANDS"
+                } else {
+                    "CLICK PORTRAIT TO SPLIT"
+                }
+            )
         } else {
             counts
         }
@@ -1620,6 +2511,25 @@ impl LastLight {
         }
     }
 
+    fn command_card_display_for_active_input(&self, index: usize) -> String {
+        let display = self.command_card_display(index);
+        if !self.controller_mode {
+            return display;
+        }
+        if matches!(self.selected_structure, Some(StructureKind::Fabricator))
+            && index == 5
+            && !self.placing_beacon
+        {
+            return "BEACON 50   //   SUPPLY MODULE 100".to_owned();
+        }
+        let bytes = display.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_uppercase() && bytes[1] == b' ' {
+            display[1..].trim_start().to_owned()
+        } else {
+            display
+        }
+    }
+
     fn command_card_available(&self, index: usize) -> bool {
         match self.selected_structure {
             Some(StructureKind::Relay(relay_index)) if index == 0 => self
@@ -1705,7 +2615,7 @@ impl LastLight {
     fn command_row_for_key(&self, key: KeyCode) -> Option<usize> {
         self.command_card_rows()
             .into_iter()
-            .find_map(|index| (self.command_card_key(index) == Some(key)).then_some(index))
+            .find(|&index| self.command_card_key(index) == Some(key))
     }
 
     /// Resolve a command key against the current context, including rows that
@@ -2129,7 +3039,7 @@ impl LastLight {
                         self.placing_beacon = !self.placing_beacon;
                         self.status = Some((
                             if self.placing_beacon {
-                                "BEACON PLACEMENT — LEFT CLICK / ESC CANCEL"
+                                self.beacon_placement_hint()
                             } else {
                                 "BEACON PLACEMENT CANCELLED"
                             }
@@ -2165,7 +3075,7 @@ impl LastLight {
                 self.placing_beacon = !self.placing_beacon;
                 self.status = Some((
                     if self.placing_beacon {
-                        "BEACON PLACEMENT — LEFT CLICK / ESC CANCEL"
+                        self.beacon_placement_hint()
                     } else {
                         "BEACON PLACEMENT CANCELLED"
                     }
@@ -2237,40 +3147,26 @@ impl LastLight {
     }
 
     fn pause_icon_rect(renderer: &Renderer) -> Aabb {
-        let scale = Self::hud_scale(renderer);
-        let top_right = renderer
-            .camera
-            .world_from_viewport_fraction(Vec2::new(1.0, 1.0));
-        Aabb::from_center_size(
-            top_right + Vec2::new(-44.0, -44.0) * scale,
-            Vec2::splat(48.0 * scale),
-        )
+        let layout = TacticalHudLayout::new(renderer);
+        Aabb::from_center_size(layout.pause_center, Vec2::splat(48.0 * layout.scale))
     }
 
     /// World-space anchor for the command card's text/rows. The single
     /// source of truth for both rendering (`on_update`) and click
     /// hit-testing (`handle_command_keys`) so they can't drift apart.
     fn command_card_text_origin(renderer: &Renderer) -> Vec2 {
-        let scale = Self::command_card_scale(renderer);
-        let bottom_right = renderer
-            .camera
-            .world_from_viewport_fraction(Vec2::new(1.0, 0.0));
-        bottom_right + Vec2::new(-350.0, 176.0) * scale
+        TacticalHudLayout::new(renderer).command_card_text_origin
     }
 
     fn unit_card_origin(renderer: &Renderer) -> Vec2 {
-        let scale = Self::hud_scale(renderer);
-        renderer
-            .camera
-            .world_from_viewport_fraction(Vec2::new(0.0, 0.0))
-            + Vec2::new(300.0, 34.0) * scale
+        TacticalHudLayout::new(renderer).unit_card_origin
     }
 
     fn selection_chip_rect(renderer: &Renderer, index: usize) -> Aabb {
-        let scale = Self::hud_scale(renderer);
+        let layout = TacticalHudLayout::new(renderer);
         Aabb::from_center_size(
-            Self::unit_card_origin(renderer) + Vec2::new(144.0 + index as f32 * 48.0, 93.0) * scale,
-            Vec2::splat(38.0 * scale),
+            layout.unit_card_origin + Vec2::new(144.0 + index as f32 * 48.0, 93.0) * layout.scale,
+            Vec2::splat(38.0 * layout.scale),
         )
     }
 
@@ -2518,8 +3414,54 @@ impl LastLight {
                         .insert(UnitId(unit_id), AnimationPlayer::default());
                 }
                 SimulationEventKind::AttackLanded { attacker, target } => {
-                    self.attack_flash.insert(UnitId(attacker), 0.08);
-                    self.damage_flash.insert(UnitId(target), 0.34);
+                    let attacker = UnitId(attacker);
+                    let target = UnitId(target);
+                    self.attack_flash
+                        .insert(attacker, (target, ATTACK_FLASH_DURATION));
+                    self.damage_flash.insert(target, DAMAGE_FLASH_DURATION);
+                    self.combat_pulse_count = self.combat_pulse_count.saturating_add(1);
+
+                    let attacker_faction = self
+                        .simulation
+                        .world
+                        .unit(attacker)
+                        .map(|unit| unit.faction);
+                    let target_is_player = self
+                        .simulation
+                        .world
+                        .unit(target)
+                        .is_some_and(|unit| unit.faction == PLAYER);
+                    if self.combat_audio_cooldown <= 0.0 {
+                        let (frequency, duration, volume) = if attacker_faction == Some(PLAYER) {
+                            (620.0, 0.035, 0.065)
+                        } else {
+                            (165.0, 0.055, 0.055)
+                        };
+                        ctx.audio.beep(frequency, duration, volume);
+                        self.combat_audio_cooldown = COMBAT_AUDIO_GATE;
+                    }
+                    if target_is_player {
+                        ctx.input.rumble_first(0.035, 0.09, 0.045);
+                    }
+                }
+                SimulationEventKind::UnitDetonated { unit_id, kind } => {
+                    if kind == UnitKind::BellMine {
+                        self.detonation_count = self.detonation_count.saturating_add(1);
+                        if let Some(position) = self
+                            .simulation
+                            .world
+                            .unit(UnitId(unit_id))
+                            .map(|unit| unit.position)
+                        {
+                            self.detonation_fx.push(DetonationFx::new(position));
+                            self.target_feedback =
+                                Some((position, "BELL MINE // DETONATION".to_owned(), 1.5));
+                            self.status =
+                                Some(("BELL MINE DETONATED // BLAST ZONE".to_owned(), 2.1));
+                            ctx.audio.hurt();
+                            ctx.input.rumble_first(0.16, 0.26, 0.08);
+                        }
+                    }
                 }
                 SimulationEventKind::TargetAcquired { attacker, target } => {
                     let attacker_id = UnitId(attacker);
@@ -2559,25 +3501,34 @@ impl LastLight {
                     target,
                     windup_seconds,
                 } => {
-                    let attacker_kind = self.simulation.kinds.get(&UnitId(attacker)).copied();
+                    let attacker = UnitId(attacker);
+                    let target = UnitId(target);
+                    let windup_seconds = windup_seconds.max(f32::EPSILON);
+                    self.weapon_windups
+                        .insert(attacker, (target, windup_seconds, windup_seconds));
+                    let attacker_kind = self.simulation.kinds.get(&attacker).copied();
                     let attacker_is_choir = self
                         .simulation
                         .world
-                        .unit(UnitId(attacker))
+                        .unit(attacker)
                         .is_some_and(|unit| unit.faction == CHOIR);
-                    if attacker_is_choir {
-                        if let Some(target_unit) = self.simulation.world.unit(UnitId(target)) {
+                    let heavy_warning = attacker_kind.is_some_and(|kind| {
+                        matches!(kind, UnitKind::Canticle | UnitKind::BellMine)
+                    });
+                    if attacker_is_choir && heavy_warning {
+                        if let Some(target_unit) = self.simulation.world.unit(target) {
                             let label = attacker_kind.map(UnitKind::label).unwrap_or("CONTACT");
                             self.target_feedback = Some((
                                 target_unit.position,
                                 format!("INCOMING // {label}  {:.1}s", windup_seconds),
-                                1.8,
+                                windup_seconds + 0.45,
                             ));
                         }
                     }
                 }
                 SimulationEventKind::DamageApplied { target } => {
-                    self.damage_flash.insert(UnitId(target), 0.34);
+                    self.damage_flash
+                        .insert(UnitId(target), DAMAGE_FLASH_DURATION * 0.55);
                 }
                 SimulationEventKind::UnitRepaired { engineer, target } => {
                     self.repair_flash
@@ -2588,6 +3539,8 @@ impl LastLight {
                     let unit_id = UnitId(unit_id);
                     self.down_units.insert(unit_id, 0.0);
                     self.damage_flash.remove(&unit_id);
+                    self.attack_flash.remove(&unit_id);
+                    self.weapon_windups.remove(&unit_id);
                     let player_loss = self
                         .simulation
                         .world
@@ -3238,6 +4191,406 @@ impl LastLight {
     fn issue_move_order(&mut self, destination: Vec2) {
         self.simulation.issue_move_order(destination);
         self.order_marker = Some((destination, 0.65));
+        self.status = Some(("MOVE ORDERED".to_owned(), 1.2));
+    }
+
+    fn deploy_beacon_at(&mut self, position: Vec2, ctx: &mut FrameCtx<'_>) -> bool {
+        let beacon_cost = self.beacon_cost();
+        match self.placement_rules().validate(position, 54.0) {
+            Ok(()) if self.simulation.resources.spend(beacon_cost) => {
+                let builders: Vec<UnitId> = self
+                    .simulation
+                    .world
+                    .selection()
+                    .ids()
+                    .iter()
+                    .copied()
+                    .filter(|id| self.simulation.kinds.get(id) == Some(&UnitKind::Engineer))
+                    .collect();
+                for builder in builders {
+                    self.build_flash.insert(builder, 1.6);
+                }
+                self.field_beacons.push(FieldBeacon { position });
+                let _ = self
+                    .simulation
+                    .add_circular_motion_obstacle(position, FIELD_BEACON_RADIUS);
+                self.placing_beacon = false;
+                self.status = Some(("FIELD BEACON DEPLOYED".to_owned(), 3.0));
+                ctx.audio.collect();
+                true
+            }
+            Ok(()) => {
+                self.status = Some((format!("BEACON REQUIRES {beacon_cost} SALVAGE"), 3.0));
+                false
+            }
+            Err(reason) => {
+                let reason = match reason {
+                    PlacementError::OutsideBuildArea => "OUTSIDE BUILD AREA",
+                    PlacementError::TooFarFromPower => "NO POWER LINK",
+                    PlacementError::Obstructed => "PLACEMENT OBSTRUCTED",
+                };
+                self.status = Some((reason.to_owned(), 2.5));
+                false
+            }
+        }
+    }
+
+    fn controller_select_at(&mut self, position: Vec2, ctx: &mut FrameCtx<'_>) -> bool {
+        if self.placing_beacon {
+            return self.deploy_beacon_at(position, ctx);
+        }
+        self.exit_controller_command_mode();
+        self.reset_command_card_page();
+        if let Some(structure) = self.structure_at(position) {
+            self.selected_structure = Some(structure);
+            self.selected_resource_node = None;
+            self.simulation.world.clear_selection();
+            self.status = Some(("STRUCTURE SELECTED // Y COMMANDS".to_owned(), 1.8));
+            ctx.audio.collect();
+            return true;
+        }
+        if let Some(node) = self.salvage_node_at(position) {
+            self.selected_structure = None;
+            if self.selected_single_unit_kind() == Some(UnitKind::Surveyor) {
+                self.selected_resource_node = None;
+                let assigned = self.assign_harvest_order(node);
+                self.status = Some(if assigned > 0 {
+                    (format!("{assigned} SURVEYOR // RESOURCE ROUTE SET"), 2.5)
+                } else {
+                    ("RESOURCE NODE SATURATED OR DRY".to_owned(), 2.5)
+                });
+                return assigned > 0;
+            }
+            self.selected_resource_node = Some(node);
+            self.simulation.world.clear_selection();
+            self.status = Some(("RESOURCE NODE SELECTED // Y COMMANDS".to_owned(), 1.8));
+            ctx.audio.collect();
+            return true;
+        }
+        if let Some(id) = self.friendly_unit_id_at(position) {
+            let Some((unit_position, kind)) = self.simulation.world.unit(id).and_then(|unit| {
+                self.simulation
+                    .kinds
+                    .get(&id)
+                    .copied()
+                    .map(|kind| (unit.position, kind))
+            }) else {
+                return false;
+            };
+            self.selected_structure = None;
+            self.selected_resource_node = None;
+            self.simulation
+                .world
+                .select_point(unit_position, PLAYER, false);
+            self.status = Some((format!("{} SELECTED // Y COMMANDS", kind.label()), 1.8));
+            ctx.audio.collect();
+            return true;
+        }
+
+        self.selected_structure = None;
+        self.selected_resource_node = None;
+        self.simulation.world.clear_selection();
+        self.status = Some(("SELECTION CLEARED".to_owned(), 1.2));
+        false
+    }
+
+    fn issue_context_order_at(
+        &mut self,
+        position: Vec2,
+        queued: bool,
+        ctx: &mut FrameCtx<'_>,
+    ) -> bool {
+        if self.placing_beacon {
+            return self.deploy_beacon_at(position, ctx);
+        }
+        if matches!(self.selected_structure, Some(StructureKind::Fabricator))
+            && !self.attack_move_mode
+            && !self.patrol_mode
+            && !self.follow_mode
+        {
+            self.simulation.set_rally_point(position);
+            self.status = Some(("FABRICATOR RALLY POINT SET".to_owned(), 2.5));
+            self.order_marker = Some((position, 0.85));
+            ctx.audio.collect();
+            return true;
+        }
+        if self.simulation.world.selection().ids().is_empty() {
+            self.status = Some(("SELECT A LANTERN UNIT FIRST".to_owned(), 1.8));
+            return false;
+        }
+
+        let selected_ids = self.simulation.world.selection().ids().to_vec();
+        let handled = if self.attack_move_mode {
+            self.simulation.issue_attack_move_order(position, queued);
+            self.attack_move_mode = false;
+            self.status = Some(("ATTACK-MOVE ORDERED".to_owned(), 2.0));
+            true
+        } else if self.patrol_mode {
+            self.simulation.issue_patrol_order(position, queued);
+            self.patrol_mode = false;
+            self.status = Some(("PATROL ROUTE SET".to_owned(), 2.0));
+            true
+        } else if self.follow_mode {
+            if let Some(target) = self.friendly_unit_id_at(position) {
+                self.simulation.world.issue_follow(target, queued);
+                self.follow_mode = false;
+                self.status = Some(("FOLLOW ORDERED".to_owned(), 2.0));
+                true
+            } else {
+                self.status = Some(("FOLLOW TARGET NOT FOUND".to_owned(), 2.0));
+                false
+            }
+        } else if let Some(node) = self.salvage_node_at(position) {
+            let assigned = self.assign_harvest_order(node);
+            if assigned > 0 {
+                self.status = Some((format!("{assigned} SURVEYOR // SALVAGE ROUTE SET"), 2.5));
+                true
+            } else {
+                self.status = Some(("NO SURVEYOR AVAILABLE // G KEY TO FIND ONE".to_owned(), 2.5));
+                false
+            }
+        } else if let Some(enemy) = self.closest_enemy_at(position) {
+            self.simulation.world.issue_attack_order(enemy, queued);
+            for id in &selected_ids {
+                self.simulation.player_paths.remove(id);
+            }
+            true
+        } else if queued {
+            self.simulation.queue_move_order(position);
+            self.status = Some(("WAYPOINT QUEUED".to_owned(), 2.0));
+            true
+        } else {
+            self.issue_move_order(position);
+            true
+        };
+        if handled {
+            self.order_marker = Some((position, 0.65));
+            ctx.audio.collect();
+        }
+        handled
+    }
+
+    fn cycle_controller_unit(&mut self, direction: i32, ctx: &mut FrameCtx<'_>) -> bool {
+        let units: Vec<(UnitId, Vec2, UnitKind)> = self
+            .simulation
+            .world
+            .units()
+            .iter()
+            .filter(|unit| unit.faction == PLAYER && unit.alive())
+            .filter_map(|unit| {
+                self.simulation
+                    .kinds
+                    .get(&unit.id)
+                    .copied()
+                    .map(|kind| (unit.id, unit.position, kind))
+            })
+            .collect();
+        if units.is_empty() {
+            return false;
+        }
+        let selected = self.simulation.world.selection().ids().first().copied();
+        let current = selected
+            .and_then(|id| units.iter().position(|(candidate, _, _)| *candidate == id))
+            .unwrap_or(if direction < 0 { 0 } else { units.len() - 1 });
+        let next = if direction < 0 {
+            (current + units.len() - 1) % units.len()
+        } else {
+            (current + 1) % units.len()
+        };
+        let (_, position, kind) = units[next];
+        self.selected_structure = None;
+        self.selected_resource_node = None;
+        self.simulation.world.select_point(position, PLAYER, false);
+        self.reset_command_card_page();
+        self.exit_controller_command_mode();
+        ctx.renderer.camera.position = position;
+        ctx.renderer
+            .camera
+            .clamp_to_bounds(Aabb::from_center_size(Vec2::ZERO, MAP_SIZE));
+        self.controller_cursor_screen = ctx.renderer.camera.viewport() * 0.5;
+        self.status = Some((format!("{} FOCUSED // Y COMMANDS", kind.label()), 1.6));
+        true
+    }
+
+    fn execute_controller_command(&mut self, ctx: &mut FrameCtx<'_>) -> bool {
+        let rows = self.visible_command_card_rows_for_display(ctx.renderer);
+        let Some(&index) = rows.get(
+            self.controller_command_cursor
+                .min(rows.len().saturating_sub(1)),
+        ) else {
+            self.exit_controller_command_mode();
+            return false;
+        };
+        let split_fabricator_row =
+            matches!(self.selected_structure, Some(StructureKind::Fabricator))
+                && index == 5
+                && !self.placing_beacon;
+        let key = if split_fabricator_row && self.controller_command_alternate {
+            KeyCode::KeyD
+        } else {
+            let Some(key) = self.command_card_key(index) else {
+                return false;
+            };
+            key
+        };
+        if !self.command_card_available(index) {
+            self.report_blocked_command(key);
+            return false;
+        }
+        if key == KeyCode::KeyD
+            && matches!(self.selected_structure, Some(StructureKind::Fabricator))
+        {
+            self.upgrade_supply_module();
+        } else if key == KeyCode::KeyR && self.selected_resource_node.is_some() {
+            self.focus_resource_node(ctx);
+        } else {
+            self.apply_command_action(key);
+        }
+        if self.placing_beacon || self.attack_move_mode || self.patrol_mode || self.follow_mode {
+            self.exit_controller_command_mode();
+        }
+        true
+    }
+
+    fn handle_controller_tactical(&mut self, ctx: &mut FrameCtx<'_>) {
+        if !self.controller_mode {
+            return;
+        }
+        let Some(slot) = ctx.input.first_pad() else {
+            return;
+        };
+
+        if self.controller_command_mode {
+            if ctx.input.pad_button_pressed(slot, PadButton::East) {
+                self.exit_controller_command_mode();
+                self.status = None;
+                return;
+            }
+            if ctx.input.pad_button_pressed(slot, PadButton::LeftShoulder) {
+                self.prev_command_card_page(ctx.renderer);
+                self.controller_command_cursor = 0;
+                self.controller_command_alternate = false;
+            }
+            if ctx.input.pad_button_pressed(slot, PadButton::RightShoulder) {
+                self.next_command_card_page(ctx.renderer);
+                self.controller_command_cursor = 0;
+                self.controller_command_alternate = false;
+            }
+            let vertical = ctx.input.navigation_axis(Some(slot)) * Vec2::Y;
+            let direction = controller_menu_direction(vertical);
+            match self.controller_navigator.poll(direction, ctx.time.fixed_dt) {
+                Some(MenuInput::Up) => {
+                    let rows = self.visible_command_card_rows_for_display(ctx.renderer);
+                    if !rows.is_empty() {
+                        self.controller_command_cursor =
+                            (self.controller_command_cursor + rows.len() - 1) % rows.len();
+                        self.controller_command_alternate = false;
+                    }
+                }
+                Some(MenuInput::Down) => {
+                    let rows = self.visible_command_card_rows_for_display(ctx.renderer);
+                    if !rows.is_empty() {
+                        self.controller_command_cursor =
+                            (self.controller_command_cursor + 1) % rows.len();
+                        self.controller_command_alternate = false;
+                    }
+                }
+                _ => {}
+            }
+            let current_row = self
+                .visible_command_card_rows_for_display(ctx.renderer)
+                .get(self.controller_command_cursor)
+                .copied();
+            let split_row = matches!(self.selected_structure, Some(StructureKind::Fabricator))
+                && current_row == Some(5)
+                && !self.placing_beacon;
+            if split_row
+                && (ctx.input.pad_button_pressed(slot, PadButton::DpadLeft)
+                    || ctx.input.pad_button_pressed(slot, PadButton::DpadRight))
+            {
+                self.controller_command_alternate =
+                    ctx.input.pad_button_pressed(slot, PadButton::DpadRight);
+            }
+            if ctx.input.pad_button_pressed(slot, PadButton::South) {
+                let executed = self.execute_controller_command(ctx);
+                ctx.input.rumble_first(
+                    if executed { 0.12 } else { 0.28 },
+                    if executed { 0.22 } else { 0.08 },
+                    0.07,
+                );
+            }
+            return;
+        }
+
+        if ctx.input.pad_button_pressed(slot, PadButton::North) {
+            if self.command_card_visible() {
+                self.controller_command_mode = true;
+                self.controller_command_cursor = 0;
+                self.controller_command_alternate = false;
+                self.controller_navigator.reset();
+                self.status = None;
+                ctx.input.rumble_first(0.08, 0.18, 0.06);
+            } else {
+                self.focus_next_objective(ctx);
+            }
+            return;
+        }
+        if ctx.input.pad_button_pressed(slot, PadButton::Back) {
+            self.focus_next_objective(ctx);
+            ctx.input.rumble_first(0.06, 0.14, 0.05);
+        }
+        if ctx.input.pad_button_pressed(slot, PadButton::LeftShoulder)
+            && self.cycle_controller_unit(-1, ctx)
+        {
+            ctx.input.rumble_first(0.06, 0.14, 0.05);
+        }
+        if ctx.input.pad_button_pressed(slot, PadButton::RightShoulder)
+            && self.cycle_controller_unit(1, ctx)
+        {
+            ctx.input.rumble_first(0.06, 0.14, 0.05);
+        }
+        if ctx.input.pad_button_pressed(slot, PadButton::DpadLeft) {
+            ctx.renderer
+                .camera
+                .zoom_at(0.9, self.controller_cursor_screen);
+        }
+        if ctx.input.pad_button_pressed(slot, PadButton::DpadRight) {
+            ctx.renderer
+                .camera
+                .zoom_at(1.1, self.controller_cursor_screen);
+        }
+        ctx.renderer
+            .camera
+            .clamp_to_bounds(Aabb::from_center_size(Vec2::ZERO, MAP_SIZE));
+
+        let cursor_world = self.controller_cursor_world(ctx.renderer);
+        if ctx.input.pad_button_pressed(slot, PadButton::South) {
+            let selected = self.controller_select_at(cursor_world, ctx);
+            ctx.input.rumble_first(
+                if selected { 0.1 } else { 0.24 },
+                if selected { 0.2 } else { 0.06 },
+                0.07,
+            );
+        }
+        if ctx.input.pad_button_pressed(slot, PadButton::West) {
+            let ordered = self.issue_context_order_at(cursor_world, false, ctx);
+            ctx.input.rumble_first(
+                if ordered { 0.2 } else { 0.3 },
+                if ordered { 0.32 } else { 0.08 },
+                0.08,
+            );
+        }
+        if ctx.input.pad_button_pressed(slot, PadButton::East) {
+            if self.cancel_controller_action() {
+                self.status = Some(("TACTICAL ACTION CANCELLED".to_owned(), 1.5));
+            } else {
+                self.selected_structure = None;
+                self.selected_resource_node = None;
+                self.simulation.world.clear_selection();
+                self.status = Some(("SELECTION CLEARED".to_owned(), 1.2));
+            }
+            ctx.input.rumble_first(0.08, 0.05, 0.04);
+        }
     }
 
     fn structure_position(&self, structure: StructureKind) -> Option<Vec2> {
@@ -3662,43 +5015,7 @@ impl LastLight {
                 return;
             }
             if self.placing_beacon {
-                let beacon_cost = self.beacon_cost();
-                match self.placement_rules().validate(mouse_world, 54.0) {
-                    Ok(()) if self.simulation.resources.spend(beacon_cost) => {
-                        let builders: Vec<UnitId> = self
-                            .simulation
-                            .world
-                            .selection()
-                            .ids()
-                            .iter()
-                            .copied()
-                            .filter(|id| self.simulation.kinds.get(id) == Some(&UnitKind::Engineer))
-                            .collect();
-                        for builder in builders {
-                            self.build_flash.insert(builder, 1.6);
-                        }
-                        self.field_beacons.push(FieldBeacon {
-                            position: mouse_world,
-                        });
-                        let _ = self
-                            .simulation
-                            .add_circular_motion_obstacle(mouse_world, FIELD_BEACON_RADIUS);
-                        self.placing_beacon = false;
-                        self.status = Some(("FIELD BEACON DEPLOYED".to_owned(), 3.0));
-                        ctx.audio.collect();
-                    }
-                    Ok(()) => {
-                        self.status = Some((format!("BEACON REQUIRES {beacon_cost} SALVAGE"), 3.0));
-                    }
-                    Err(reason) => {
-                        let reason = match reason {
-                            PlacementError::OutsideBuildArea => "OUTSIDE BUILD AREA",
-                            PlacementError::TooFarFromPower => "NO POWER LINK",
-                            PlacementError::Obstructed => "PLACEMENT OBSTRUCTED",
-                        };
-                        self.status = Some((reason.to_owned(), 2.5));
-                    }
-                }
+                self.deploy_beacon_at(mouse_world, ctx);
                 return;
             }
             self.drag = Some(SelectionBox::begin(mouse_world));
@@ -3774,67 +5091,8 @@ impl LastLight {
                 }
             }
         }
-        if ctx.input.mouse_pressed(MouseButton::Right)
-            && !pointer_over_command_card
-            && matches!(self.selected_structure, Some(StructureKind::Fabricator))
-            && !self.attack_move_mode
-            && !self.patrol_mode
-            && !self.follow_mode
-        {
-            self.simulation.set_rally_point(mouse_world);
-            self.status = Some(("FABRICATOR RALLY POINT SET".to_owned(), 2.5));
-            self.order_marker = Some((mouse_world, 0.85));
-            ctx.audio.collect();
-        }
-        if ctx.input.mouse_pressed(MouseButton::Right)
-            && !pointer_over_command_card
-            && !self.simulation.world.selection().ids().is_empty()
-        {
-            let selected_ids = self.simulation.world.selection().ids().to_vec();
-            if self.attack_move_mode {
-                self.simulation
-                    .issue_attack_move_order(mouse_world, ctx.input.shift_down());
-                self.attack_move_mode = false;
-                self.status = Some(("ATTACK-MOVE ORDERED".to_owned(), 2.0));
-            } else if self.patrol_mode {
-                self.simulation
-                    .issue_patrol_order(mouse_world, ctx.input.shift_down());
-                self.patrol_mode = false;
-                self.status = Some(("PATROL ROUTE SET".to_owned(), 2.0));
-            } else if self.follow_mode {
-                if let Some(target) = self.friendly_unit_id_at(mouse_world) {
-                    self.simulation
-                        .world
-                        .issue_follow(target, ctx.input.shift_down());
-                    self.follow_mode = false;
-                    self.status = Some(("FOLLOW ORDERED".to_owned(), 2.0));
-                } else {
-                    self.status = Some(("FOLLOW TARGET NOT FOUND".to_owned(), 2.0));
-                }
-            } else if let Some(node) = self.salvage_node_at(mouse_world) {
-                let assigned = self.assign_harvest_order(node);
-                if assigned > 0 {
-                    self.status = Some((format!("{assigned} SURVEYOR // SALVAGE ROUTE SET"), 2.5));
-                } else {
-                    self.status =
-                        Some(("NO SURVEYOR AVAILABLE // G KEY TO FIND ONE".to_owned(), 2.5));
-                }
-            } else if let Some(enemy) = self.closest_enemy_at(mouse_world) {
-                self.simulation
-                    .world
-                    .issue_attack_order(enemy, ctx.input.shift_down());
-                for id in &selected_ids {
-                    self.simulation.player_paths.remove(id);
-                }
-            } else if ctx.input.shift_down() {
-                self.simulation.queue_move_order(mouse_world);
-                self.order_marker = Some((mouse_world, 0.65));
-                self.status = Some(("WAYPOINT QUEUED".to_owned(), 2.0));
-            } else {
-                self.issue_move_order(mouse_world);
-            }
-            self.order_marker = Some((mouse_world, 0.65));
-            ctx.audio.collect();
+        if ctx.input.mouse_pressed(MouseButton::Right) && !pointer_over_command_card {
+            self.issue_context_order_at(mouse_world, ctx.input.shift_down(), ctx);
         }
     }
 
@@ -3844,6 +5102,18 @@ impl LastLight {
         let mut pan =
             ctx.input
                 .axis_from_keys(KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA, KeyCode::KeyD);
+        if self.controller_mode
+            && !self.controller_command_mode
+            && !self.mission_select
+            && !self.briefing
+        {
+            if let Some(slot) = ctx.input.first_pad() {
+                let pad_pan = ctx.input.pad_left_stick(slot);
+                if pan == Vec2::ZERO {
+                    pan = pad_pan;
+                }
+            }
+        }
         const EDGE: f32 = 20.0;
         // A pointer inherited from another app often starts at (0, 0). Give
         // the deployment framing a short grace period so that edge-scroll
@@ -3852,7 +5122,12 @@ impl LastLight {
             && mouse.y > 1.0
             && mouse.x < viewport.x - 1.0
             && mouse.y < viewport.y - 1.0;
-        if !self.briefing && !self.mission_select && self.mission_time > 1.5 && pointer_in_view {
+        if !self.controller_mode
+            && !self.briefing
+            && !self.mission_select
+            && self.mission_time > 1.5
+            && pointer_in_view
+        {
             if mouse.x < EDGE {
                 pan.x -= 1.0;
             } else if mouse.x > viewport.x - EDGE {
@@ -3864,6 +5139,7 @@ impl LastLight {
                 pan.y -= 1.0;
             }
         }
+        let manual_pan = pan.length_squared() > 0.0001;
         if pan.length_squared() > 1.0 {
             pan = pan.normalize();
         }
@@ -3876,6 +5152,86 @@ impl LastLight {
         ctx.renderer
             .camera
             .clamp_to_bounds(Aabb::from_center_size(Vec2::ZERO, MAP_SIZE));
+        self.update_combat_camera(ctx, dt, manual_pan);
+    }
+
+    /// Return a nearby player/enemy pair that deserves a small framing assist.
+    /// Only selected Lantern units can request it, and the target must already
+    /// be visible and close to the expanded viewport. A long-range order thus
+    /// remains a deliberate camera decision instead of hijacking the player.
+    fn combat_camera_focus(&self, renderer: &Renderer) -> Option<Vec2> {
+        let viewport = renderer.camera.viewport();
+        for attacker_id in self.simulation.world.selection().ids() {
+            let Some(attacker) = self.simulation.world.unit(*attacker_id) else {
+                continue;
+            };
+            if attacker.faction != PLAYER || !attacker.alive() {
+                continue;
+            }
+            let Some(target_id) = self.attack_target_for_unit(*attacker_id) else {
+                continue;
+            };
+            let Some(target) = self.simulation.world.unit(target_id) else {
+                continue;
+            };
+            if target.faction != CHOIR
+                || !target.alive()
+                || self.fog.state_at(target.position) != FogState::Visible
+            {
+                continue;
+            }
+            let attacker_screen = renderer.camera.world_to_screen(attacker.position);
+            let target_screen = renderer.camera.world_to_screen(target.position);
+            let expanded = |screen: Vec2| {
+                screen.x >= -viewport.x * (COMBAT_CAMERA_EXPANDED_VIEW_SCALE - 1.0)
+                    && screen.x <= viewport.x * COMBAT_CAMERA_EXPANDED_VIEW_SCALE
+                    && screen.y >= -viewport.y * (COMBAT_CAMERA_EXPANDED_VIEW_SCALE - 1.0)
+                    && screen.y <= viewport.y * COMBAT_CAMERA_EXPANDED_VIEW_SCALE
+            };
+            let needs_framing =
+                edge_indicator_anchor(target_screen, viewport, COMBAT_CAMERA_SAFE_PADDING)
+                    .is_some()
+                    || edge_indicator_anchor(attacker_screen, viewport, COMBAT_CAMERA_SAFE_PADDING)
+                        .is_some();
+            if needs_framing && (expanded(attacker_screen) || expanded(target_screen)) {
+                return Some((attacker.position + target.position) * 0.5);
+            }
+        }
+        None
+    }
+
+    /// Nudge the camera toward an active selected engagement with a capped,
+    /// critically-damped-feeling step. Manual pan and zoom always win.
+    fn update_combat_camera(&mut self, ctx: &mut FrameCtx<'_>, dt: f32, manual_pan: bool) {
+        if manual_pan
+            || !dt.is_finite()
+            || dt <= 0.0
+            || self.controller_command_mode
+            || self.mission_select
+            || self.briefing
+            || self.paused
+            || self.victory
+            || self.defeat
+            || ctx.input.scroll.abs() > f32::EPSILON
+        {
+            return;
+        }
+        let Some(focus) = self.combat_camera_focus(ctx.renderer) else {
+            return;
+        };
+        let camera = &mut ctx.renderer.camera;
+        let delta = focus - camera.position;
+        if delta.length_squared() <= 1.0 {
+            return;
+        }
+        let response = 1.0 - (-COMBAT_CAMERA_FOLLOW_SPEED * dt).exp();
+        let mut step = delta * response;
+        let max_step = COMBAT_CAMERA_MAX_SPEED * dt / camera.zoom.max(f32::EPSILON);
+        if step.length_squared() > max_step * max_step {
+            step = step.normalize() * max_step;
+        }
+        camera.position += step;
+        camera.clamp_to_bounds(Aabb::from_center_size(Vec2::ZERO, MAP_SIZE));
     }
 
     /// The deployment handoff should put the authored roster above the HUD.
@@ -3941,6 +5297,27 @@ impl LastLight {
             &params,
             Some(&self.simulation.nav),
         );
+    }
+
+    /// Drive the mission bed from the same fixed-step clock as raids and
+    /// combat. The sparse notes leave room for radio and weapon transients;
+    /// raid phases add tension without changing the authored rhythm.
+    fn update_ambient_music(&mut self, ctx: &mut FrameCtx<'_>, dt: f32) {
+        let raid_phase = self.simulation.raid_state().phase;
+        let (pitch, volume) = match raid_phase {
+            RaidPhase::Warning => (1.05946, 1.18),
+            RaidPhase::Banking => (1.0, 1.0),
+            RaidPhase::Cooldown => (0.94387, 0.92),
+            RaidPhase::Teaching => (0.8909, 0.86),
+        };
+        for note in self.ambient_music.tick(dt) {
+            ctx.audio.beep_on(
+                AudioChannel::Music,
+                note.frequency * pitch,
+                note.duration,
+                note.volume * volume,
+            );
+        }
     }
 
     /// Idle Lantern combat units acquire nearby visible threats on their own.
@@ -4489,9 +5866,12 @@ impl LastLight {
             UnitAnimationState::Repair => {
                 Some(AnimationClip::looping("repair", [0, 1, 2, 3, 4, 5], 12.0))
             }
-            UnitAnimationState::Build => Some(AnimationClip::looping(
+            UnitAnimationState::Build => Some(AnimationClip::once(
                 "build",
-                [0, 1, 2, 3, 4, 5, 6, 7],
+                // Hold the powered construction state for one extra tick so
+                // the completed structure reads before the Engineer returns
+                // to its tool-ready pose.
+                [0, 1, 2, 3, 4, 5, 6, 6, 7],
                 9.0,
             )),
             UnitAnimationState::Mark => Some(AnimationClip::looping("mark", [0, 1, 2, 3], 8.0)),
@@ -4574,12 +5954,16 @@ impl LastLight {
             return false;
         };
         self.simulation.world.unit(target).is_some_and(|target| {
-            target.alive() && unit.position.distance(target.position) <= range
+            let readable_reach = range + target.radius.max(0.0) * 0.5;
+            target.alive() && unit.position.distance(target.position) <= readable_reach
         })
     }
 
     fn attack_target_for_unit(&self, id: UnitId) -> Option<UnitId> {
         let unit = self.simulation.world.unit(id)?;
+        if let Some(target) = self.simulation.combat_target(id) {
+            return Some(target);
+        }
         match unit.order {
             UnitOrder::Attack(target) => Some(target),
             UnitOrder::AttackMove(_) => self
@@ -4660,9 +6044,13 @@ impl LastLight {
                     .apply_environmental_damage(target, 8.0 * dt.max(0.0));
             }
         }
-        self.attack_flash.retain(|_, flash| {
+        self.attack_flash.retain(|_, (_, flash)| {
             *flash -= dt;
             *flash > 0.0
+        });
+        self.weapon_windups.retain(|_, (_, remaining, _)| {
+            *remaining -= dt;
+            *remaining > 0.0
         });
         self.damage_flash.retain(|_, flash| {
             *flash -= dt;
@@ -4680,9 +6068,15 @@ impl LastLight {
             *flash -= dt;
             *flash > 0.0
         });
+        self.detonation_fx.retain_mut(|fx| {
+            fx.remaining -= dt.max(0.0);
+            fx.player.tick(dt);
+            fx.remaining > 0.0
+        });
         for age in self.down_units.values_mut() {
             *age += dt.max(0.0);
         }
+        self.combat_audio_cooldown = (self.combat_audio_cooldown - dt.max(0.0)).max(0.0);
     }
 
     fn update_fog(&mut self) {
@@ -4872,6 +6266,101 @@ impl LastLight {
                     .with_z(z),
             );
         }
+    }
+
+    /// Fits one-line copy to a measured `BitmapText` lane before rendering.
+    /// `BitmapText` advances every character by six cells and has no clipping
+    /// primitive, so truncating here prevents authored HUD copy from bleeding
+    /// into an adjacent card or the playfield.
+    #[inline(never)]
+    fn fit_bitmap_text(text: &str, pixel: f32, max_width: f32) -> String {
+        let advance = pixel.max(f32::EPSILON) * 6.0;
+        let max_chars = if max_width > 0.0 {
+            (max_width / advance).floor() as usize
+        } else {
+            0
+        };
+        if text.chars().count() <= max_chars {
+            return text.to_owned();
+        }
+        if max_chars <= 2 {
+            return ".".repeat(max_chars);
+        }
+
+        let mut prefix: String = text.chars().take(max_chars - 2).collect();
+        if let Some(space) = prefix.rfind(' ') {
+            // Keep a useful amount of the label when a short line contains
+            // several separators, but avoid cutting a normal word in half.
+            if space > 0 && space >= prefix.len().saturating_sub(10) {
+                prefix.truncate(space);
+            }
+        }
+        let mut fitted = prefix.trim_end().to_owned();
+        fitted.push_str("..");
+        fitted
+    }
+
+    /// Gives screen-pinned HUD surfaces one shared visual grammar without
+    /// baking the frame into an atlas texture. The rails are sized in camera
+    /// pixels, so a tactical panel keeps the same apparent edge weight when
+    /// the player zooms or the browser runs at a different device scale.
+    fn draw_hud_panel_frame(
+        &self,
+        renderer: &mut Renderer,
+        bounds: Aabb,
+        accent: Color,
+        z: f32,
+        strong: bool,
+    ) {
+        let size = bounds.size();
+        let pixel = renderer.camera.zoom.max(f32::EPSILON).recip();
+        let thickness = (if strong { 3.0 } else { 2.0 }) * pixel;
+        let inset = 4.0 * pixel;
+        let edge_alpha = if strong { 0.9 } else { 0.52 };
+        let edge = Color::rgba(accent.r, accent.g, accent.b, edge_alpha);
+        let horizontal_size = Vec2::new((size.x - inset * 2.0).max(thickness), thickness);
+        let vertical_size = Vec2::new(thickness, (size.y - inset * 2.0).max(thickness));
+        for (center, dimensions) in [
+            (
+                Vec2::new(bounds.center().x, bounds.max.y - inset),
+                horizontal_size,
+            ),
+            (
+                Vec2::new(bounds.center().x, bounds.min.y + inset),
+                horizontal_size,
+            ),
+            (
+                Vec2::new(bounds.min.x + inset, bounds.center().y),
+                vertical_size,
+            ),
+            (
+                Vec2::new(bounds.max.x - inset, bounds.center().y),
+                vertical_size,
+            ),
+        ] {
+            renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(center, dimensions).with_color(edge).with_z(z),
+            );
+        }
+
+        // The left rail is the semantic accent: it stays quiet on persistent
+        // panels and becomes a clear focus marker on actionable rows.
+        let stripe_width = (if strong { 4.0 } else { 2.0 }) * pixel;
+        renderer.draw_sprite(
+            self.tex_ui,
+            Sprite::new(
+                Vec2::new(bounds.min.x + inset + stripe_width, bounds.center().y),
+                Vec2::new(stripe_width, (size.y - inset * 4.0).max(stripe_width)),
+            )
+            .with_color(Color::rgba(
+                accent.r,
+                accent.g,
+                accent.b,
+                edge_alpha.min(0.96),
+            ))
+            .with_z(z + 0.01),
+        );
     }
 
     /// Keeps radio copy inside its compact portrait panel. BitmapText has a
@@ -5226,9 +6715,14 @@ impl LastLight {
         self.draw_text_shadowed(
             ctx.renderer,
             &format!(
-                "FOCUS  {:02} / {:02}  //  ARROWS OR POINTER",
+                "FOCUS  {:02} / {:02}  //  {}",
                 focus_slot,
-                unlocked_count.max(1)
+                unlocked_count.max(1),
+                if self.controller_mode {
+                    "D-PAD / STICK"
+                } else {
+                    "ARROWS OR POINTER"
+                }
             ),
             center + Vec2::new(90.0, 210.0) * menu_scale,
             1.55 * menu_scale,
@@ -5239,7 +6733,7 @@ impl LastLight {
             let unlocked = self.save_data.campaign.unlocked_mission >= mission.required_tier;
             let rect = Self::mission_entry_rect(center, index, menu_scale);
             let focused = unlocked && index == self.mission_cursor;
-            let hovered = unlocked && rect.contains_point(mouse_world);
+            let hovered = unlocked && !self.controller_mode && rect.contains_point(mouse_world);
             let active = focused || hovered;
             ctx.renderer.draw_sprite(
                 self.tex_ui,
@@ -5268,6 +6762,19 @@ impl LastLight {
                     )
                     .with_color(Color::rgb(1.2, 0.78, 0.28))
                     .with_z(10.1),
+                );
+            }
+            if active {
+                self.draw_hud_panel_frame(
+                    ctx.renderer,
+                    rect,
+                    if focused {
+                        Color::rgb(1.2, 0.78, 0.28)
+                    } else {
+                        Color::rgb(0.25, 1.2, 1.08)
+                    },
+                    10.12,
+                    true,
                 );
             }
             let color = if !unlocked {
@@ -5306,6 +6813,13 @@ impl LastLight {
                     .with_color(Color::rgba(0.035, 0.11, 0.15, 0.9))
                     .with_z(10.0),
             );
+            self.draw_hud_panel_frame(
+                ctx.renderer,
+                preview,
+                Color::rgb(0.25, 1.2, 1.08),
+                10.12,
+                false,
+            );
             let preview_line = format!(
                 "MISSION {:02}  //  TIER {}  //  +{} LUMEN",
                 self.mission_cursor + 1,
@@ -5341,9 +6855,20 @@ impl LastLight {
                 .with_color(Color::rgba(0.07, 0.14, 0.18, 0.9))
                 .with_z(10.0),
         );
+        self.draw_hud_panel_frame(
+            ctx.renderer,
+            footer,
+            Color::rgb(1.2, 0.78, 0.28),
+            10.12,
+            false,
+        );
         self.draw_text_shadowed(
             ctx.renderer,
-            "DEPLOY SELECTED  //  CLICK A ROW  OR  SPACE / ENTER",
+            if self.controller_mode {
+                "A  DEPLOY SELECTED  //  D-PAD / STICK TO CHOOSE"
+            } else {
+                "DEPLOY SELECTED  //  CLICK A ROW  OR  SPACE / ENTER"
+            },
             footer.min + Vec2::new(18.0, 11.0) * menu_scale,
             2.05 * menu_scale,
             Color::rgb(1.25, 0.78, 0.28),
@@ -5351,9 +6876,9 @@ impl LastLight {
         );
     }
 
-    /// Draws the mission's static obstacles (corridor walls in Mission 3)
-    /// as solid panels with a bright edge outline — procedural, matching
-    /// the metal/cyan palette already used for structures, no new assets.
+    /// Draws the mission's static obstacles as segmented reactor bulkheads.
+    /// Layered bevels, panel seams, and sparse service lights make long walls
+    /// read as authored machinery instead of placeholder rectangles.
     /// These are the same `Aabb`s that block `self.simulation.nav`, so what's drawn
     /// here always matches what the Choir AI (and now the player, via
     /// `route_around_obstacles`) actually treats as solid.
@@ -5361,13 +6886,70 @@ impl LastLight {
         for obstacle in &self.mission.obstacles {
             let center = obstacle.center();
             let size = obstacle.size();
+            let horizontal = size.x >= size.y;
+            let long_axis = if horizontal { Vec2::X } else { Vec2::Y };
+            let cross_axis = if horizontal { Vec2::Y } else { Vec2::X };
+            let length = if horizontal { size.x } else { size.y };
+            let thickness = if horizontal { size.y } else { size.x };
+            renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(center, size + Vec2::splat(14.0))
+                    .with_color(Color::rgba(0.005, 0.01, 0.018, 0.8))
+                    .with_z(-8.0),
+            );
             renderer.draw_sprite(
                 self.tex_ui,
                 Sprite::new(center, size)
-                    .with_color(Color::rgba(0.09, 0.12, 0.16, 0.96))
-                    .with_z(-8.0),
+                    .with_color(Color::rgba(0.055, 0.08, 0.11, 0.96))
+                    .with_z(-7.98),
             );
-            let edge_color = Color::rgba(0.25, 0.55, 0.65, 0.85);
+            renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(center, (size - Vec2::splat(12.0)).max(Vec2::splat(2.0)))
+                    .with_color(Color::rgba(0.11, 0.15, 0.18, 0.78))
+                    .with_z(-7.96),
+            );
+
+            let segment_count = (length / 180.0).ceil().max(1.0) as usize;
+            let segment_length = length / segment_count as f32;
+            for index in 1..segment_count {
+                let offset = -length * 0.5 + segment_length * index as f32;
+                let divider_size = if horizontal {
+                    Vec2::new(2.0, (thickness - 12.0).max(2.0))
+                } else {
+                    Vec2::new((thickness - 12.0).max(2.0), 2.0)
+                };
+                renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(center + long_axis * offset, divider_size)
+                        .with_color(Color::rgba(0.01, 0.025, 0.04, 0.86))
+                        .with_z(-7.92),
+                );
+            }
+            for index in 0..segment_count {
+                let offset = -length * 0.5 + segment_length * (index as f32 + 0.5);
+                let light_size = if horizontal {
+                    Vec2::new(18.0, 3.0)
+                } else {
+                    Vec2::new(3.0, 18.0)
+                };
+                let color = if index % 3 == 1 {
+                    Color::rgba(1.25, 0.58, 0.16, 0.72)
+                } else {
+                    Color::rgba(0.16, 0.92, 1.08, 0.62)
+                };
+                renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(
+                        center + long_axis * offset + cross_axis * (thickness * 0.5 - 8.0),
+                        light_size,
+                    )
+                    .with_color(color)
+                    .with_z(-7.88),
+                );
+            }
+
+            let edge_color = Color::rgba(0.22, 0.72, 0.78, 0.78);
             let half = size * 0.5;
             for (offset, dimensions) in [
                 (Vec2::new(0.0, half.y), Vec2::new(size.x, 3.0)),
@@ -5580,13 +7162,13 @@ impl LastLight {
         }
     }
 
-    fn draw_mission_landmarks(&self, renderer: &mut Renderer, time: f32) {
+    fn draw_mission_landmarks(&self, renderer: &mut Renderer, time: f32, motion: f32) {
         let objective = self.next_objective().map(|(position, _)| position);
         for landmark in &self.mission.landmarks {
             let (fill, stroke) = Self::mission_landmark_color(landmark.kind);
             let radius = Self::mission_landmark_radius(landmark.kind);
-            let pulse =
-                radius * (0.82 + (time * 2.3 + landmark.position.x * 0.003).sin().abs() * 0.18);
+            let pulse = radius
+                * (0.82 + (time * 2.3 + landmark.position.x * 0.003).sin().abs() * 0.18 * motion);
             let is_current =
                 objective.is_some_and(|target| target.distance(landmark.position) < radius * 1.5);
             let glow_alpha = if is_current { 0.4 } else { 0.24 };
@@ -5637,6 +7219,234 @@ impl LastLight {
         }
     }
 
+    fn draw_controller_cursor(&self, ctx: &mut FrameCtx<'_>) {
+        if !self.controller_mode
+            || self.controller_command_mode
+            || self.mission_select
+            || self.briefing
+            || self.paused
+            || self.victory
+            || self.defeat
+        {
+            return;
+        }
+        let position = self.controller_cursor_world(ctx.renderer);
+        let color = if self.placing_beacon {
+            if self.placement_rules().validate(position, 54.0).is_ok()
+                && self.simulation.resources.amount() >= self.beacon_cost()
+            {
+                Color::rgb(0.28, 1.65, 0.92)
+            } else {
+                Color::rgb(1.55, 0.24, 0.38)
+            }
+        } else if self.closest_enemy_at(position).is_some() {
+            Color::rgb(1.55, 0.22, 0.64)
+        } else if self.friendly_unit_id_at(position).is_some()
+            || self.structure_at(position).is_some()
+            || self.salvage_node_at(position).is_some()
+        {
+            Color::rgb(0.25, 1.7, 1.5)
+        } else if !self.simulation.world.selection().ids().is_empty() {
+            Color::rgb(1.45, 0.82, 0.25)
+        } else {
+            Color::rgb(0.72, 0.94, 1.0)
+        };
+        let pixel = ctx.renderer.camera.zoom.max(f32::EPSILON).recip();
+        let outer = 18.0 * pixel;
+        let arm_length = 9.0 * pixel;
+        let thickness = 2.5 * pixel;
+        for (offset, size) in [
+            (Vec2::new(-outer, 0.0), Vec2::new(arm_length, thickness)),
+            (Vec2::new(outer, 0.0), Vec2::new(arm_length, thickness)),
+            (Vec2::new(0.0, -outer), Vec2::new(thickness, arm_length)),
+            (Vec2::new(0.0, outer), Vec2::new(thickness, arm_length)),
+        ] {
+            ctx.renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(position + offset, size)
+                    .with_color(color)
+                    .with_z(9.35),
+            );
+        }
+        ctx.renderer.draw_sprite(
+            self.tex_ui,
+            Sprite::new(position, Vec2::splat(4.0 * pixel))
+                .with_color(color)
+                .with_z(9.4),
+        );
+    }
+
+    /// Draw a screen-pinned chevron for a visible contact that has moved
+    /// beyond the comfortable playfield band. The icon is built from the
+    /// existing white UI texture, so it stays crisp at every DPR without a
+    /// new asset or a HUD panel competing with the battlefield.
+    fn draw_edge_threat_chevron(
+        &self,
+        renderer: &mut Renderer,
+        screen: Vec2,
+        direction: Vec2,
+        color: Color,
+        pulse: f32,
+        urgent: bool,
+    ) {
+        let pixel = renderer.camera.zoom.max(f32::EPSILON).recip();
+        let center = renderer.camera.screen_to_world(screen);
+        renderer.draw_sprite(
+            self.tex_glow,
+            Sprite::new(
+                center,
+                Vec2::splat((34.0 + if urgent { 10.0 } else { 0.0 }) * pixel),
+            )
+            .with_color(Color::rgba(
+                color.r,
+                color.g,
+                color.b,
+                (0.18 + if urgent { 0.1 } else { 0.0 }) * pulse,
+            ))
+            .with_z(6.65),
+        );
+
+        let direction = direction.normalize_or_zero();
+        let perpendicular = Vec2::new(-direction.y, direction.x);
+        let tip = screen + direction * 10.0;
+        for side in [-1.0, 1.0] {
+            let endpoint = tip - direction * 17.0 + perpendicular * side * 7.0;
+            let segment = endpoint - tip;
+            let segment_center = (tip + endpoint) * 0.5;
+            renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(
+                    renderer.camera.screen_to_world(segment_center),
+                    Vec2::new(segment.length() * pixel, 3.5 * pixel),
+                )
+                .with_color(Color::rgba(
+                    color.r,
+                    color.g,
+                    color.b,
+                    (0.72 + pulse * 0.24).min(1.0),
+                ))
+                .with_rotation(segment.y.atan2(segment.x))
+                .with_z(6.7),
+            );
+        }
+        renderer.draw_sprite(
+            self.tex_ui,
+            Sprite::new(center, Vec2::splat(5.0 * pixel))
+                .with_color(Color::rgba(color.r, color.g, color.b, 0.95))
+                .with_z(6.72),
+        );
+    }
+
+    /// Surface only contacts the fog system has already revealed. The minimap
+    /// remains the broad tactical picture; these arrows are the high-salience
+    /// answer when a real enemy is just outside the current camera frame.
+    fn draw_detonation_fx(&self, ctx: &mut FrameCtx<'_>) {
+        let motion = motion_intensity(1.0, ctx.profile.accessibility.reduced_motion);
+        for fx in &self.detonation_fx {
+            let progress = (1.0 - normalized_fraction(fx.remaining, BELL_MINE_DETONATION_DURATION))
+                .clamp(0.0, 1.0);
+            let fade = (1.0 - progress * 0.42).clamp(0.42, 1.0);
+            let early = (1.0 - progress * 2.4).clamp(0.0, 1.0);
+            let ring_radius = 48.0 + progress * 154.0 * motion;
+            let ring_alpha = (0.82 * (1.0 - progress).powf(0.55)).max(0.12);
+
+            ctx.renderer.draw_sprite(
+                self.tex_glow,
+                Sprite::new(fx.position, Vec2::splat(250.0 + progress * 190.0 * motion))
+                    .with_color(Color::rgba(0.72, 0.16, 1.42, 0.18 * fade))
+                    .with_z(2.58),
+            );
+
+            let mut sprite = self.bell_mine_detonation_atlas.sprite(
+                fx.position,
+                Vec2::splat(360.0 + progress * 70.0 * motion),
+                fx.player.frame(),
+            );
+            sprite.color = Color::rgba(1.0, 1.0, 1.0, fade);
+            sprite.z = 2.7;
+            ctx.renderer
+                .draw_sprite(self.tex_bell_mine_detonation, sprite);
+
+            for index in 0..8 {
+                let angle = index as f32 * std::f32::consts::FRAC_PI_4;
+                let direction = Vec2::new(angle.cos(), angle.sin());
+                ctx.renderer.draw_sprite(
+                    self.tex_ui,
+                    Sprite::new(
+                        fx.position + direction * ring_radius,
+                        Vec2::new(28.0 + progress * 34.0 * motion, 3.5),
+                    )
+                    .with_color(Color::rgba(0.62, 0.16, 1.32, ring_alpha))
+                    .with_rotation(angle)
+                    .with_z(2.72),
+                );
+            }
+
+            if early > 0.0 {
+                ctx.renderer.draw_light(PointLight::new(
+                    fx.position,
+                    Color::rgb(0.55, 0.14, 1.0),
+                    170.0 + progress * 180.0 * motion,
+                    0.26 * early,
+                ));
+            }
+        }
+    }
+
+    fn draw_offscreen_threat_indicators(&self, ctx: &mut FrameCtx<'_>, time: f32) {
+        if self.briefing || self.paused || self.victory || self.defeat {
+            return;
+        }
+        let viewport = ctx.renderer.camera.viewport();
+        let motion = motion_intensity(1.0, ctx.profile.accessibility.reduced_motion);
+        let mut drawn = 0;
+        for unit in self.simulation.world.units().iter().filter(|unit| {
+            unit.faction == CHOIR
+                && unit.alive()
+                && self.fog.state_at(unit.position) == FogState::Visible
+        }) {
+            if drawn >= THREAT_INDICATOR_MAX {
+                break;
+            }
+            let screen = ctx.renderer.camera.world_to_screen(unit.position);
+            let Some((edge, direction)) =
+                edge_indicator_anchor(screen, viewport, THREAT_INDICATOR_PADDING)
+            else {
+                continue;
+            };
+            let pulse = 0.78 + (time * 5.0).sin().abs() * 0.22 * motion;
+            self.draw_edge_threat_chevron(
+                ctx.renderer,
+                edge,
+                direction,
+                Color::rgb(1.65, 0.12, 0.48),
+                pulse,
+                false,
+            );
+            drawn += 1;
+        }
+
+        if drawn < THREAT_INDICATOR_MAX {
+            let raid = self.simulation.raid_state();
+            if raid.phase == RaidPhase::Warning {
+                let screen = ctx.renderer.camera.world_to_screen(raid.spawn_position);
+                if let Some((edge, direction)) =
+                    edge_indicator_anchor(screen, viewport, THREAT_INDICATOR_PADDING)
+                {
+                    let pulse = 0.78 + (time * 8.0).sin().abs() * 0.22 * motion;
+                    self.draw_edge_threat_chevron(
+                        ctx.renderer,
+                        edge,
+                        direction,
+                        Color::rgb(1.5, 0.72, 0.18),
+                        pulse,
+                        true,
+                    );
+                }
+            }
+        }
+    }
+
     fn draw_selection_brackets(&self, renderer: &mut Renderer, position: Vec2, size: f32) {
         let color = Color::rgba(0.22, 1.8, 1.45, 0.95);
         for (offset, dimensions) in [
@@ -5660,6 +7470,143 @@ impl Game for LastLight {
         "Aurora: Last Light — Reclaim the Reactor"
     }
 
+    fn asset_manifest(&self) -> Option<AssetManifest> {
+        Some(assets::manifest())
+    }
+
+    fn agent_state(&self) -> Option<serde_json::Value> {
+        let screen = if self.mission_select {
+            "mission_select"
+        } else if self.briefing {
+            "briefing"
+        } else if self.victory {
+            "victory"
+        } else if self.defeat {
+            "defeat"
+        } else if self.settings_open {
+            "settings"
+        } else if self.paused {
+            "paused"
+        } else {
+            "tactical"
+        };
+        let engagement = self
+            .simulation
+            .world
+            .selection()
+            .ids()
+            .first()
+            .and_then(|attacker_id| {
+                let attacker = self.simulation.world.unit(*attacker_id)?;
+                let target_id = self.attack_target_for_unit(*attacker_id)?;
+                let target = self.simulation.world.unit(target_id)?;
+                let kind = self.simulation.kinds.get(attacker_id).copied()?;
+                Some(serde_json::json!({
+                    "attacker": attacker_id.0,
+                    "target": target_id.0,
+                    "order": Self::order_label(attacker.order),
+                    "distance": attacker.position.distance(target.position),
+                    "reach": kind.combat().range + target.radius.max(0.0) * 0.5,
+                    "speed": attacker.speed,
+                    "speed_scale": attacker.speed_scale,
+                    "velocity": [attacker.velocity.x, attacker.velocity.y],
+                }))
+            });
+        Some(serde_json::json!({
+            "screen": screen,
+            "mission": self.mission.id,
+            "mission_time": self.mission_time,
+            "mission_cursor": self.mission_cursor,
+            "selected": self.simulation.world.selection().ids().len(),
+            "controller_mode": self.controller_mode,
+            "controller_command_mode": self.controller_command_mode,
+            "controller_command_page": self.command_card_visible_page(),
+            "settings_open": self.settings_open,
+            "settings_cursor": self.settings_cursor,
+            "settings": {
+                "cursor_sensitivity": self.profile_snapshot.controller.cursor_sensitivity,
+                "dead_zone": self.profile_snapshot.controller.dead_zone,
+                "invert_camera_y": self.profile_snapshot.controller.invert_right_y,
+                "invert_menu_y": self.profile_snapshot.controller.invert_left_y,
+                "vibration": self.profile_snapshot.controller.vibration,
+                "reduced_motion": self.profile_snapshot.accessibility.reduced_motion,
+            },
+            "placing_beacon": self.placing_beacon,
+            "field_beacons": self
+                .field_beacons
+                .iter()
+                .map(|beacon| [beacon.position.x, beacon.position.y])
+                .collect::<Vec<_>>(),
+            "controller_cursor": [
+                self.controller_cursor_screen.x,
+                self.controller_cursor_screen.y,
+            ],
+            "order_active": self.order_marker.is_some(),
+            "combat": {
+                "pulses": self.combat_pulse_count,
+                "active_shots": self.attack_flash.len(),
+                "active_windups": self.weapon_windups.len(),
+                "active_impacts": self.damage_flash.len(),
+                "wrecks": self.down_units.len(),
+                "detonations": self.detonation_fx.len(),
+                "detonation_count": self.detonation_count,
+                "engagement": engagement,
+            },
+        }))
+    }
+
+    fn on_agent_command(
+        &mut self,
+        action: &str,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        match action {
+            "engage_kind" => {
+                let attacker_kind = args
+                    .get("attacker")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(agent_unit_kind)?;
+                let target_kind = args
+                    .get("target")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(agent_unit_kind)?;
+                let attacker = self
+                    .simulation
+                    .world
+                    .units()
+                    .iter()
+                    .filter(|unit| {
+                        unit.faction == PLAYER
+                            && unit.alive()
+                            && self.simulation.kinds.get(&unit.id) == Some(&attacker_kind)
+                    })
+                    .map(|unit| unit.id)
+                    .min_by_key(|id| id.0)?;
+                self.simulation.world.select_ids(&[attacker], PLAYER, false);
+                let accepted = self.simulation.issue_attack_kind(target_kind);
+                let target =
+                    self.simulation
+                        .world
+                        .unit(attacker)
+                        .and_then(|unit| match unit.order {
+                            UnitOrder::Attack(target) => Some(target.0),
+                            _ => None,
+                        });
+                Some(serde_json::json!({
+                    "accepted": accepted,
+                    "attacker": attacker.0,
+                    "target": target,
+                }))
+            }
+            _ => None,
+        }
+    }
+
+    fn on_profile_loaded(&mut self, profile: &mut EngineProfile, _is_new: bool) {
+        *profile = profile.normalized();
+        self.profile_snapshot = *profile;
+    }
+
     fn on_start(&mut self, renderer: &mut Renderer) {
         debug_assert_eq!(assets::manifest().len(), TextureAsset::ALL.len());
         let (
@@ -5675,6 +7622,7 @@ impl Game for LastLight {
             needle_attack,
             canticle_command,
             bell_mine_arm,
+            bell_mine_detonation,
             hit_reactions,
             down_reactions,
             structures,
@@ -5703,6 +7651,7 @@ impl Game for LastLight {
                 assets::load_texture(&gpu, TextureAsset::NeedleAttack),
                 assets::load_texture(&gpu, TextureAsset::CanticleCommand),
                 assets::load_texture(&gpu, TextureAsset::BellMineArm),
+                assets::load_texture(&gpu, TextureAsset::BellMineDetonation),
                 assets::load_texture(&gpu, TextureAsset::HitReactions),
                 assets::load_texture(&gpu, TextureAsset::DownReactions),
                 assets::load_texture(&gpu, TextureAsset::Structures),
@@ -5756,6 +7705,7 @@ impl Game for LastLight {
         self.tex_needle_attack = renderer.add_texture(needle_attack);
         self.tex_canticle_command = renderer.add_texture(canticle_command);
         self.tex_bell_mine_arm = renderer.add_texture(bell_mine_arm);
+        self.tex_bell_mine_detonation = renderer.add_texture(bell_mine_detonation);
         self.tex_hit_reactions = renderer.add_texture(hit_reactions);
         self.tex_down_reactions = renderer.add_texture(down_reactions);
         self.tex_structures = renderer.add_texture(structures);
@@ -5784,6 +7734,8 @@ impl Game for LastLight {
         self.canticle_command_atlas =
             TextureAsset::CanticleCommand.runtime_atlas(self.tex_canticle_command);
         self.bell_mine_arm_atlas = TextureAsset::BellMineArm.runtime_atlas(self.tex_bell_mine_arm);
+        self.bell_mine_detonation_atlas =
+            TextureAsset::BellMineDetonation.runtime_atlas(self.tex_bell_mine_detonation);
         self.hit_reactions_atlas = TextureAsset::HitReactions.runtime_atlas(self.tex_hit_reactions);
         self.down_reactions_atlas =
             TextureAsset::DownReactions.runtime_atlas(self.tex_down_reactions);
@@ -5811,86 +7763,130 @@ impl Game for LastLight {
 
     fn on_fixed_update(&mut self, ctx: &mut FrameCtx<'_>) {
         let dt = ctx.time.fixed_dt;
+        self.update_controller_mode(ctx);
         self.update_camera(ctx, dt);
-        // Only the first fixed-step of this rendered frame should react to
-        // edge-triggered input (see field doc on `input_handled_this_frame`).
-        // Continuous simulation below still runs every fixed step so the
-        // catch-up loop can still catch up after a hitch.
-        let handle_input = edge_input_allowed(self.input_handled_this_frame);
-        self.input_handled_this_frame = true;
+        self.update_controller_cursor(ctx, dt);
 
         if self.mission_select {
-            if handle_input {
-                self.handle_mission_select(ctx);
-            }
+            self.handle_mission_select(ctx);
             return;
         }
         if self.briefing {
-            if handle_input {
-                let overlay_scale = Self::hud_scale(ctx.renderer);
-                let deploy_clicked = ctx.input.mouse_pressed(MouseButton::Left)
-                    && Self::briefing_deploy_rect(ctx.renderer.camera.position, overlay_scale)
-                        .contains_point(
-                            ctx.renderer
-                                .camera
-                                .screen_to_world(ctx.input.mouse_position),
-                        );
-                self.handle_briefing_upgrades(ctx);
-                if deploy_clicked
-                    || ctx.input.key_pressed(KeyCode::Space)
-                    || ctx.input.key_pressed(KeyCode::Enter)
-                {
-                    self.briefing = false;
-                    self.focus_player_roster(ctx);
-                    ctx.audio.start();
+            let overlay_scale = Self::hud_scale(ctx.renderer);
+            let deploy_clicked = ctx.input.mouse_pressed(MouseButton::Left)
+                && Self::briefing_deploy_rect(ctx.renderer.camera.position, overlay_scale)
+                    .contains_point(
+                        ctx.renderer
+                            .camera
+                            .screen_to_world(ctx.input.mouse_position),
+                    );
+            self.handle_briefing_upgrades(ctx);
+            if deploy_clicked
+                || ctx.input.key_pressed(KeyCode::Space)
+                || ctx.input.key_pressed(KeyCode::Enter)
+                || (self.controller_mode
+                    && (Self::controller_button_pressed(ctx, PadButton::North)
+                        || Self::controller_button_pressed(ctx, PadButton::Start)))
+            {
+                self.briefing = false;
+                self.focus_player_roster(ctx);
+                ctx.audio.start();
+                ctx.input.rumble_first(0.24, 0.42, 0.12);
+            }
+            return;
+        }
+        if ctx.input.key_pressed(KeyCode::Escape) {
+            if self.placing_beacon {
+                self.placing_beacon = false;
+                self.status = Some(("BEACON PLACEMENT CANCELLED".to_owned(), 2.0));
+            } else if self.settings_open {
+                self.close_settings();
+            } else {
+                self.toggle_paused();
+            }
+        }
+        if self.controller_mode
+            && !self.victory
+            && !self.defeat
+            && Self::controller_button_pressed(ctx, PadButton::Start)
+        {
+            if self.paused && self.settings_open {
+                self.close_settings();
+            } else if self.paused {
+                self.set_paused(false);
+                self.status = Some(("TACTICAL LINK RESUMED".to_owned(), 1.4));
+            } else {
+                self.set_paused(true);
+                self.exit_controller_command_mode();
+            }
+            ctx.input.rumble_first(0.08, 0.16, 0.06);
+        }
+        if ctx.input.mouse_pressed(MouseButton::Left)
+            && !self.placing_beacon
+            && Self::pause_icon_rect(ctx.renderer).contains_point(
+                ctx.renderer
+                    .camera
+                    .screen_to_world(ctx.input.mouse_position),
+            )
+        {
+            self.toggle_paused();
+        }
+        if self.victory || self.defeat {
+            if self.controller_mode && Self::controller_button_pressed(ctx, PadButton::South) {
+                self.handle_terminal_input(KeyCode::Enter);
+                ctx.input.rumble_first(0.18, 0.32, 0.09);
+                return;
+            }
+            if self.controller_mode && Self::controller_button_pressed(ctx, PadButton::East) {
+                self.handle_terminal_input(KeyCode::Escape);
+                ctx.input.rumble_first(0.08, 0.12, 0.05);
+                return;
+            }
+            for key in [
+                KeyCode::Space,
+                KeyCode::Enter,
+                KeyCode::NumpadEnter,
+                KeyCode::Escape,
+            ] {
+                if ctx.input.key_pressed(key) {
+                    self.handle_terminal_input(key);
+                    break;
                 }
             }
             return;
         }
-        if handle_input {
-            if ctx.input.key_pressed(KeyCode::Escape) {
-                if self.placing_beacon {
-                    self.placing_beacon = false;
-                    self.status = Some(("BEACON PLACEMENT CANCELLED".to_owned(), 2.0));
-                } else {
-                    self.paused = !self.paused;
-                }
-            }
-            if ctx.input.mouse_pressed(MouseButton::Left)
-                && !self.placing_beacon
-                && Self::pause_icon_rect(ctx.renderer).contains_point(
-                    ctx.renderer
-                        .camera
-                        .screen_to_world(ctx.input.mouse_position),
-                )
-            {
-                self.paused = !self.paused;
-            }
-        }
-        if self.victory || self.defeat {
-            if handle_input {
-                for key in [
-                    KeyCode::Space,
-                    KeyCode::Enter,
-                    KeyCode::NumpadEnter,
-                    KeyCode::Escape,
-                ] {
-                    if ctx.input.key_pressed(key) {
-                        self.handle_terminal_input(key);
-                        break;
-                    }
-                }
-            }
+        if !self.paused && !self.victory && !self.defeat && ctx.input.key_pressed(KeyCode::F2) {
+            self.open_settings();
             return;
         }
         if self.paused {
+            if self.settings_open {
+                self.handle_settings_input(ctx);
+                return;
+            }
+            if ctx.input.key_pressed(KeyCode::F2)
+                || (self.controller_mode && Self::controller_button_pressed(ctx, PadButton::North))
+                || (ctx.input.mouse_pressed(MouseButton::Left)
+                    && Self::pause_settings_button_rect(ctx.renderer).contains_point(
+                        ctx.renderer
+                            .camera
+                            .screen_to_world(ctx.input.mouse_position),
+                    ))
+            {
+                self.open_settings();
+                ctx.input.rumble_first(0.08, 0.18, 0.06);
+            } else if self.controller_mode && Self::controller_button_pressed(ctx, PadButton::East)
+            {
+                self.set_paused(false);
+                self.status = Some(("TACTICAL LINK RESUMED".to_owned(), 1.4));
+                ctx.input.rumble_first(0.06, 0.12, 0.05);
+            }
             return;
         }
 
-        if handle_input {
-            self.handle_command_keys(ctx);
-            self.handle_pointer(ctx);
-        }
+        self.handle_command_keys(ctx);
+        self.handle_controller_tactical(ctx);
+        self.handle_pointer(ctx);
         self.update_enemy_ai(dt);
         self.update_auto_targeting();
         let modifiers = self.simulation_modifiers();
@@ -5900,6 +7896,7 @@ impl Game for LastLight {
         );
         self.simulation.fixed_step_with_dt(dt);
         self.process_simulation_events(ctx);
+        self.update_ambient_music(ctx, dt);
         for unit in self.simulation.world.units() {
             let Some(kind) = self.simulation.kinds.get(&unit.id).copied() else {
                 continue;
@@ -5937,14 +7934,12 @@ impl Game for LastLight {
             }
         }
 
-        if handle_input {
-            if let Some(console) = self.mission.lumen_console {
-                if !self.save_data.campaign.has_decision(LUMEN_AWAKENED)
-                    && ctx.input.key_pressed(KeyCode::KeyK)
-                    && self.selected_engineer_near(console)
-                {
-                    self.awaken_lumen_console();
-                }
+        if let Some(console) = self.mission.lumen_console {
+            if !self.save_data.campaign.has_decision(LUMEN_AWAKENED)
+                && ctx.input.key_pressed(KeyCode::KeyK)
+                && self.selected_engineer_near(console)
+            {
+                self.awaken_lumen_console();
             }
         }
 
@@ -5955,18 +7950,13 @@ impl Game for LastLight {
     }
 
     fn on_update(&mut self, ctx: &mut FrameCtx<'_>) {
-        // on_update runs exactly once per rendered frame (unlike
-        // on_fixed_update, which can run several times after a hitch), so
-        // this is the correct place to end the suppression window opened by
-        // a menu transition earlier in this same frame.
-        self.input_handled_this_frame = false;
         self.normalize_selection_context();
         self.clamp_command_card_page_to_context();
         let t = ctx.time.elapsed;
+        let motion = motion_intensity(1.0, ctx.profile.accessibility.reduced_motion);
         // Comms are the highest-priority onboarding surface. While a person
         // is speaking, suppress the lower-priority controls legend so the
         // portrait and line read as one intentional transmission instead of
-        // stacking tutorial copy over the playfield.
         let controls_hint_visible = self.controls_hint_visible();
         if self.mission_select {
             self.draw_mission_select(ctx);
@@ -5984,10 +7974,8 @@ impl Game for LastLight {
             for x in 0..26 {
                 let center =
                     -MAP_SIZE * 0.5 + Vec2::new(x as f32 * 100.0 + 50.0, y as f32 * 100.0 + 50.0);
-                let alpha = match self.fog.state_at(center) {
-                    FogState::Visible => continue,
-                    FogState::Explored => 0.42,
-                    FogState::Hidden => 0.88,
+                let Some(alpha) = fog_overlay_alpha(self.fog.state_at(center)) else {
+                    continue;
                 };
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
@@ -5999,7 +7987,7 @@ impl Game for LastLight {
         }
 
         if let Some(reactor_position) = self.reactor_position {
-            let reactor_pulse = 0.55 + 0.12 * (t * 2.1).sin();
+            let reactor_pulse = 0.55 + 0.12 * (t * 2.1).sin() * motion;
             let mut reactor = self
                 .structure_atlas
                 .sprite(reactor_position, Vec2::splat(330.0), 2);
@@ -6083,7 +8071,7 @@ impl Game for LastLight {
                 }
                 continue;
             }
-            let pulse = 0.82 + (t * 3.2 + node.position.x * 0.01).sin() * 0.12;
+            let pulse = 0.82 + (t * 3.2 + node.position.x * 0.01).sin() * 0.12 * motion;
             let node_color = match node.kind {
                 ResourceKind::Salvage => Color::rgba(0.08, 1.4, 1.35, 0.085 * pulse),
                 ResourceKind::Flux => Color::rgba(0.72, 0.2, 1.55, 0.11 * pulse),
@@ -6228,7 +8216,7 @@ impl Game for LastLight {
             ));
         }
 
-        self.draw_mission_landmarks(ctx.renderer, t);
+        self.draw_mission_landmarks(ctx.renderer, t, motion);
 
         if let Some((position, remaining)) = self.simulation.scan_pulse {
             let pulse = (5.0 - remaining).clamp(0.0, 5.0) / 5.0;
@@ -6243,10 +8231,17 @@ impl Game for LastLight {
         }
 
         if self.placing_beacon {
-            let position = ctx
-                .renderer
-                .camera
-                .screen_to_world(ctx.input.mouse_position);
+            // The preview must use the same pointer source as the commit
+            // path. Controller placement commits from the virtual cursor;
+            // sampling the physical mouse here makes the preview lie about
+            // where South will actually deploy the beacon.
+            let position = if self.controller_mode {
+                self.controller_cursor_world(ctx.renderer)
+            } else {
+                ctx.renderer
+                    .camera
+                    .screen_to_world(ctx.input.mouse_position)
+            };
             let rules = self.placement_rules();
             for source in &rules.power_sources {
                 ctx.renderer.draw_sprite(
@@ -6306,6 +8301,47 @@ impl Game for LastLight {
                 wreck.color = Color::rgba(0.78, 0.82, 0.88, 0.94);
                 wreck.z = 0.55;
                 ctx.renderer.draw_sprite(self.tex_down_reactions, wreck);
+                if let Some(age) = self.down_units.get(&unit.id) {
+                    let progress = normalized_fraction(*age, DESTRUCTION_FX_DURATION);
+                    if progress < 1.0 {
+                        let fade = 1.0 - progress;
+                        let (red, green, blue) = if unit.faction == PLAYER {
+                            (0.22, 1.45, 1.22)
+                        } else {
+                            (1.65, 0.12, 0.52)
+                        };
+                        ctx.renderer.draw_sprite(
+                            self.tex_glow,
+                            Sprite::new(
+                                unit.position,
+                                Vec2::splat(kind.scale() * (1.1 + progress * 1.5)),
+                            )
+                            .with_color(Color::rgba(red, green, blue, 0.34 * fade))
+                            .with_z(2.5),
+                        );
+                        ctx.renderer.draw_light(PointLight::new(
+                            unit.position,
+                            Color::rgb(red, green, blue),
+                            110.0 + progress * 120.0,
+                            0.24 * fade,
+                        ));
+                        for index in 0..8 {
+                            let angle = index as f32 * std::f32::consts::FRAC_PI_4;
+                            let direction = Vec2::new(angle.cos(), angle.sin());
+                            let distance = 24.0 + progress * 84.0;
+                            ctx.renderer.draw_sprite(
+                                self.tex_ui,
+                                Sprite::new(
+                                    unit.position + direction * distance,
+                                    Vec2::new(24.0 * fade.max(0.2), 3.0),
+                                )
+                                .with_color(Color::rgba(red, green, blue, 0.82 * fade))
+                                .with_rotation(angle)
+                                .with_z(2.6),
+                            );
+                        }
+                    }
+                }
                 continue;
             }
             let selected = self.simulation.world.selection().contains(unit.id);
@@ -6388,87 +8424,104 @@ impl Game for LastLight {
                 _ => {}
             }
 
-            if self.attack_flash.contains_key(&unit.id) {
-                if let Some(target_id) = self.attack_target_for_unit(unit.id) {
-                    if let Some(target) = self.simulation.world.unit(target_id) {
-                        let delta = target.position - unit.position;
-                        let beam_color = if unit.faction == PLAYER {
-                            Color::rgba(0.18, 1.7, 1.35, 0.92)
-                        } else {
-                            Color::rgba(1.8, 0.12, 0.62, 0.92)
-                        };
+            if let Some((target_id, remaining, duration)) = self.weapon_windups.get(&unit.id) {
+                if let Some(target) = self.simulation.world.unit(*target_id) {
+                    let charge = 1.0 - normalized_fraction(*remaining, *duration);
+                    let delta = target.position - unit.position;
+                    let angle = delta.y.atan2(delta.x);
+                    let (red, green, blue) = if unit.faction == PLAYER {
+                        (0.16, 1.45, 1.24)
+                    } else {
+                        (1.58, 0.08, 0.52)
+                    };
+                    ctx.renderer.draw_sprite(
+                        self.tex_ui,
+                        Sprite::new(
+                            unit.position + delta * 0.5,
+                            Vec2::new(delta.length(), 1.5 + charge * 1.5),
+                        )
+                        .with_color(Color::rgba(red, green, blue, 0.12 + charge * 0.26))
+                        .with_rotation(angle)
+                        .with_z(2.03),
+                    );
+                    ctx.renderer.draw_sprite(
+                        self.tex_glow,
+                        Sprite::new(
+                            unit.position,
+                            Vec2::splat(kind.scale() * (0.62 + charge * 0.46)),
+                        )
+                        .with_color(Color::rgba(red, green, blue, 0.12 + charge * 0.24))
+                        .with_z(2.04),
+                    );
+                    let reticle_radius = 34.0 + charge * 18.0;
+                    for index in 0..4 {
+                        let tick_angle = index as f32 * std::f32::consts::FRAC_PI_2;
+                        let direction = Vec2::new(tick_angle.cos(), tick_angle.sin());
                         ctx.renderer.draw_sprite(
                             self.tex_ui,
                             Sprite::new(
-                                unit.position + delta * 0.5,
-                                Vec2::new(delta.length(), 4.0),
+                                target.position + direction * reticle_radius,
+                                Vec2::new(13.0 + charge * 9.0, 2.5),
                             )
-                            .with_color(beam_color)
-                            .with_rotation(delta.y.atan2(delta.x))
-                            .with_z(2.2),
+                            .with_color(Color::rgba(red, green, blue, 0.48 + charge * 0.42))
+                            .with_rotation(tick_angle)
+                            .with_z(2.06),
                         );
-                        ctx.renderer.draw_sprite(
-                            self.tex_glow,
-                            Sprite::new(target.position, Vec2::splat(42.0))
-                                .with_color(beam_color)
-                                .with_z(2.15),
-                        );
-                        // Keep a deterministic source pulse for roles that
-                        // still use a procedural attack cue; authored strips
-                        // (including the Warden fire cycle) skip this layer.
-                        if self.unit_animation_atlas(kind, animation_state).is_none() {
-                            let direction = delta.normalize_or_zero();
-                            let source = unit.position + direction * (kind.scale() * 0.28);
-                            let pulse = (self.mission_time * 42.0 + unit.id.0 as f32 * 0.73)
-                                .sin()
-                                .abs();
-                            ctx.renderer.draw_sprite(
-                                self.tex_glow,
-                                Sprite::new(source, Vec2::splat(18.0 + pulse * 14.0))
-                                    .with_color(Color::rgba(
-                                        beam_color.r,
-                                        beam_color.g,
-                                        beam_color.b,
-                                        0.55 + pulse * 0.35,
-                                    ))
-                                    .with_z(2.21),
-                            );
-                        }
                     }
                 }
             }
 
-            // A visible enemy attack is telegraphed before the hit lands. The
-            // target comes from the same order the combat resolver consumes,
-            // so this cannot point at a stale or unrelated contact.
-            if unit.faction == CHOIR {
-                if let UnitOrder::Attack(target_id) = unit.order {
-                    if let Some(target) = self.simulation.world.unit(target_id) {
-                        let pulse = (t * 7.0 + unit.id.0 as f32 * 0.37).sin().abs();
-                        let (size, alpha) = match kind {
-                            UnitKind::BellMine => (132.0, 0.22),
-                            UnitKind::Canticle => (154.0, 0.16),
-                            UnitKind::Needle => (96.0, 0.11),
-                            _ => (88.0, 0.08),
-                        };
-                        ctx.renderer.draw_sprite(
-                            self.tex_glow,
-                            Sprite::new(target.position, Vec2::splat(size + pulse * 18.0))
-                                .with_color(Color::rgba(1.65, 0.04, 0.5, alpha + pulse * 0.08))
-                                .with_z(2.05),
-                        );
-                        let delta = target.position - unit.position;
-                        ctx.renderer.draw_sprite(
-                            self.tex_ui,
-                            Sprite::new(
-                                unit.position + delta * 0.5,
-                                Vec2::new(delta.length(), 2.0),
-                            )
-                            .with_color(Color::rgba(1.5, 0.08, 0.48, 0.28 + pulse * 0.22))
-                            .with_rotation(delta.y.atan2(delta.x))
-                            .with_z(2.04),
-                        );
-                    }
+            if let Some((target_id, remaining)) = self.attack_flash.get(&unit.id) {
+                if let Some(target) = self.simulation.world.unit(*target_id) {
+                    let life = normalized_fraction(*remaining, ATTACK_FLASH_DURATION);
+                    let age = 1.0 - life;
+                    let delta = target.position - unit.position;
+                    let direction = delta.normalize_or_zero();
+                    let angle = delta.y.atan2(delta.x);
+                    let source = unit.position + direction * (kind.scale() * 0.28);
+                    let travel = (age * 2.5).clamp(0.0, 1.0);
+                    let bolt_position = source.lerp(target.position, travel);
+                    let (red, green, blue) = if unit.faction == PLAYER {
+                        (0.18, 1.7, 1.35)
+                    } else {
+                        (1.8, 0.12, 0.62)
+                    };
+
+                    // A dim full-path tracer establishes direction; the
+                    // brighter short bolt carries motion along that path.
+                    ctx.renderer.draw_sprite(
+                        self.tex_ui,
+                        Sprite::new(unit.position + delta * 0.5, Vec2::new(delta.length(), 8.0))
+                            .with_color(Color::rgba(red, green, blue, 0.12 * life))
+                            .with_rotation(angle)
+                            .with_z(2.18),
+                    );
+                    ctx.renderer.draw_sprite(
+                        self.tex_ui,
+                        Sprite::new(unit.position + delta * 0.5, Vec2::new(delta.length(), 2.4))
+                            .with_color(Color::rgba(red, green, blue, 0.78 * life))
+                            .with_rotation(angle)
+                            .with_z(2.2),
+                    );
+                    ctx.renderer.draw_sprite(
+                        self.tex_ui,
+                        Sprite::new(bolt_position, Vec2::new(30.0, 5.0))
+                            .with_color(Color::rgba(red, green, blue, 0.96 * life))
+                            .with_rotation(angle)
+                            .with_z(2.24),
+                    );
+                    ctx.renderer.draw_sprite(
+                        self.tex_glow,
+                        Sprite::new(bolt_position, Vec2::splat(28.0 + 12.0 * life))
+                            .with_color(Color::rgba(red, green, blue, 0.62 * life))
+                            .with_z(2.22),
+                    );
+                    ctx.renderer.draw_light(PointLight::new(
+                        bolt_position,
+                        Color::rgb(red, green, blue),
+                        72.0,
+                        0.14 * life,
+                    ));
                 }
             }
 
@@ -6511,6 +8564,44 @@ impl Game for LastLight {
                 );
             }
 
+            if let Some(remaining) = self.damage_flash.get(&unit.id) {
+                let life = normalized_fraction(*remaining, DAMAGE_FLASH_DURATION);
+                let age = 1.0 - life;
+                let (red, green, blue) = if unit.faction == PLAYER {
+                    (1.65, 0.14, 0.52)
+                } else {
+                    (0.28, 1.6, 1.34)
+                };
+                let ring_size = 38.0 + age * 76.0;
+                ctx.renderer.draw_sprite(
+                    self.tex_glow,
+                    Sprite::new(unit.position, Vec2::splat(ring_size))
+                        .with_color(Color::rgba(red, green, blue, 0.34 * life))
+                        .with_z(2.42),
+                );
+                ctx.renderer.draw_light(PointLight::new(
+                    unit.position,
+                    Color::rgb(red, green, blue),
+                    92.0 + age * 58.0,
+                    0.18 * life,
+                ));
+                for index in 0..4 {
+                    let angle =
+                        index as f32 * std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_4;
+                    let direction = Vec2::new(angle.cos(), angle.sin());
+                    ctx.renderer.draw_sprite(
+                        self.tex_ui,
+                        Sprite::new(
+                            unit.position + direction * (20.0 + age * 42.0),
+                            Vec2::new(20.0 * life.max(0.2), 3.0),
+                        )
+                        .with_color(Color::rgba(red, green, blue, 0.88 * life))
+                        .with_rotation(angle)
+                        .with_z(2.44),
+                    );
+                }
+            }
+
             let health = (unit.health / unit.max_health).clamp(0.0, 1.0);
             ctx.renderer.draw_sprite(
                 self.tex_ui,
@@ -6535,6 +8626,9 @@ impl Game for LastLight {
                 .with_z(2.4),
             );
         }
+
+        self.draw_detonation_fx(ctx);
+        self.draw_offscreen_threat_indicators(ctx, t);
 
         if let Some(structure) = self.selected_structure {
             if let Some(position) = self.structure_position(structure) {
@@ -6601,7 +8695,7 @@ impl Game for LastLight {
 
         if !self.briefing && !self.victory && !self.defeat {
             if let Some((position, _)) = self.next_objective() {
-                let pulse = 76.0 + (t * 3.4).sin().abs() * 24.0;
+                let pulse = 76.0 + (t * 3.4).sin().abs() * 24.0 * motion;
                 ctx.renderer.draw_sprite(
                     self.tex_glow,
                     Sprite::new(position, Vec2::splat(pulse * 2.4))
@@ -6620,7 +8714,7 @@ impl Game for LastLight {
         if !self.briefing && !self.victory && !self.defeat {
             if let Some((position, label, remaining)) = self.target_feedback.as_ref() {
                 let fade = (remaining / 3.5).clamp(0.0, 1.0);
-                let pulse = 42.0 + (t * 6.0).sin().abs() * 12.0;
+                let pulse = 42.0 + (t * 6.0).sin().abs() * 12.0 * motion;
                 let accent = if label.starts_with("COMMS") {
                     Color::rgba(0.22, 1.35, 1.2, 0.78 * fade)
                 } else {
@@ -6647,8 +8741,9 @@ impl Game for LastLight {
         }
 
         let hud_minimal = self.minimal_hud || Self::should_auto_minimize_hud(ctx.renderer);
+        let hud_layout = TacticalHudLayout::new(ctx.renderer);
         if !self.briefing && !self.paused && !self.victory && !self.defeat && !hud_minimal {
-            let hud_scale = Self::hud_scale(ctx.renderer);
+            let hud_scale = hud_layout.scale;
             let minimap = self.minimap_transform(ctx.renderer);
             ctx.renderer.draw_sprite(
                 self.tex_ui,
@@ -6732,7 +8827,7 @@ impl Game for LastLight {
             let raid_state = self.simulation.raid_state();
             if raid_state.phase == RaidPhase::Warning {
                 let raid_position = minimap.world_to_panel(raid_state.spawn_position);
-                let pulse = 0.78 + (t * 8.0).sin().abs() * 0.22;
+                let pulse = 0.78 + (t * 8.0).sin().abs() * 0.22 * motion;
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
                     Sprite::new(raid_position, Vec2::splat(15.0 * hud_scale))
@@ -6863,6 +8958,7 @@ impl Game for LastLight {
                     .with_color(Color::rgba(0.04, 0.08, 0.12, 0.75))
                     .with_z(9.0),
             );
+            self.draw_hud_panel_frame(ctx.renderer, rect, Color::rgb(0.72, 0.84, 0.9), 9.02, false);
             let bar_size = Vec2::new(6.0, 22.0) * hud_scale;
             for offset in [Vec2::new(-7.0, 0.0), Vec2::new(7.0, 0.0)] {
                 ctx.renderer.draw_sprite(
@@ -6874,13 +8970,10 @@ impl Game for LastLight {
             }
         }
 
-        let hud_scale = Self::hud_scale(ctx.renderer);
-        let dense_hud = Self::hud_dense_layout(ctx.renderer);
-        let top_left = ctx
-            .renderer
-            .camera
-            .world_from_viewport_fraction(Vec2::new(0.0, 1.0))
-            + Vec2::new(30.0, -34.0) * hud_scale;
+        let hud_scale = hud_layout.scale;
+        let dense_hud = hud_layout.dense;
+        let top_left = hud_layout.top_left;
+        let telemetry_text_width = hud_layout.telemetry_text_width();
         if !self.briefing && !self.victory && !self.defeat && !hud_minimal {
             // Keep only the high-value StarCraft-style strip persistent. Detailed
             // controls and action feedback are disclosed below as transient text.
@@ -6891,17 +8984,22 @@ impl Game for LastLight {
             } else {
                 104.0
             };
+            let telemetry_bounds = Aabb::from_center_size(
+                hud_layout.telemetry_panel_center(telemetry_panel_height),
+                Vec2::new(hud_layout.telemetry_width, telemetry_panel_height) * hud_scale,
+            );
             ctx.renderer.draw_sprite(
                 self.tex_ui,
-                Sprite::new(
-                    top_left + Vec2::new(260.0, -(telemetry_panel_height * 0.5 - 2.0)) * hud_scale,
-                    Vec2::new(
-                        if dense_hud { 540.0 } else { 590.0 },
-                        telemetry_panel_height,
-                    ) * hud_scale,
-                )
-                .with_color(Color::rgba(0.01, 0.025, 0.05, 0.68))
-                .with_z(7.5),
+                Sprite::new(telemetry_bounds.center(), telemetry_bounds.size())
+                    .with_color(Color::rgba(0.01, 0.025, 0.05, 0.68))
+                    .with_z(7.5),
+            );
+            self.draw_hud_panel_frame(
+                ctx.renderer,
+                telemetry_bounds,
+                Color::rgb(0.22, 1.15, 1.05),
+                7.56,
+                false,
             );
             let active_relays = self
                 .simulation
@@ -6909,29 +9007,23 @@ impl Game for LastLight {
                 .iter()
                 .filter(|relay| relay.active)
                 .count();
-            let objective_line = match self.mission.victory {
+            let objective_status_line = match self.mission.victory {
                 VictoryCondition::RestoreRelaysAndDefeatBoss { .. } => self
                     .mission_objective_progress_line()
                     .map(|specialist| {
                         format!(
-                            "{}  {specialist}  RELAYS {active_relays}/{}",
-                            self.mission.title,
+                            "{specialist}  RELAYS {active_relays}/{}",
                             self.simulation.relays.len()
                         )
                     })
                     .unwrap_or_else(|| {
-                        format!(
-                            "{}  RELAYS {active_relays}/{}",
-                            self.mission.title,
-                            self.simulation.relays.len()
-                        )
+                        format!("RELAYS {active_relays}/{}", self.simulation.relays.len())
                     }),
                 VictoryCondition::EscortToExtraction { point, .. } => {
                     if let Some(scan_line) = self.mission_objective_progress_line() {
-                        format!("{}  {scan_line}", self.mission.title)
+                        scan_line
                     } else {
-                        let escort_status = self
-                            .simulation
+                        self.simulation
                             .escort_unit
                             .and_then(|id| self.simulation.world.unit(id))
                             .map(|unit| {
@@ -6941,20 +9033,29 @@ impl Game for LastLight {
                                     "ESCORT LOST".to_owned()
                                 }
                             })
-                            .unwrap_or_else(|| "ESCORT LOST".to_owned());
-                        format!("{}  {escort_status}", self.mission.title)
+                            .unwrap_or_else(|| "ESCORT LOST".to_owned())
                     }
                 }
             };
+            let objective_pixel = if dense_hud {
+                2.0 * hud_scale
+            } else {
+                2.2 * hud_scale
+            };
+            let mut objective_copy = self.mission.title.to_owned();
+            if !controls_hint_visible {
+                objective_copy.push('\n');
+                objective_copy.push_str(&Self::fit_bitmap_text(
+                    &objective_status_line,
+                    objective_pixel,
+                    telemetry_text_width,
+                ));
+            }
             self.draw_text(
                 ctx.renderer,
-                &objective_line,
+                &objective_copy,
                 top_left,
-                if dense_hud {
-                    2.9 * hud_scale
-                } else {
-                    3.35 * hud_scale
-                },
+                objective_pixel,
                 Color::rgb(0.73, 1.15, 1.08),
                 8.0,
             );
@@ -6987,7 +9088,11 @@ impl Game for LastLight {
             }
             if controls_hint_visible && !dense_hud {
                 let selection_count = self.simulation.world.selection().ids().len();
-                let control_hint = if selection_count == 0 {
+                let control_hint = if self.controller_mode && selection_count == 0 {
+                    "A SELECT  •  RS CURSOR  •  LS CAMERA  •  BACK OBJECTIVE"
+                } else if self.controller_mode {
+                    "A SELECT  •  X ORDER  •  Y COMMANDS  •  LB/RB UNITS"
+                } else if selection_count == 0 {
                     "DRAG SELECT  •  TERRAIN MOVE  •  F1 HELP"
                 } else if selection_count == 1
                     && self.selected_single_unit_kind() == Some(UnitKind::Surveyor)
@@ -6998,7 +9103,7 @@ impl Game for LastLight {
                 };
                 self.draw_text(
                     ctx.renderer,
-                    control_hint,
+                    &Self::fit_bitmap_text(control_hint, 1.9 * hud_scale, telemetry_text_width),
                     top_left + Vec2::new(0.0, -25.0) * hud_scale,
                     1.9 * hud_scale,
                     Color::rgba(0.58, 0.7, 0.78, 0.86),
@@ -7008,7 +9113,15 @@ impl Game for LastLight {
             if controls_hint_visible && dense_hud {
                 self.draw_text(
                     ctx.renderer,
-                    "F1 FOR CONTROL HINT",
+                    &Self::fit_bitmap_text(
+                        if self.controller_mode {
+                            "A SELECT  X ORDER  Y COMMANDS"
+                        } else {
+                            "F1 FOR CONTROL HINT"
+                        },
+                        1.45 * hud_scale,
+                        telemetry_text_width,
+                    ),
                     top_left + Vec2::new(0.0, -25.0) * hud_scale,
                     1.45 * hud_scale,
                     Color::rgba(0.55, 0.7, 0.8, 0.9),
@@ -7042,13 +9155,18 @@ impl Game for LastLight {
                 ),
             };
             if dense_hud {
+                let dense_resource_line = format!(
+                    "{}  IN +{income}/S  RELAYS {}/{}",
+                    resource_line,
+                    active_relays + 1,
+                    self.simulation.relays.len() + 1
+                );
                 self.draw_text(
                     ctx.renderer,
-                    &format!(
-                        "{}  IN +{income}/S  RELAYS {}/{}",
-                        resource_line,
-                        active_relays + 1,
-                        self.simulation.relays.len() + 1
+                    &Self::fit_bitmap_text(
+                        &dense_resource_line,
+                        2.15 * hud_scale,
+                        telemetry_text_width,
                     ),
                     top_left + Vec2::new(0.0, -52.0) * hud_scale,
                     2.15 * hud_scale,
@@ -7058,21 +9176,22 @@ impl Game for LastLight {
             } else {
                 self.draw_text(
                     ctx.renderer,
-                    &resource_line,
+                    &Self::fit_bitmap_text(&resource_line, 2.8 * hud_scale, telemetry_text_width),
                     top_left + Vec2::new(0.0, -50.0) * hud_scale,
                     2.8 * hud_scale,
                     Color::rgb(0.96, 0.72, 0.28),
                     8.0,
                 );
+                let income_line = format!(
+                    "IN +{income}/S  POWER {}/{}  SUPPLY {}/{}",
+                    active_relays + 1,
+                    self.simulation.relays.len() + 1,
+                    self.simulation.supply.used(),
+                    self.simulation.supply.capacity()
+                );
                 self.draw_text(
                     ctx.renderer,
-                    &format!(
-                        "IN +{income}/S  POWER {}/{}  SUPPLY {}/{}",
-                        active_relays + 1,
-                        self.simulation.relays.len() + 1,
-                        self.simulation.supply.used(),
-                        self.simulation.supply.capacity()
-                    ),
+                    &Self::fit_bitmap_text(&income_line, 2.35 * hud_scale, telemetry_text_width),
                     top_left + Vec2::new(0.0, -75.0) * hud_scale,
                     2.35 * hud_scale,
                     Color::rgb(0.96, 0.72, 0.28),
@@ -7085,7 +9204,7 @@ impl Game for LastLight {
                     // panel. Its bounded copy keeps the global resource line
                     // readable and makes the alert disappear as soon as a route
                     // is assigned.
-                    let chip_origin = top_left + Vec2::new(366.0, -49.0) * hud_scale;
+                    let chip_origin = hud_layout.telemetry_chip_origin(-49.0, 218.0);
                     ctx.renderer.draw_sprite(
                         self.tex_ui,
                         Sprite::new(
@@ -7110,7 +9229,7 @@ impl Game for LastLight {
                     // progress never collides with the global salvage/income
                     // readout. The fixed 252px shell matches the formatter's
                     // 32-character cap at the compact HUD text scale.
-                    let chip_origin = top_left + Vec2::new(338.0, -100.0) * hud_scale;
+                    let chip_origin = hud_layout.telemetry_chip_origin(-100.0, 252.0);
                     ctx.renderer.draw_sprite(
                         self.tex_ui,
                         Sprite::new(
@@ -7150,14 +9269,22 @@ impl Game for LastLight {
                 .is_some_and(|unit| unit.faction == PLAYER)
             {
                 let unit_card = Self::unit_card_origin(ctx.renderer);
+                let unit_card_bounds = Aabb::from_center_size(
+                    unit_card + Vec2::new(210.0, 58.0) * hud_scale,
+                    Vec2::new(420.0, 116.0) * hud_scale,
+                );
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
-                    Sprite::new(
-                        unit_card + Vec2::new(210.0, 58.0) * hud_scale,
-                        Vec2::new(420.0, 116.0) * hud_scale,
-                    )
-                    .with_color(Color::rgba(0.01, 0.025, 0.05, 0.88))
-                    .with_z(7.7),
+                    Sprite::new(unit_card_bounds.center(), unit_card_bounds.size())
+                        .with_color(Color::rgba(0.01, 0.025, 0.05, 0.88))
+                        .with_z(7.7),
+                );
+                self.draw_hud_panel_frame(
+                    ctx.renderer,
+                    unit_card_bounds,
+                    Color::rgb(0.22, 1.28, 1.12),
+                    7.78,
+                    true,
                 );
                 let portrait_center = unit_card + Vec2::new(58.0, 58.0) * hud_scale;
                 let portrait_size = Vec2::splat(108.0 * hud_scale);
@@ -7423,14 +9550,22 @@ impl Game for LastLight {
                     .is_some_and(|unit| unit.faction == CHOIR && unit.alive())
             {
                 let unit_card = Self::unit_card_origin(ctx.renderer);
+                let unit_card_bounds = Aabb::from_center_size(
+                    unit_card + Vec2::new(210.0, 58.0) * hud_scale,
+                    Vec2::new(420.0, 116.0) * hud_scale,
+                );
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
-                    Sprite::new(
-                        unit_card + Vec2::new(210.0, 58.0) * hud_scale,
-                        Vec2::new(420.0, 116.0) * hud_scale,
-                    )
-                    .with_color(Color::rgba(0.08, 0.018, 0.075, 0.9))
-                    .with_z(7.7),
+                    Sprite::new(unit_card_bounds.center(), unit_card_bounds.size())
+                        .with_color(Color::rgba(0.08, 0.018, 0.075, 0.9))
+                        .with_z(7.7),
+                );
+                self.draw_hud_panel_frame(
+                    ctx.renderer,
+                    unit_card_bounds,
+                    Color::rgb(1.2, 0.18, 0.62),
+                    7.78,
+                    true,
                 );
                 let portrait_center = unit_card + Vec2::new(58.0, 58.0) * hud_scale;
                 let portrait_size = Vec2::splat(108.0 * hud_scale);
@@ -7485,22 +9620,20 @@ impl Game for LastLight {
         }
 
         if let Some((speaker, line, remaining)) = self.radio_message {
-            let top_right = ctx
-                .renderer
-                .camera
-                .world_from_viewport_fraction(Vec2::new(1.0, 1.0));
             let slide = self.radio_pop_in.clamp(0.0, 1.0) * 42.0;
-            let origin = top_right + Vec2::new(-540.0 + slide, -42.0) * hud_scale;
+            let origin = hud_layout.radio_origin(slide);
             let accent = Self::speaker_accent(speaker);
+            let radio_bounds = Aabb::from_center_size(
+                origin + Vec2::new(250.0, -36.0) * hud_scale,
+                Vec2::new(520.0, 108.0) * hud_scale,
+            );
             ctx.renderer.draw_sprite(
                 self.tex_ui,
-                Sprite::new(
-                    origin + Vec2::new(250.0, -36.0) * hud_scale,
-                    Vec2::new(520.0, 108.0) * hud_scale,
-                )
-                .with_color(Color::rgba(0.025, 0.055, 0.085, 0.9))
-                .with_z(8.6),
+                Sprite::new(radio_bounds.center(), radio_bounds.size())
+                    .with_color(Color::rgba(0.025, 0.055, 0.085, 0.9))
+                    .with_z(8.6),
             );
+            self.draw_hud_panel_frame(ctx.renderer, radio_bounds, accent, 8.67, true);
             ctx.renderer.draw_sprite(
                 self.tex_ui,
                 Sprite::new(
@@ -7607,15 +9740,23 @@ impl Game for LastLight {
                     .flatten()
             });
         if let Some(message) = transient_message.as_deref() {
-            let toast_origin = top_left + Vec2::new(300.0, -112.0) * hud_scale;
+            let toast_origin = hud_layout.toast_origin();
+            let toast_bounds = Aabb::from_center_size(
+                toast_origin + Vec2::new(238.0, 0.0) * hud_scale,
+                Vec2::new(476.0, 28.0) * hud_scale,
+            );
             ctx.renderer.draw_sprite(
                 self.tex_ui,
-                Sprite::new(
-                    toast_origin + Vec2::new(238.0, 0.0) * hud_scale,
-                    Vec2::new(476.0, 28.0) * hud_scale,
-                )
-                .with_color(Color::rgba(0.01, 0.035, 0.055, 0.86))
-                .with_z(8.45),
+                Sprite::new(toast_bounds.center(), toast_bounds.size())
+                    .with_color(Color::rgba(0.01, 0.035, 0.055, 0.86))
+                    .with_z(8.45),
+            );
+            self.draw_hud_panel_frame(
+                ctx.renderer,
+                toast_bounds,
+                Color::rgb(1.15, 0.72, 0.25),
+                8.49,
+                false,
             );
             self.draw_text(
                 ctx.renderer,
@@ -7637,21 +9778,20 @@ impl Game for LastLight {
             let card_scale = Self::command_card_scale(ctx.renderer);
             let card_text = Self::command_card_text_origin(ctx.renderer);
             let visible_rows = self.visible_command_card_rows_for_display(ctx.renderer);
-            let panel_size = Vec2::new(
-                COMMAND_CARD_PANEL_WIDTH,
-                (visible_rows.len().max(1) as f32 * COMMAND_CARD_ROW_SPACING)
-                    + COMMAND_CARD_PANEL_HEADER,
-            );
-            let card_center = card_text
-                + Vec2::new(
-                    COMMAND_CARD_PANEL_WIDTH * 0.5,
-                    if compact_card { -92.0 } else { -92.5 },
-                ) * card_scale;
+            let panel_bounds =
+                Self::command_card_panel_bounds(ctx.renderer, compact_card, visible_rows.len());
             ctx.renderer.draw_sprite(
                 self.tex_ui,
-                Sprite::new(card_center, panel_size * card_scale)
+                Sprite::new(panel_bounds.center(), panel_bounds.size())
                     .with_color(Color::rgba(0.01, 0.025, 0.05, 0.88))
                     .with_z(7.5),
+            );
+            self.draw_hud_panel_frame(
+                ctx.renderer,
+                panel_bounds,
+                Color::rgb(0.25, 1.22, 1.1),
+                7.56,
+                false,
             );
             // The command atlas is a compact, panel-safe complement to the
             // world structure sprites. A single silhouette beside the header
@@ -7742,13 +9882,18 @@ impl Game for LastLight {
                 .screen_to_world(ctx.input.mouse_position);
             for (slot, &index) in visible_rows.iter().enumerate() {
                 let rect = Self::command_card_row_rect(card_text, slot, card_scale);
-                let hovered = rect.contains_point(mouse_world);
+                let hovered = !self.controller_mode && rect.contains_point(mouse_world);
+                let controller_focused = self.controller_mode
+                    && self.controller_command_mode
+                    && slot == self.controller_command_cursor;
                 let available = self.command_card_available(index);
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
                     Sprite::new(rect.center(), rect.size())
                         .with_color(if !available {
                             Color::rgba(0.03, 0.06, 0.08, 0.22)
+                        } else if controller_focused {
+                            Color::rgba(0.18, 0.62, 0.64, 0.62)
                         } else if hovered {
                             Color::rgba(0.16, 0.55, 0.6, 0.35)
                         } else {
@@ -7756,7 +9901,46 @@ impl Game for LastLight {
                         })
                         .with_z(7.6),
                 );
-                let command_label = self.command_card_display(index);
+                if available && (controller_focused || hovered) {
+                    self.draw_hud_panel_frame(
+                        ctx.renderer,
+                        rect,
+                        if controller_focused {
+                            Color::rgb(1.1, 0.76, 0.24)
+                        } else {
+                            Color::rgb(0.28, 1.22, 1.1)
+                        },
+                        7.74,
+                        true,
+                    );
+                }
+                let split_fabricator_row =
+                    matches!(self.selected_structure, Some(StructureKind::Fabricator))
+                        && index == 5
+                        && !self.placing_beacon;
+                if controller_focused && split_fabricator_row {
+                    let half_size = Vec2::new(rect.size().x * 0.5 - 3.0, rect.size().y - 4.0);
+                    let half_offset = rect.size().x * 0.25;
+                    let half_center = rect.center()
+                        + Vec2::new(
+                            if self.controller_command_alternate {
+                                half_offset
+                            } else {
+                                -half_offset
+                            },
+                            0.0,
+                        );
+                    ctx.renderer.draw_sprite(
+                        self.tex_ui,
+                        Sprite::new(half_center, half_size)
+                            .with_color(Color::rgba(1.1, 0.68, 0.2, 0.3))
+                            .with_z(7.72),
+                    );
+                }
+                let mut command_label = self.command_card_display_for_active_input(index);
+                if controller_focused {
+                    command_label.insert_str(0, "▶ ");
+                }
                 self.draw_text(
                     ctx.renderer,
                     &command_label,
@@ -7774,11 +9958,24 @@ impl Game for LastLight {
                     8.0,
                 );
             }
-            if controls_hint_visible {
+            if self.controller_mode && self.controller_command_mode {
+                self.draw_text(
+                    ctx.renderer,
+                    "A EXEC  B BACK  LB/RB PAGE",
+                    card_text + Vec2::new(0.0, -116.0) * card_scale,
+                    1.28 * card_scale,
+                    Color::rgba(1.0, 0.78, 0.34, 0.95),
+                    8.0,
+                );
+            } else if controls_hint_visible {
                 if !dense_hud {
                     self.draw_text(
                         ctx.renderer,
-                        "CMD/CTRL+1-5 ASSIGN   1-5 OR CLICK RECALL",
+                        if self.controller_mode {
+                            "Y COMMANDS  LB/RB CYCLE  BACK OBJECTIVE"
+                        } else {
+                            "CMD/CTRL+1-5 ASSIGN   1-5 OR CLICK RECALL"
+                        },
                         card_text + Vec2::new(0.0, -116.0) * card_scale,
                         1.4 * card_scale,
                         Color::rgba(0.55, 0.7, 0.78, 0.9),
@@ -7888,19 +10085,40 @@ impl Game for LastLight {
             }
         }
 
+        self.draw_controller_cursor(ctx);
+
         let view = ctx.renderer.camera.visible_world_size();
         let overlay: Option<(&str, &str, String, Color)> = if self.briefing {
             Some((
                 self.mission.title,
                 self.mission.briefing_story,
-                "SPACE / ENTER  //  DEPLOY MISSION".to_owned(),
+                if self.controller_mode {
+                    "A APPLY LOADOUT  //  Y OR START DEPLOY".to_owned()
+                } else {
+                    "SPACE / ENTER  //  DEPLOY MISSION".to_owned()
+                },
                 Color::rgb(0.32, 1.55, 1.35),
+            ))
+        } else if self.settings_open {
+            Some((
+                "TACTICAL PAUSE",
+                "",
+                if self.controller_mode {
+                    "D-PAD SELECT  //  A ADJUST  //  B BACK".to_owned()
+                } else {
+                    "ARROWS SELECT  //  LEFT-RIGHT ADJUST  //  ESC BACK".to_owned()
+                },
+                Color::rgb(0.35, 1.45, 1.25),
             ))
         } else if self.paused {
             Some((
                 "TACTICAL PAUSE",
                 "ORDERS SUSPENDED",
-                "ESC TO RESUME".to_owned(),
+                if self.controller_mode {
+                    "Y SETTINGS  //  START / B RESUME".to_owned()
+                } else {
+                    "F2 SETTINGS  //  ESC RESUME".to_owned()
+                },
                 Color::rgb(0.85, 0.85, 0.9),
             ))
         } else if self.victory {
@@ -7919,7 +10137,11 @@ impl Game for LastLight {
             Some((
                 self.mission.defeat_title,
                 self.mission.defeat_story,
-                "SPACE / ENTER TO RETRY — ESC TO MISSIONS".to_owned(),
+                if self.controller_mode {
+                    "A RETRY  //  B MISSIONS".to_owned()
+                } else {
+                    "SPACE / ENTER TO RETRY — ESC TO MISSIONS".to_owned()
+                },
                 Color::rgb(1.4, 0.4, 0.35),
             ))
         } else {
@@ -8101,17 +10323,32 @@ impl Game for LastLight {
                     .screen_to_world(ctx.input.mouse_position);
                 for (index, (key, label, color)) in self.briefing_rows().iter().enumerate() {
                     let rect = Self::briefing_row_rect(center, index, overlay_scale);
-                    let hovered = rect.contains_point(mouse_world);
+                    let hovered = !self.controller_mode && rect.contains_point(mouse_world);
+                    let controller_focused =
+                        self.controller_mode && index == self.controller_briefing_cursor;
                     ctx.renderer.draw_sprite(
                         self.tex_ui,
                         Sprite::new(rect.center(), rect.size())
-                            .with_color(if hovered {
+                            .with_color(if controller_focused {
+                                Color::rgba(0.18, 0.62, 0.64, 0.72)
+                            } else if hovered {
                                 Color::rgba(0.16, 0.55, 0.6, 0.4)
                             } else {
                                 Color::rgba(0.04, 0.08, 0.12, 0.4)
                             })
                             .with_z(10.0),
                     );
+                    if controller_focused {
+                        ctx.renderer.draw_sprite(
+                            self.tex_ui,
+                            Sprite::new(
+                                rect.min + Vec2::new(5.0 * overlay_scale, rect.size().y * 0.5),
+                                Vec2::new(5.0 * overlay_scale, rect.size().y - 8.0 * overlay_scale),
+                            )
+                            .with_color(Color::rgb(1.28, 0.86, 0.3))
+                            .with_z(10.2),
+                        );
+                    }
                     let label_offset = if let Some(frame) = self.specialist_module_frame(*key) {
                         let icon_center = rect.min
                             + Vec2::new(27.0, rect.size().y / overlay_scale * 0.5) * overlay_scale;
@@ -8139,7 +10376,7 @@ impl Game for LastLight {
                     );
                 }
                 let deploy = Self::briefing_deploy_rect(center, overlay_scale);
-                let deploy_hovered = deploy.contains_point(mouse_world);
+                let deploy_hovered = !self.controller_mode && deploy.contains_point(mouse_world);
                 ctx.renderer.draw_sprite(
                     self.tex_ui,
                     Sprite::new(deploy.center(), deploy.size())
@@ -8161,7 +10398,11 @@ impl Game for LastLight {
                 );
                 self.draw_text_shadowed(
                     ctx.renderer,
-                    "DEPLOY TO FIELD  //  SPACE / ENTER",
+                    if self.controller_mode {
+                        "A APPLY FOCUSED  //  Y / START DEPLOY"
+                    } else {
+                        "DEPLOY TO FIELD  //  SPACE / ENTER"
+                    },
                     deploy.min + Vec2::new(18.0, 12.0) * overlay_scale,
                     1.85 * overlay_scale,
                     if deploy_hovered {
@@ -8173,6 +10414,50 @@ impl Game for LastLight {
                 );
             }
         }
+        if self.paused && !self.settings_open {
+            let settings_button = Self::pause_settings_button_rect(ctx.renderer);
+            let mouse_world = ctx
+                .renderer
+                .camera
+                .screen_to_world(ctx.input.mouse_position);
+            let hovered = !self.controller_mode && settings_button.contains_point(mouse_world);
+            ctx.renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(settings_button.center(), settings_button.size())
+                    .with_color(if hovered {
+                        Color::rgba(0.16, 0.58, 0.6, 0.88)
+                    } else {
+                        Color::rgba(0.06, 0.25, 0.3, 0.9)
+                    })
+                    .with_z(10.0),
+            );
+            self.draw_hud_panel_frame(
+                ctx.renderer,
+                settings_button,
+                Color::rgb(0.28, 1.22, 1.1),
+                10.08,
+                hovered,
+            );
+            self.draw_text_shadowed(
+                ctx.renderer,
+                if self.controller_mode {
+                    "Y  OPEN CONTROL DECK"
+                } else {
+                    "F2  OPEN CONTROL DECK"
+                },
+                settings_button.min + Vec2::new(18.0, 12.0) * Self::hud_scale(ctx.renderer),
+                1.75 * Self::hud_scale(ctx.renderer),
+                if hovered {
+                    Color::rgb(1.3, 0.96, 0.38)
+                } else {
+                    Color::rgb(0.46, 1.25, 1.15)
+                },
+                10.2,
+            );
+        }
+        if self.settings_open {
+            self.draw_settings_panel(ctx);
+        }
     }
 }
 
@@ -8183,6 +10468,225 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_exposes_authoritative_asset_manifest() {
+        let game = LastLight::new();
+        let manifest = game
+            .asset_manifest()
+            .expect("Last Light should expose its startup asset manifest");
+        assert_eq!(manifest.len(), TextureAsset::ALL.len());
+    }
+
+    #[test]
+    fn controller_menu_direction_accepts_both_stick_axes_and_rejects_drift() {
+        assert_eq!(
+            controller_menu_direction(Vec2::new(0.8, 0.1)),
+            Some(MenuInput::Down)
+        );
+        assert_eq!(
+            controller_menu_direction(Vec2::new(-0.8, 0.1)),
+            Some(MenuInput::Up)
+        );
+        assert_eq!(
+            controller_menu_direction(Vec2::new(0.1, 0.8)),
+            Some(MenuInput::Up)
+        );
+        assert_eq!(
+            controller_menu_direction(Vec2::new(0.1, -0.8)),
+            Some(MenuInput::Down)
+        );
+        assert_eq!(controller_menu_direction(Vec2::new(0.2, 0.2)), None);
+        assert_eq!(controller_menu_direction(Vec2::splat(f32::NAN)), None);
+    }
+
+    #[test]
+    fn controller_cursor_speed_is_zoom_independent_and_viewport_clamped() {
+        let viewport = Vec2::new(1280.0, 720.0);
+        let moved = step_controller_cursor_with_sensitivity(
+            viewport * 0.5,
+            Vec2::new(1.0, -1.0),
+            viewport,
+            0.5,
+            1.0,
+        );
+        assert_eq!(moved, Vec2::new(1020.0, CONTROLLER_CURSOR_MARGIN));
+        let clamped =
+            step_controller_cursor_with_sensitivity(moved, Vec2::splat(10.0), viewport, 10.0, 1.0);
+        assert_eq!(clamped, viewport - Vec2::splat(CONTROLLER_CURSOR_MARGIN));
+    }
+
+    #[test]
+    fn controller_cursor_sensitivity_scales_motion_without_bypassing_clamp() {
+        let viewport = Vec2::new(1280.0, 720.0);
+        let moved = step_controller_cursor_with_sensitivity(
+            viewport * 0.5,
+            Vec2::new(1.0, -1.0),
+            viewport,
+            0.5,
+            1.5,
+        );
+        assert_eq!(moved, Vec2::new(1210.0, CONTROLLER_CURSOR_MARGIN));
+        let clamped = step_controller_cursor_with_sensitivity(
+            moved,
+            Vec2::splat(10.0),
+            viewport,
+            10.0,
+            f32::INFINITY,
+        );
+        assert_eq!(clamped, viewport - Vec2::splat(CONTROLLER_CURSOR_MARGIN));
+    }
+
+    #[test]
+    fn settings_rows_edit_the_normalized_controller_and_motion_profile() {
+        let mut profile = EngineProfile::default();
+        assert!(LastLight::adjust_settings(&mut profile, 0, 1));
+        assert_eq!(profile.controller.cursor_sensitivity, 1.25);
+        assert!(LastLight::adjust_settings(&mut profile, 1, -1));
+        assert_eq!(profile.controller.dead_zone, 0.15);
+        assert!(LastLight::adjust_settings(&mut profile, 2, 1));
+        assert!(profile.controller.invert_right_y);
+        assert!(LastLight::adjust_settings(&mut profile, 3, 1));
+        assert!(profile.controller.invert_left_y);
+        assert!(LastLight::adjust_settings(&mut profile, 4, 1));
+        assert!(!profile.controller.vibration);
+        assert!(LastLight::adjust_settings(&mut profile, 5, 1));
+        assert!(profile.accessibility.reduced_motion);
+        assert_eq!(LastLight::settings_value(profile, 0), "125%");
+        assert_eq!(LastLight::settings_value(profile, 5), "ON");
+    }
+
+    #[test]
+    fn edge_threat_anchor_suppresses_contacts_inside_safe_band() {
+        let viewport = Vec2::new(1280.0, 720.0);
+        assert_eq!(
+            edge_indicator_anchor(Vec2::new(640.0, 360.0), viewport, 34.0),
+            None
+        );
+        assert_eq!(
+            edge_indicator_anchor(Vec2::new(640.0, 420.0), viewport, 34.0),
+            None
+        );
+    }
+
+    #[test]
+    fn edge_threat_anchor_points_from_safe_edge_toward_contact() {
+        let viewport = Vec2::new(1280.0, 720.0);
+        let (right_edge, right_direction) =
+            edge_indicator_anchor(Vec2::new(1500.0, 360.0), viewport, THREAT_INDICATOR_PADDING)
+                .expect("right-side contact should produce an edge indicator");
+        assert!((right_edge.x - (viewport.x - THREAT_INDICATOR_PADDING)).abs() < 1e-4);
+        assert!((right_edge.y - viewport.y * 0.5).abs() < 1e-4);
+        assert!(right_direction.x > 0.99);
+        assert!(right_direction.y.abs() < 1e-4);
+
+        let (top_edge, top_direction) =
+            edge_indicator_anchor(Vec2::new(640.0, -180.0), viewport, THREAT_INDICATOR_PADDING)
+                .expect("top-side contact should produce an edge indicator");
+        assert!((top_edge.x - viewport.x * 0.5).abs() < 1e-4);
+        assert!((top_edge.y - THREAT_INDICATOR_PADDING).abs() < 1e-4);
+        assert!(top_direction.y < -0.99);
+        assert!(top_direction.x.abs() < 1e-4);
+    }
+
+    #[test]
+    fn fog_preserves_map_readability_without_overlaying_visible_cells() {
+        assert_eq!(fog_overlay_alpha(FogState::Visible), None);
+        assert_eq!(
+            fog_overlay_alpha(FogState::Explored),
+            Some(FOG_EXPLORED_ALPHA)
+        );
+        assert_eq!(fog_overlay_alpha(FogState::Hidden), Some(FOG_HIDDEN_ALPHA));
+        const {
+            assert!(FOG_EXPLORED_ALPHA < FOG_HIDDEN_ALPHA);
+            assert!(FOG_HIDDEN_ALPHA < 0.8);
+        }
+    }
+
+    #[test]
+    fn last_light_agent_state_exposes_controller_flow_without_renderer_state() {
+        let mut game = LastLight::new();
+        assert_eq!(game.agent_state().unwrap()["screen"], "mission_select");
+        game.mission_select = false;
+        game.start_mission(missions::reclaim_the_reactor());
+        assert_eq!(game.agent_state().unwrap()["screen"], "briefing");
+        game.briefing = false;
+        game.controller_mode = true;
+        game.controller_command_mode = true;
+        let state = game
+            .agent_state()
+            .expect("Last Light publishes agent state");
+        assert_eq!(state["screen"], "tactical");
+        assert_eq!(state["controller_mode"], true);
+        assert_eq!(state["controller_command_mode"], true);
+        assert!(state["selected"].as_u64().unwrap_or_default() > 0);
+        assert_eq!(state["combat"]["pulses"], 0);
+        assert_eq!(state["combat"]["active_shots"], 0);
+    }
+
+    #[test]
+    fn last_light_agent_state_exposes_settings_child_screen_and_profile_snapshot() {
+        let mut game = LastLight::new();
+        game.mission_select = false;
+        game.start_mission(missions::reclaim_the_reactor());
+        game.briefing = false;
+        game.open_settings();
+        let state = game
+            .agent_state()
+            .expect("Last Light publishes settings state");
+        assert_eq!(state["screen"], "settings");
+        assert_eq!(state["settings_open"], true);
+        assert_eq!(state["settings_cursor"], 0);
+        assert_eq!(state["settings"]["cursor_sensitivity"], 1.0);
+        assert_eq!(state["settings"]["reduced_motion"], false);
+    }
+
+    #[test]
+    fn agent_engage_kind_uses_live_selection_and_simulation_attack_order() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        let response = game
+            .on_agent_command(
+                "engage_kind",
+                &serde_json::json!({"attacker": "warden", "target": "needle"}),
+            )
+            .expect("Last Light supports deterministic combat engagement");
+        assert_eq!(response["accepted"], true);
+        let selected = game.simulation.world.selection().ids();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            game.simulation.kinds.get(&selected[0]),
+            Some(&UnitKind::Warden)
+        );
+        let UnitOrder::Attack(target) = game.simulation.world.unit(selected[0]).unwrap().order
+        else {
+            panic!("agent engagement must issue the ordinary attack order");
+        };
+        assert_eq!(game.simulation.kinds.get(&target), Some(&UnitKind::Needle));
+    }
+
+    #[test]
+    fn controller_command_focus_excludes_informational_rows_and_keyboard_glyphs() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        game.controller_mode = true;
+        game.selected_structure = Some(StructureKind::Relay(0));
+        game.simulation.world.clear_selection();
+        assert!(game.controller_command_rows().is_empty());
+
+        game.simulation.relays[0].active = true;
+        assert_eq!(game.controller_command_rows(), vec![0]);
+        assert_eq!(
+            game.command_card_display_for_active_input(0),
+            "GRID PULSE  35"
+        );
+
+        game.selected_structure = Some(StructureKind::Fabricator);
+        assert_eq!(
+            game.command_card_display_for_active_input(5),
+            "BEACON 50   //   SUPPLY MODULE 100"
+        );
+    }
 
     #[test]
     fn directional_art_keeps_authored_front_aligned_with_screen_down() {
@@ -8324,7 +10828,7 @@ mod tests {
     }
 
     #[test]
-    fn build_and_mark_states_are_role_specific_procedural_cues() {
+    fn build_and_mark_states_use_the_authored_animation_contract() {
         let mut game = LastLight::new();
         game.start_mission(missions::reclaim_the_reactor());
         let engineer = game
@@ -8348,7 +10852,7 @@ mod tests {
         assert_eq!(
             game.unit_animation_clip(UnitKind::Engineer, UnitAnimationState::Build)
                 .map(|clip| (clip.frames.len(), clip.fps, clip.looping)),
-            Some((8, 9.0, true))
+            Some((9, 9.0, false))
         );
         assert!(matches!(
             game.unit_animation_atlas(UnitKind::Engineer, UnitAnimationState::Build),
@@ -10374,6 +12878,50 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_copy_fits_bitmap_width_and_keeps_word_edges_clean() {
+        let pixel = 3.35;
+        let short = "RELAYS 2/3";
+        assert_eq!(
+            LastLight::fit_bitmap_text(short, pixel, short.chars().count() as f32 * pixel * 6.0),
+            short
+        );
+
+        let fitted = LastLight::fit_bitmap_text(
+            "TERMS OF SALVAGE RIDGE HOLD 00% // SEND WARDEN",
+            pixel,
+            pixel * 6.0 * 20.0 + 0.1,
+        );
+        assert!(fitted.ends_with(".."));
+        assert!(fitted.starts_with("TERMS OF SALVAGE"));
+        assert!(fitted.chars().count() <= 20);
+        assert!(!fitted[..fitted.len() - 2].ends_with(' '));
+    }
+
+    #[test]
+    fn telemetry_copy_handles_tiny_or_empty_lanes_without_overflow() {
+        assert_eq!(LastLight::fit_bitmap_text("READY", 2.0, 0.0), "");
+        assert_eq!(LastLight::fit_bitmap_text("READY", 2.0, 24.0), "..");
+        assert_eq!(LastLight::fit_bitmap_text("", 2.0, 12.0), "");
+    }
+
+    #[test]
+    fn objective_title_and_status_keep_progress_inside_separate_lanes() {
+        let hud_width = 564.0 * 0.82;
+        let title = LastLight::fit_bitmap_text("TERMS OF SALVAGE", 3.35 * 0.82, hud_width);
+        let status = LastLight::fit_bitmap_text(
+            "RIDGE HOLD 00% // SEND WARDEN  RELAYS 0/3",
+            1.95 * 0.82,
+            hud_width,
+        );
+
+        assert_eq!(title, "TERMS OF SALVAGE");
+        assert!(status.contains("RIDGE HOLD 00%"));
+        assert!(status.contains("RELAYS 0/3"));
+        assert!((title.chars().count() as f32 * 3.35 * 0.82 * 6.0) <= hud_width);
+        assert!((status.chars().count() as f32 * 1.95 * 0.82 * 6.0) <= hud_width);
+    }
+
+    #[test]
     fn radio_progress_stays_bounded_for_the_countdown_rail() {
         assert_eq!(LastLight::radio_progress(7.0), 1.0);
         assert!((LastLight::radio_progress(3.0) - 0.5).abs() < 1e-5);
@@ -10511,12 +13059,6 @@ mod tests {
             LastLight::command_card_title_pixel("POWER RELAY", false, true),
             2.8
         );
-    }
-
-    #[test]
-    fn edge_input_gate_consumes_a_key_once_per_rendered_frame() {
-        assert!(edge_input_allowed(false));
-        assert!(!edge_input_allowed(true));
     }
 
     #[test]

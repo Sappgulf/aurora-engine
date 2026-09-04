@@ -93,11 +93,25 @@ systems it uses can be adopted by a second 2D game without copying demo code.
 - [x] Control groups and viewport-anchored command-card UI
 - [x] Versioned campaign persistence and mission unlock state
 - [x] Per-entity clip state machine and Warden movement strip
+- [x] Controller-first campaign flow with virtual tactical cursor, contextual
+      command focus, unit cycling, objective focus, and haptic feedback
 - [x] Engineer move, Surveyor scan, and Choir Needle attack strips
 - [x] Canticle command and Bell Mine arming action strips
 - [x] Hit/down reaction atlases for the full six-unit roster
+- [x] Authored per-weapon pulse cadence with charge telegraphs, moving bolts,
+      impact lighting, combat audio gating, haptics, and destruction debris
+- [x] Generated "Terms of Salvage" vault plate with ten cover pylons,
+      web-budgeted runtime export, and segmented navigation-matched bulkheads
 - [x] Player-authored field-beacon placement and validation previews
 - [x] Tactical minimap with fog, contacts, camera frame, and navigation
+- [x] Combat framing assist for selected nearby engagements plus fog-safe
+      off-screen contact/raid chevrons
+- [x] Shared viewport-aware HUD layout contract with aligned lower rail,
+      telemetry/comms rhythm, and DPR-stable safe-area spacing
+- [x] Last Light sparse deterministic ambient mission bed layered through the
+      engine sequencer so combat and radio cues retain foreground priority
+- [x] Frame-faithful browser mouse/scroll injection, game-specific actions,
+      and live combat engagement observability at 1×/2× DPR
 - [x] Persistent three-branch campaign upgrade foundation
 - [x] Persistent Ivo and Sena specialist loadouts with mission effects
 - [x] Persistent Olan analysis and Mara command doctrines
@@ -124,10 +138,12 @@ A Voice in Conduit Twelve), `cargo run -p skirmish`
 
 - [x] Perspective camera conventions + projection contract (`3d` feature)
 - [x] Depth buffer + mesh pipeline
-- [ ] glTF mesh loader
+- [x] glTF mesh loader (GLB + embedded buffers, node transforms, PBR materials)
 - [x] PBR materials (base color, metal, roughness)
 - [x] Directional light (no shadow map yet)
-- [ ] Sky / IBL (simple)
+- [x] Directional-light shadow maps (depth pass + PCF)
+- [x] Gradient sky background pass with sun disk + hemispheric ambient
+- [ ] Sky / IBL (image-based)
 
 **Exit criteria:** One glTF model lit and orbit-controlled, web + native.
 
@@ -138,10 +154,12 @@ single-light PBR, depth-tested against `feature = "3d"`).
 
 ## Milestone 5 — Engine productization
 
-- [ ] Scene graph or lightweight ECS (`hecs` / custom)
-- [ ] Hot reload shaders (native)
-- [ ] Feature-gated modules (`2d`, `3d`, `audio`)
-- [ ] Size budget for WASM (strip, LTO, asset streaming)
+- [ ] Scene graph or lightweight ECS (`hecs` re-export shipped behind the
+      `ecs` feature; deeper integration open)
+- [x] Hot reload shaders (native; `Renderer::reload_shaders` + WGSL override
+      directory, validation-safe with per-pipeline rollback)
+- [ ] Feature-gated modules (`3d` and `ecs` gated today; audio/2d split open)
+- [x] Size budgets for Last Light and Platformer WASM plus source PNG payloads
 - [ ] CI: `cargo check` native + `wasm32`, clippy, fmt
 - [ ] Published crates.io version `0.2`
 
@@ -179,6 +197,100 @@ aurora-engine/
 ```
 
 **Platform split:** `cfg(target_arch = "wasm32")` for logging, async device init, and canvas binding only. Rendering stays one pipeline.
+
+---
+
+## Milestone 7 — Platformer & action foundation ✅
+
+- [x] Swept kinematic physics (`physics2d`): two-pass axis resolution, one-way
+  ledges with crossing rule, game-owned moving platforms with rider carry,
+  tilemap solids, tunnel-proof at any speed
+- [x] Character controller: coyote time, jump buffering, variable jump
+  height (release cut), apex hang, wall slide cap, wall jumps with steering
+  lock
+- [x] Gameplay probes: `ground_probe`, `raycast_any` with surface normals
+- [x] Camera rig look-ahead with velocity lead and decay-to-center
+- [x] `platformer` demo proving the full pack (crystals, ferry, wall-jump shaft)
+
+**Exit criteria:** a second genre ships from the shared engine without touching
+RTS code. ✅
+**Test:** `cargo run -p platformer`
+
+---
+
+## Milestone 8 — Juice & structure kit ✅
+
+- [x] 15 easing curves with anchored endpoints and documented overshooters
+- [x] Copy-cheap `Tween<f32/Vec2/Color>` with delay/ease/Once/Repeat/PingPong,
+  plus a tagged `TweenRunner` that prunes finished effects
+- [x] Deterministic `Scheduler` (`after` / `every` / cancel) firing in
+  deadline-then-id order for replay parity
+- [x] `HitStop` time-freeze with stacking cap and surplus release
+- [x] Seamless `parallax_offset` for wrapping background bands
+- [x] Flat-table `StateMachine<S, E>` with bounded trace and rejected unknown
+  events — platformer gate now drives its win banner through it
+
+**Exit criteria:** game feel is a library problem, not per-project glue. ✅
+**Test:** `cargo test -p aurora-engine -- juice fsm`
+
+---
+
+## Milestone 9 — Gamepad, data-driven levels, testable worlds ✅
+
+- [x] `PadButton` standard mapping across `gilrs` (native) and Web Gamepad
+  APIs; radial stick dead zone with rescale-from-zero; device precedence
+  keyboard > d-pad > stick in `Input::move_axis`
+- [x] `level` module: JSON `LevelDef`, validation errors naming the exact
+  offending index, compiled `Level` (solids/one-ways/deterministic sin-wave
+  movers/pickups/checkpoints/nav-grid bridge), authored solution routes and
+  per-level player tuning
+- [x] Platformer demo restructured into headless `GameCore`: window shell and
+  the CI waypoint bot drive identical simulation
+- [x] Playthrough harness: deterministic route-following bot completes the
+  shipped "Crystal Run" level 6/6 crystals — geometry bugs unreachable by
+  code review were found and fixed via this test alone
+- [x] Scene parent-follow (`attach`/`detach`/`propagate`) with generation
+  checks, cycle rejection, stale-link tolerance, multi-round settle tests
+
+**Exit criteria:** worlds are data; shipping a level means its playthrough
+test is green. ✅
+**Test:** `cargo test -p platformer playthrough -- --nocapture`
+
+### Still open (later)
+
+- [x] Rumble/haptics through the pad surface (gilrs force feedback native,
+      `vibrationActuator` dual-rumble on web; `Input::rumble` surface)
+- [x] Multiple shipped levels + level-select flow sharing the bot harness
+      (three levels: Crystal Run, Conduit Climb, Windlift — all bot-verified)
+- [x] Level format tooling: hot-reload watch mode (`devtools::FileWatcher`
+      + platformer integration)
+- [x] Renderer-agnostic level authoring preview contract (`level_editor`):
+      transactional edits, validation-gated compiled previews, bounded
+      undo/redo, JSON export, and deterministic selection bounds
+- [x] Checkpoint respawns wired into gameplay (`active_checkpoint` chain)
+- [x] Platformer intent recorder + replay state-hash verification
+- [ ] Full in-engine visual editor preview for level authoring
+
+### Engine additions (v0.4 build-out)
+
+- [x] Vector font text rendering: `font` module (ab_glyph rasterized atlas,
+      layout with alignment/wrap/kerning, sprite bridge)
+- [x] File audio playback: `Audio::play_music` / `play_sfx_file` via rodio
+      with mixer-aware volume plumbing (native; beeps remain the web path)
+- [x] Gamepad rumble: `Input::rumble`/`rumble_first` queue + gilrs effects
+      and Web Gamepad haptics application in the app shell
+- [x] glTF 2.0 loader (`gltf` module, `3d` feature) + mesh demo consumer
+- [x] Shadow maps + gradient sky (`3d` feature)
+- [x] Film grain post effect (`PostFxSettings::film_grain`)
+- [x] `hecs` re-export behind the `ecs` feature
+- [x] Platformer WASM/Trunk scaffold (`demos/platformer`)
+- [x] Agent runtime control plane: loopback JSON-lines TCP server
+      (`AURORA_AGENT_PORT`) + web JS bridge (`window.auroraInjectKey` /
+      `auroraInjectPad` / `auroraState`), game hooks (`Game::agent_state`,
+      `Game::on_agent_command`), level-validation CLI
+      (`platformer --bin level-check`), and three MCP control tools
+      (`aurora_playtest_platformer`, `aurora_validate_level`,
+      `aurora_agent_control`) with a Playwright browser-agent spec
 
 ---
 

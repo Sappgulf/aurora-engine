@@ -48,7 +48,7 @@ const LATE_RAID_RELAY_DAMAGE_STEP: f32 = 2.0;
 /// enough for the player to read the comms line and drag the frontline back to
 /// the threatened relay, while still making the warning actionable.
 pub const RAID_WARNING_WINDOW: f32 = 8.0;
-const ATTACK_TELEGRAPH_INTERVAL: f32 = 0.36;
+const ATTACK_TELEGRAPH_MIN_INTERVAL: f32 = 0.36;
 const ENEMY_RETREAT_HEALTH_FRACTION: f32 = 0.35;
 /// Command Surge is an anchor button, not only a burst-DPS toggle. The
 /// defensive half creates a short window for Wardens to hold a relay while
@@ -239,6 +239,13 @@ pub enum SimulationEventKind {
     AttackLanded {
         attacker: u32,
         target: u32,
+    },
+    /// Published once when a one-shot area-denial unit triggers, before the
+    /// unit is destroyed, so presentation can anchor VFX and haptics to the
+    /// authoritative detonation position.
+    UnitDetonated {
+        unit_id: u32,
+        kind: UnitKind,
     },
     /// Emitted when an attacker gains a target, including attack-move target
     /// acquisition. A HUD can keep a bracket on the target until `TargetLost`.
@@ -647,7 +654,7 @@ impl MissionSimulation {
         let profile = kind.combat();
         EngineCombatProfile::new(
             damage.max(0.0),
-            0.0,
+            profile.attack_period,
             profile.range,
             profile.damage_type,
             profile.armor_class,
@@ -655,10 +662,23 @@ impl MissionSimulation {
         .with_armor((profile.armor * 0.03).clamp(0.0, 0.5))
     }
 
-    fn engine_profile_for_unit(&self, id: UnitId, dt: f32) -> Option<EngineCombatProfile> {
+    /// Return the full fire interval and its readable charge window. Keeping
+    /// this beside the combat bridge makes target acquisition and recurring
+    /// telegraphs share one cadence instead of slowly drifting apart.
+    fn attack_timing(kind: UnitKind) -> (f32, f32) {
+        let interval = kind
+            .combat()
+            .attack_period
+            .max(ATTACK_TELEGRAPH_MIN_INTERVAL);
+        let windup = (interval * 0.28).clamp(0.12, 0.22);
+        (interval, windup)
+    }
+
+    fn engine_profile_for_unit(&self, id: UnitId) -> Option<EngineCombatProfile> {
         let unit = self.world.unit(id)?;
         let kind = self.kinds.get(&id).copied()?;
-        let mut damage = kind.combat().damage_per_second * dt.max(0.0);
+        let combat = kind.combat();
+        let mut damage = combat.damage_per_second * combat.attack_period;
         if unit.faction == PLAYER {
             damage *= self.modifiers.player_damage_scale;
             if self.command_surge_remaining(id) > 0.0 {
@@ -697,8 +717,9 @@ impl MissionSimulation {
             // drives the world directly (for example a headless playtest).
             // `update_combat` refreshes the pulse damage for variable-dt
             // callers before invoking the resolver.
+            let combat = kind.combat();
             unit.combat =
-                Self::engine_profile(kind, kind.combat().damage_per_second * self.fixed_dt);
+                Self::engine_profile(kind, combat.damage_per_second * combat.attack_period);
             // Keep movement and combat on the same authored contract: an
             // explicit Attack order stops just inside the profile's range so
             // the squad forms a readable firing line instead of overlapping
@@ -1191,11 +1212,19 @@ impl MissionSimulation {
     /// selected Engineer's nearby interaction while the fixed-step contract
     /// keeps progressing after the player switches to a Warden or Surveyor.
     pub fn engineer_near(&self, position: Vec2) -> bool {
+        // Worst-case stand-off while working a structure: the footprint
+        // circumradius (an Engineer can wedge against a footprint corner),
+        // plus one nav cell of approach and snapping slack, with the strict
+        // comparison absorbing float error. Keeps relay activation reachable
+        // for every grid alignment now that structure footprints block
+        // movement.
+        const RELAY_WORK_RANGE: f32 =
+            StructureKind::RELAY_RADIUS * std::f32::consts::SQRT_2 + NAV_CELL_SIZE;
         self.world.units().iter().any(|unit| {
             unit.faction == PLAYER
                 && unit.alive()
                 && self.kinds.get(&unit.id) == Some(&UnitKind::Engineer)
-                && unit.position.distance(position) < 110.0
+                && unit.position.distance(position) < RELAY_WORK_RANGE
         })
     }
 
@@ -1708,8 +1737,9 @@ impl MissionSimulation {
         for preview in engine_world.units_mut() {
             preview.order = UnitOrder::Idle;
             if let Some(kind) = self.kinds.get(&preview.id).copied() {
+                let combat = kind.combat();
                 preview.combat =
-                    Self::engine_profile(kind, kind.combat().damage_per_second * dt.max(0.0));
+                    Self::engine_profile(kind, combat.damage_per_second * combat.attack_period);
             }
         }
         for unit in self.world.units() {
@@ -1717,6 +1747,27 @@ impl MissionSimulation {
                 self.combat_target_updates.push((unit.id, None));
                 continue;
             }
+            let proximity_target = self
+                .kinds
+                .get(&unit.id)
+                .and_then(|kind| kind.detonation())
+                .and_then(|detonation| {
+                    self.world
+                        .units()
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.faction != unit.faction
+                                && candidate.alive()
+                                && unit.position.distance(candidate.position) <= detonation.radius
+                        })
+                        .min_by(|left, right| {
+                            unit.position
+                                .distance(left.position)
+                                .total_cmp(&unit.position.distance(right.position))
+                                .then_with(|| left.id.0.cmp(&right.id.0))
+                        })
+                        .map(|candidate| candidate.id)
+                });
             let target = match unit.order {
                 UnitOrder::Attack(target) => Some(target),
                 UnitOrder::AttackMove(_) => self
@@ -1759,7 +1810,10 @@ impl MissionSimulation {
                         })
                         .map(|candidate| candidate.id)
                 }
-                _ => None,
+                // A Bell Mine is an area-denial unit, not a normal idle
+                // attacker. It must arm from proximity alone so a player
+                // cannot walk through an uncommanded trap safely.
+                _ => proximity_target,
             };
             let target = target.filter(|target| {
                 self.combat_snapshot
@@ -1789,7 +1843,25 @@ impl MissionSimulation {
                 .find(|zone| zone.contains(unit.position))
                 .map(|zone| zone.elevation)
                 .unwrap_or(profile.elevation);
-            if unit.position.distance(target_position) < profile.range {
+            // Reach band: weapon range plus half the victim's footprint.
+            // Motion pushes can settle an attacker slightly beyond the exact
+            // center-to-center firing line against large targets (bosses,
+            // structures), and demanding the ideal stand-off there deadlocks
+            // the duel — the mover keeps re-driving into the push while the
+            // resolver refuses to fire.
+            let target_footprint = self
+                .world
+                .unit(target)
+                .map(|candidate| candidate.radius.max(0.0))
+                .unwrap_or(0.0);
+            let weapon_reach = profile.range + target_footprint * 0.5;
+            let target_distance = unit.position.distance(target_position);
+            let inside_detonation_radius = self
+                .kinds
+                .get(&unit.id)
+                .and_then(|kind| kind.detonation())
+                .is_some_and(|detonation| target_distance <= detonation.radius);
+            if target_distance < weapon_reach || inside_detonation_radius {
                 self.combat_telegraph_candidates.push((unit.id, target));
                 if let Some(detonation) =
                     self.kinds.get(&unit.id).and_then(|kind| kind.detonation())
@@ -1837,14 +1909,16 @@ impl MissionSimulation {
                             };
                         self.combat_attacks.push((unit.id, candidate.id, amount));
                     }
-                } else {
-                    if let (Some(preview), Some(engine_profile)) = (
-                        engine_world.unit_mut(unit.id),
-                        self.engine_profile_for_unit(unit.id, dt),
-                    ) {
-                        preview.combat = engine_profile;
-                        preview.order = UnitOrder::Attack(target);
-                    }
+                } else if let (Some(preview), Some(mut engine_profile)) = (
+                    engine_world.unit_mut(unit.id),
+                    self.engine_profile_for_unit(unit.id),
+                ) {
+                    // Mirror the reach band into the engine seam so the
+                    // resolver accepts attacks from the same displaced
+                    // stand-offs the sim-level gate just approved.
+                    engine_profile.range += target_footprint * 0.5;
+                    preview.combat = engine_profile;
+                    preview.order = UnitOrder::Attack(target);
                 }
             }
         }
@@ -1861,7 +1935,14 @@ impl MissionSimulation {
                         attacker: attacker.0,
                         target: target.0,
                     });
-                    self.attack_telegraph_timers.insert(attacker, 0.0);
+                    let kind = self
+                        .kinds
+                        .get(&attacker)
+                        .copied()
+                        .unwrap_or(UnitKind::Needle);
+                    let (interval, windup) = Self::attack_timing(kind);
+                    self.attack_telegraph_timers
+                        .insert(attacker, (interval - windup).max(0.0));
                 }
                 self.combat_targets.insert(attacker, target);
             } else {
@@ -1876,15 +1957,22 @@ impl MissionSimulation {
         }
         self.combat_target_updates = target_updates;
 
-        // Attack resolution is continuous DPS, but the HUD receives a coarse
-        // wind-up pulse so shots/readability are not tied to 60Hz event spam.
+        // Telegraphs follow each weapon's authored cadence. This lets a fast
+        // Needle and a heavy Canticle read differently while preserving one
+        // deterministic event path for native and browser presentation.
         let mut telegraph_candidates = std::mem::take(&mut self.combat_telegraph_candidates);
         for (attacker, target) in telegraph_candidates.drain(..) {
+            let kind = self
+                .kinds
+                .get(&attacker)
+                .copied()
+                .unwrap_or(UnitKind::Needle);
+            let (interval, windup_seconds) = Self::attack_timing(kind);
             let should_telegraph = {
                 let timer = self.attack_telegraph_timers.entry(attacker).or_insert(0.0);
                 *timer -= dt.max(0.0);
                 if *timer <= 0.0 {
-                    *timer = ATTACK_TELEGRAPH_INTERVAL;
+                    *timer = interval;
                     true
                 } else {
                     false
@@ -1894,7 +1982,7 @@ impl MissionSimulation {
                 self.record(SimulationEventKind::AttackTelegraph {
                     attacker: attacker.0,
                     target: target.0,
-                    windup_seconds: 0.12,
+                    windup_seconds,
                 });
             }
         }
@@ -1917,6 +2005,11 @@ impl MissionSimulation {
 
         let mut detonations = std::mem::take(&mut self.combat_detonations);
         for mine in detonations.drain(..) {
+            let kind = self.kinds[&mine];
+            self.record(SimulationEventKind::UnitDetonated {
+                unit_id: mine.0,
+                kind,
+            });
             let destroyed = if let Some(unit) = self.world.unit_mut(mine) {
                 let was_alive = unit.alive();
                 unit.health = 0.0;
@@ -1925,7 +2018,6 @@ impl MissionSimulation {
                 false
             };
             if destroyed {
-                let kind = self.kinds[&mine];
                 self.release_supply_and_record(mine);
                 *self.destroyed_by_kind.entry(kind).or_insert(0) += 1;
                 self.record(SimulationEventKind::UnitDestroyed {
@@ -3283,6 +3375,64 @@ mod tests {
     }
 
     #[test]
+    fn authored_weapon_period_prevents_fixed_step_hit_spam() {
+        let mission = crate::missions::reclaim_the_reactor();
+        let mut simulation =
+            MissionSimulation::from_mission(&mission, SimulationModifiers::default());
+        let warden = simulation
+            .kinds
+            .iter()
+            .find_map(|(id, kind)| (*kind == UnitKind::Warden).then_some(*id))
+            .expect("mission includes a Warden");
+        let origin = Vec2::new(-1_500.0, 850.0);
+        simulation.world.unit_mut(warden).unwrap().position = origin;
+        simulation.world.unit_mut(warden).unwrap().speed = 0.0;
+        let needle = simulation.spawn(
+            UnitKind::Needle,
+            CHOIR,
+            origin + Vec2::X * 100.0,
+            200.0,
+            0.0,
+            SimulationModifiers::default(),
+        );
+        simulation.world.unit_mut(warden).unwrap().order = UnitOrder::Attack(needle);
+
+        let landed = |simulation: &MissionSimulation| {
+            simulation
+                .events()
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.kind,
+                        SimulationEventKind::AttackLanded { attacker, target }
+                            if attacker == warden.0 && target == needle.0
+                    )
+                })
+                .count()
+        };
+
+        simulation.fixed_step_with_dt(0.01);
+        assert_eq!(
+            landed(&simulation),
+            1,
+            "the opening pulse fires immediately"
+        );
+        simulation.fixed_step_with_dt(0.20);
+        simulation.fixed_step_with_dt(0.28);
+        assert_eq!(
+            landed(&simulation),
+            1,
+            "cooldown suppresses fixed-step spam"
+        );
+        simulation.fixed_step_with_dt(0.03);
+        assert_eq!(
+            landed(&simulation),
+            2,
+            "the next authored pulse fires on cadence"
+        );
+    }
+
+    #[test]
     fn hold_position_guards_in_weapon_range_without_chasing() {
         let mission = crate::missions::reclaim_the_reactor();
         let mut simulation =
@@ -3436,6 +3586,46 @@ mod tests {
     }
 
     #[test]
+    fn terms_ridge_warden_can_close_and_fire_on_first_needle() {
+        let mission = crate::missions::terms_of_salvage();
+        let mut simulation =
+            MissionSimulation::from_mission(&mission, SimulationModifiers::default());
+        let objective = mission
+            .terrain_control_objective
+            .expect("Terms authors a ridge control objective");
+        let warden = simulation
+            .kinds
+            .iter()
+            .find_map(|(id, kind)| (*kind == UnitKind::Warden).then_some(*id))
+            .expect("Terms includes a Warden");
+        let needle = simulation
+            .world
+            .units()
+            .iter()
+            .find(|unit| simulation.kinds.get(&unit.id) == Some(&UnitKind::Needle))
+            .map(|unit| unit.id)
+            .expect("Terms includes a Needle");
+        simulation.world.unit_mut(warden).unwrap().position = objective.target;
+        simulation.world.select_ids(&[warden], PLAYER, false);
+        assert!(simulation.issue_attack_kind(UnitKind::Needle));
+        let health_before = simulation.world.unit(needle).unwrap().health;
+
+        for _ in 0..12 * 60 {
+            simulation.fixed_step_with_dt(1.0 / 60.0);
+        }
+
+        let attacker = simulation.world.unit(warden).unwrap();
+        let target = simulation.world.unit(needle).unwrap();
+        assert!(
+            target.health < health_before,
+            "Warden never fired: separation {:.2}, authored reach {:.2}, order {:?}",
+            attacker.position.distance(target.position),
+            UnitKind::Warden.combat().range + target.radius * 0.5,
+            attacker.order,
+        );
+    }
+
+    #[test]
     fn bell_mine_detonates_once_and_hits_a_clumped_squad() {
         let mission = crate::missions::reclaim_the_reactor();
         let mut simulation =
@@ -3461,7 +3651,9 @@ mod tests {
             80.0,
             SimulationModifiers::default(),
         );
-        simulation.world.unit_mut(mine).unwrap().order = UnitOrder::Attack(warden);
+        // The mine starts idle on purpose. Proximity acquisition is the trap's
+        // authored gameplay contract; it should not depend on enemy AI having
+        // already assigned an explicit Attack order.
         let warden_before = simulation.world.unit(warden).unwrap().health;
         let engineer_before = simulation.world.unit(engineer).unwrap().health;
 
@@ -3470,6 +3662,13 @@ mod tests {
         assert_eq!(simulation.world.unit(mine).unwrap().health, 0.0);
         assert!(simulation.world.unit(warden).unwrap().health < warden_before);
         assert!(simulation.world.unit(engineer).unwrap().health < engineer_before);
+        assert!(simulation.events().iter().any(|event| matches!(
+            event.kind,
+            SimulationEventKind::UnitDetonated {
+                unit_id,
+                kind: UnitKind::BellMine
+            } if unit_id == mine.0
+        )));
         assert!(simulation.events().iter().any(|event| matches!(
             event.kind,
             SimulationEventKind::UnitDestroyed {

@@ -1,9 +1,17 @@
 struct Scene {
     view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
+    light_view_proj: mat4x4<f32>,
     camera_pos: vec4<f32>,
     light_dir: vec4<f32>,
     // rgb = color, a = intensity
     light_color: vec4<f32>,
+    // rgb = zenith color, a = sun intensity
+    sky_zenith: vec4<f32>,
+    // rgb = horizon color
+    sky_horizon: vec4<f32>,
+    // x = shadows enabled, y = depth bias, z = shadow texel size
+    shadow_params: vec4<f32>,
 }
 
 @group(0) @binding(0)
@@ -19,6 +27,12 @@ struct Object {
 
 @group(1) @binding(0)
 var<uniform> object: Object;
+
+@group(2) @binding(0)
+var shadow_map: texture_depth_2d;
+
+@group(2) @binding(1)
+var shadow_sampler_cmp: sampler_comparison;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -67,6 +81,33 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
+fn shadow_factor(world_pos: vec3<f32>, n_dot_l: f32) -> f32 {
+    if (scene.shadow_params.x < 0.5) {
+        return 1.0;
+    }
+    let clip = scene.light_view_proj * vec4<f32>(world_pos, 1.0);
+    let proj = clip.xyz / clip.w;
+    if (abs(proj.x) > 1.0 || abs(proj.y) > 1.0 || proj.z < 0.0 || proj.z > 1.0) {
+        return 1.0;
+    }
+    let uv = proj.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+    let bias = max(scene.shadow_params.y * (1.0 - n_dot_l), scene.shadow_params.y * 0.25);
+    let depth_ref = proj.z - bias;
+    var light = 0.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let offset = vec2<f32>(f32(dx), f32(dy)) * scene.shadow_params.z;
+            light += textureSampleCompareLevel(
+                shadow_map,
+                shadow_sampler_cmp,
+                uv + offset,
+                depth_ref
+            );
+        }
+    }
+    return light / 9.0;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let n = normalize(in.world_normal);
@@ -96,10 +137,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let diffuse = k_d * base_color / PI;
 
     let radiance = scene.light_color.rgb * scene.light_color.a;
-    var color = (diffuse + specular) * radiance * n_dot_l;
+    let shadow = shadow_factor(in.world_pos, n_dot_l);
+    var color = (diffuse + specular) * radiance * n_dot_l * shadow;
 
-    // Small flat ambient term so unlit faces read as dim, not pure black.
-    color += base_color * 0.03;
+    // Hemispheric ambient from the sky gradient so unlit faces read as dim,
+    // not pure black.
+    let up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+    color += mix(scene.sky_horizon.rgb, scene.sky_zenith.rgb, up) * base_color * 0.22;
     color += object.emissive.rgb;
 
     return vec4<f32>(color, object.base_color.a);

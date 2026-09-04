@@ -163,70 +163,86 @@ fn parse_edge(value: &str) -> Option<bool> {
 }
 
 fn parse_mouse_button(value: &str) -> Option<MouseButton> {
-    match value {
-        "Left" => Some(MouseButton::Left),
-        "Right" => Some(MouseButton::Right),
-        "Middle" => Some(MouseButton::Middle),
-        _ => None,
+    crate::agent::parse_mouse_button(value)
+}
+
+/// Polls a file's modification time so games can hot-reload data (levels,
+/// tuning, shaders) while running. Deliberately dependency-free: a stat per
+/// poll is plenty for authoring loops and works everywhere std does.
+#[derive(Debug, Clone)]
+pub struct FileWatcher {
+    path: PathBuf,
+    last_modified: Option<std::time::SystemTime>,
+}
+
+impl FileWatcher {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let last_modified = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        Self {
+            path,
+            last_modified,
+        }
+    }
+
+    /// Returns `Some(new_mtime)` exactly once per detected change, then
+    /// rebaselines. A missing file reports as "changed" only after having
+    /// existed (deletions notify so callers can keep the last good data).
+    pub fn poll(&mut self) -> Option<std::time::SystemTime> {
+        let current = std::fs::metadata(&self.path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        if current != self.last_modified {
+            let changed = current;
+            self.last_modified = current;
+            return changed;
+        }
+        None
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+
+    #[test]
+    fn watcher_reports_changes_once_then_rebaselines() {
+        let path = std::env::temp_dir().join(format!(
+            "aurora-watch-test-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::write(&path, b"v1").expect("write fixture");
+
+        let mut watcher = FileWatcher::new(&path);
+        assert!(watcher.poll().is_none(), "unchanged file reports nothing");
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, b"v2-with-different-length").expect("rewrite fixture");
+        assert!(watcher.poll().is_some(), "rewrite reports a change");
+        assert!(watcher.poll().is_none(), "change fires exactly once");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn missing_files_are_tolerated() {
+        let mut watcher = FileWatcher::new("/nonexistent/aurora/watch/target.json");
+        assert!(watcher.poll().is_none());
     }
 }
 
 fn parse_key_code(name: &str) -> Option<KeyCode> {
-    use KeyCode::*;
-    Some(match name {
-        "Space" => Space,
-        "Enter" => Enter,
-        "Escape" => Escape,
-        "Tab" => Tab,
-        "Backspace" => Backspace,
-        "ArrowUp" => ArrowUp,
-        "ArrowDown" => ArrowDown,
-        "ArrowLeft" => ArrowLeft,
-        "ArrowRight" => ArrowRight,
-        "ShiftLeft" => ShiftLeft,
-        "ShiftRight" => ShiftRight,
-        "ControlLeft" => ControlLeft,
-        "ControlRight" => ControlRight,
-        "SuperLeft" => SuperLeft,
-        "SuperRight" => SuperRight,
-        "Digit0" => Digit0,
-        "Digit1" => Digit1,
-        "Digit2" => Digit2,
-        "Digit3" => Digit3,
-        "Digit4" => Digit4,
-        "Digit5" => Digit5,
-        "Digit6" => Digit6,
-        "Digit7" => Digit7,
-        "Digit8" => Digit8,
-        "Digit9" => Digit9,
-        "KeyA" => KeyA,
-        "KeyB" => KeyB,
-        "KeyC" => KeyC,
-        "KeyD" => KeyD,
-        "KeyE" => KeyE,
-        "KeyF" => KeyF,
-        "KeyG" => KeyG,
-        "KeyH" => KeyH,
-        "KeyI" => KeyI,
-        "KeyJ" => KeyJ,
-        "KeyK" => KeyK,
-        "KeyL" => KeyL,
-        "KeyM" => KeyM,
-        "KeyN" => KeyN,
-        "KeyO" => KeyO,
-        "KeyP" => KeyP,
-        "KeyQ" => KeyQ,
-        "KeyR" => KeyR,
-        "KeyS" => KeyS,
-        "KeyT" => KeyT,
-        "KeyU" => KeyU,
-        "KeyV" => KeyV,
-        "KeyW" => KeyW,
-        "KeyX" => KeyX,
-        "KeyY" => KeyY,
-        "KeyZ" => KeyZ,
-        _ => return None,
-    })
+    crate::agent::parse_key_code(name)
 }
 
 #[cfg(test)]

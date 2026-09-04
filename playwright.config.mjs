@@ -25,12 +25,26 @@ export default defineConfig({
   },
   projects: [
     { name: "chromium-dpr-1", use: { deviceScaleFactor: 1 } },
-    { name: "chromium-dpr-2", use: { deviceScaleFactor: 2 } },
+    {
+      name: "chromium-dpr-2",
+      use: { deviceScaleFactor: 2 },
+      testIgnore: "**/agent-control.spec.mjs",
+    },
   ],
-  webServer: {
-    command: "python3 -m http.server 8080 --bind 127.0.0.1 --directory games/last-light/dist",
-    url: "http://127.0.0.1:8080",
-    reuseExistingServer: !process.env.CI,
-    timeout: 30_000,
-  },
+  webServer: [
+    {
+      command:
+        "python3 -m http.server 8080 --bind 127.0.0.1 --directory games/last-light/dist",
+      url: "http://127.0.0.1:8080",
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+    },
+    {
+      command:
+        "python3 -m http.server 8082 --bind 127.0.0.1 --directory demos/platformer/dist",
+      url: "http://127.0.0.1:8082",
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+    },
+  ],
 });

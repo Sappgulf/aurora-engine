@@ -5,7 +5,6 @@ use std::time::Duration;
 /// Tracks wall-clock time, delta, and fixed-step accumulator.
 #[derive(Debug, Clone)]
 pub struct Time {
-    start: InstantCompat,
     last: InstantCompat,
     /// Seconds since the engine started.
     pub elapsed: f32,
@@ -42,7 +41,6 @@ impl Time {
     pub fn new() -> Self {
         let now = InstantCompat::now();
         Self {
-            start: now,
             last: now,
             elapsed: 0.0,
             delta: 0.0,
@@ -97,7 +95,8 @@ impl Time {
         if self.accumulator >= self.fixed_dt {
             self.accumulator -= self.fixed_dt;
             self.alpha = self.accumulator / self.fixed_dt;
-            self.fixed_steps_executed_last_frame = self.fixed_steps_executed_last_frame.saturating_add(1);
+            self.fixed_steps_executed_last_frame =
+                self.fixed_steps_executed_last_frame.saturating_add(1);
             true
         } else {
             self.alpha = self.accumulator / self.fixed_dt;
