@@ -615,17 +615,22 @@ impl<G: Game> EngineApp<G> {
         }
     }
 
-    /// Plays one dual-rumble request on a browser pad through its
-    /// `vibrationActuator`, silently ignoring pads without one.
+    /// Plays one haptic request on a browser pad via `hapticActuators`,
+    /// silently ignoring pads without one.
     #[cfg(target_arch = "wasm32")]
     fn play_web_rumble(pad: &web_sys::Gamepad, request: &crate::input::RumbleRequest) {
-        let actuator = pad.vibration_actuator();
-        let params = web_sys::GamepadEffectParameters::new();
-        params.set_duration((request.duration * 1000.0) as u32);
-        params.set_strong_magnitude(request.low as f64);
-        params.set_weak_magnitude(request.high as f64);
-        let _ =
-            actuator.play_effect_with_params(web_sys::GamepadHapticEffectType::DualRumble, &params);
+        use wasm_bindgen::JsCast;
+
+        let actuators = pad.haptic_actuators();
+        if actuators.length() == 0 {
+            return;
+        }
+
+        let Ok(actuator) = actuators.get(0).dyn_into::<web_sys::GamepadHapticActuator>() else {
+            return;
+        };
+        let intensity = ((request.low + request.high) * 0.5).min(1.0) as f64;
+        let _ = actuator.pulse(intensity, (request.duration * 1000.0) as f64);
     }
 
     fn start_renderer(&mut self, window: Arc<Window>) {
