@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "cleanUrls": true,
+  "builds": [
+    {
+      "src": "games/last-light/dist/**",
+      "use": "@vercel/static"
+    },
+    {
+      "src": "demos/platformer/dist/**",
+      "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "^/platformer/?$",
+      "dest": "/demos/platformer/dist/index.html"
+    },
+    {
+      "src": "^/platformer/(.*)$",
+      "dest": "/demos/platformer/dist/$1"
+    },
+    {
+      "src": "^/(.*)$",
+      "dest": "/games/last-light/dist/$1"
+    }
+  ]
+}

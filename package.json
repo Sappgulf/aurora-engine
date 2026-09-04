@@ -2,10 +2,11 @@
   "name": "aurora-engine-playtests",
   "private": true,
   "scripts": {
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "deploy:vercel": "./scripts/deploy-vercel.sh"
   },
   "devDependencies": {
-    "@playwright/test": "1.61.1",
+    "@playwright/test": "1.62.1",
     "pngjs": "7.0.0"
   }
 }
