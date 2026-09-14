@@ -675,7 +675,7 @@ impl TextureAsset {
             Self::ReactorSectorGarden => "reactor-sector-garden-v003.png",
             Self::ReactorSectorChoir => "reactor-sector-choir-v001.png",
             Self::ReactorSectorVesper => "reactor-sector-vesper-v003.png",
-            Self::ReactorSectorHollow => "reactor-sector-hollow-v001.png",
+            Self::ReactorSectorHollow => "reactor-sector-hollow-v002.png",
             Self::Units => "last-light-units-atlas-v001.png",
             Self::WardenMove => "warden-move-strip-v001.png",
             Self::WardenAttack => "warden-attack-strip-v001.png",
@@ -712,7 +712,7 @@ impl TextureAsset {
             Self::ReactorSectorGarden => include_bytes!("../assets/reactor-sector-garden-v003.png"),
             Self::ReactorSectorChoir => include_bytes!("../assets/reactor-sector-choir-v001.png"),
             Self::ReactorSectorVesper => include_bytes!("../assets/reactor-sector-vesper-v003.png"),
-            Self::ReactorSectorHollow => include_bytes!("../assets/reactor-sector-hollow-v001.png"),
+            Self::ReactorSectorHollow => include_bytes!("../assets/reactor-sector-hollow-v002.png"),
             Self::Units => include_bytes!("../assets/last-light-units-atlas-v001.png"),
             Self::WardenMove => include_bytes!("../assets/warden-move-strip-v001.png"),
             Self::WardenAttack => include_bytes!("../assets/warden-attack-strip-v001.png"),
@@ -855,6 +855,12 @@ mod tests {
                 "large environment plates must use indexed color"
             );
         }
+
+        let hollow = TextureAsset::ReactorSectorHollow;
+        assert_eq!(hollow.path(), "reactor-sector-hollow-v002.png");
+        assert_eq!(hollow.spec().role, TextureRole::EnvironmentPlate);
+        assert_eq!(hollow.spec().pixel_size, (1672, 941));
+        assert_eq!(png_color_type(hollow.bytes_for_validation()), Some(2));
 
         let engineer_build = TextureAsset::EngineerBuild;
         assert_eq!(engineer_build.path(), "engineer-build-strip-v002.png");

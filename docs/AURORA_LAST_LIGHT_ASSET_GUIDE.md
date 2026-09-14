@@ -165,6 +165,7 @@ unrelated images.
 | `specialist-module-atlas-v001.png` | 1024×512 | 4×2 | Mara, Ivo, Sena, and Olan loadout icons (base and alternate modules) |
 | `building-command-atlas-v001.png` | 768×512 | 3×2 | Compact relay, reactor, fabricator, resource, beacon, and repair command-card icons |
 | `reactor-sector-v001.png` | 1672×941 | 1×1 | Authored mission floor plate |
+| `reactor-sector-hollow-v002.png` | 1672×941 | 1×1 | ImageGen-upgraded Hollow Orbit floor plate and launcher cover source |
 | `portraits/lantern-command-portrait-sheet-v001.png` | 768×512 | 3×2 | Mara, Ivo, Sena, Olan, Vale, and Lumen comms portraits |
 
 `games/last-light/src/assets.rs` is the executable catalog for this table. Its
@@ -340,15 +341,17 @@ Stable engine manifest keys use dots, independent of filenames:
 
 ## App cover art
 
-Final app cover is stored under:
+The current launcher and mission-select cover reuse the high-resolution Hollow
+Orbit plate so the first screen and the playable environment share one authored
+visual language:
 
-- `games/last-light/assets/cover/aurora-last-light-cover-v001.png`
-- Source/pre-render asset: `tools/asset-sources/last-light/cover/aurora-last-light-cover-v001-source.png`
+- Runtime art: `games/last-light/assets/reactor-sector-hollow-v002.png`
+- ImageGen source: `tools/asset-sources/last-light/reactor-sector-hollow-v002-source.png`
 
-Current cover is a high-resolution in-game briefing frame converted to 16:9
-render size and used for storefront, launcher, and repository references. Treat
-it as marketing/UX-facing art rather than gameplay runtime content: do not add it
-to the in-game `TextureAsset` atlas registry.
+The older files under `games/last-light/assets/cover/` remain historical
+variants. Treat the cover as marketing/UX-facing art even though this build
+reuses the environment texture at runtime; do not add a second copy to the
+`TextureAsset` atlas registry.
 
 ## Generated-strip normalization recipe
 

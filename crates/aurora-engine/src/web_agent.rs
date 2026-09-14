@@ -23,10 +23,12 @@
 //! they land with identical semantics to real device input.
 
 use std::cell::RefCell;
+use std::sync::Arc;
 
 use serde_json::Value;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
+use winit::window::Window;
 
 use crate::agent::{
     parse_key_code, parse_mouse_button, parse_pad_button, parse_pad_stick, AgentCommand,
@@ -36,6 +38,7 @@ use crate::input::Input;
 thread_local! {
     static QUEUE: RefCell<Vec<AgentCommand>> = const { RefCell::new(Vec::new()) };
     static STATE: RefCell<Value> = const { RefCell::new(Value::Null) };
+    static WAKE: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
 }
 
 /// Called from the app loop before game logic: applies queued injections.
@@ -74,6 +77,24 @@ pub fn publish(state: Option<Value>) {
 
 fn queue_command(command: AgentCommand) {
     QUEUE.with(|queue| queue.borrow_mut().push(command));
+    WAKE.with(|wake| {
+        if let Some(wake) = wake.borrow().as_ref() {
+            wake();
+        }
+    });
+}
+
+/// Connects the browser agent bridge to the engine window so an injected
+/// command wakes an event loop that is throttling a static menu.
+pub fn set_wake(window: &Arc<Window>) {
+    let weak_window = Arc::downgrade(window);
+    WAKE.with(|wake| {
+        *wake.borrow_mut() = Some(Box::new(move || {
+            if let Some(window) = weak_window.upgrade() {
+                window.request_redraw();
+            }
+        }));
+    });
 }
 
 fn report_error(context: &str, error: &JsValue) {

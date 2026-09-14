@@ -24,6 +24,16 @@ async function capture(page, projectName, checkpoint, dpr) {
   return PNG.sync.read(png);
 }
 
+async function captureResponsive(page, projectName, checkpoint, dpr, viewport) {
+  const path = `${screenshotRoot}/${projectName}-${checkpoint}.png`;
+  await page.screenshot({ path });
+  const png = await readFile(path);
+  const image = PNG.sync.read(png);
+  expect(image.width).toBe(viewport.width * dpr);
+  expect(image.height).toBe(viewport.height * dpr);
+  return image;
+}
+
 // WebGPU can finish loading the WASM module before its first authored frame
 // reaches the canvas. Waiting on a visible pixel keeps screenshot assertions
 // deterministic on both DPR lanes without baking another arbitrary sleep into
@@ -206,9 +216,15 @@ async function callAgentGame(page, action, args = {}) {
 
 async function deploySelectedMission(page) {
   await page.keyboard.press("Enter");
-  await page.waitForTimeout(700);
+  await expect.poll(async () => (await readAuroraState(page)).screen, {
+    timeout: 20_000,
+    intervals: [100, 250, 500],
+  }).toBe("briefing");
   await page.keyboard.press("Space");
-  await page.waitForTimeout(900);
+  await expect.poll(async () => (await readAuroraState(page)).screen, {
+    timeout: 20_000,
+    intervals: [100, 250, 500],
+  }).toBe("tactical");
 }
 
 async function selectRosterUnit(page, portraitX) {
@@ -219,21 +235,53 @@ async function selectRosterUnit(page, portraitX) {
   await page.mouse.move(820, 410);
   await page.mouse.up();
   await page.waitForTimeout(250);
-  await page.mouse.click(portraitX, 590);
-  await page.waitForTimeout(250);
+  let lastError;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await page.mouse.click(portraitX, 625);
+    try {
+      await expect.poll(async () => (await readAuroraState(page)).selected, {
+        timeout: 1_200,
+        intervals: [100, 250],
+      }).toBe(1);
+      return;
+    } catch (error) {
+      lastError = error;
+      await page.waitForTimeout(200);
+    }
+  }
+  throw lastError ?? new Error("Roster chip did not select one unit");
 }
 
 async function selectRosterUnitViaAgent(page, portraitX) {
   await dragAgentMouse(page, { x: 400, y: 60 }, { x: 820, y: 410 });
-  await clickAgentMouse(page, portraitX, 590);
-  await page.waitForTimeout(250);
+  let lastError;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await clickAgentMouse(page, portraitX, 625);
+    try {
+      await expect.poll(async () => (await readAuroraState(page)).selected, {
+        timeout: 1_200,
+        intervals: [100, 250],
+      }).toBe(1);
+      return;
+    } catch (error) {
+      lastError = error;
+      await page.waitForTimeout(200);
+    }
+  }
+  throw lastError ?? new Error("Agent roster chip did not select one unit");
 }
 
 async function deployReclaim(page) {
   await page.keyboard.press("Enter");
-  await page.waitForTimeout(1_000);
+  await expect.poll(async () => (await readAuroraState(page)).screen, {
+    timeout: 20_000,
+    intervals: [100, 250, 500],
+  }).toBe("briefing");
   await page.keyboard.press("Enter");
-  await page.waitForTimeout(1_000);
+  await expect.poll(async () => (await readAuroraState(page)).screen, {
+    timeout: 20_000,
+    intervals: [100, 250, 500],
+  }).toBe("tactical");
 }
 
 test.beforeAll(async () => {
@@ -566,7 +614,7 @@ test("Terms ridge progress and attack-move telegraph stay visible", async ({ pag
   await expect.poll(() => page.title()).toBe("Aurora: Last Light");
   await waitForRenderedFrame(page);
   await deploySelectedMission(page);
-  await selectRosterUnitViaAgent(page, 442); // Mara / Warden portrait chip.
+  await selectRosterUnitViaAgent(page, 480); // Mara / Warden portrait chip.
   await page.keyboard.press("KeyR");
   await page.waitForTimeout(500);
   // Terms' Warden Hold objective focuses the ridge; the center click is the
@@ -581,7 +629,7 @@ test("Terms ridge progress and attack-move telegraph stay visible", async ({ pag
 
   // Reframe on the authored first Needle through the minimap, then use the
   // same attack-move command a player would use. Poll a short window because
-  // the player impact pulse is intentionally brief while the enemy telegraph
+  // the player impact pulse is intentionally brief while the hostile contact
   // remains readable for several frames.
   // Expanded world (-422, 384) maps to this fixed minimap point for the 3600x2200
   // tactical map; clicking the authored contact keeps the attack probe on the
@@ -623,7 +671,7 @@ test("Terms ridge progress and attack-move telegraph stay visible", async ({ pag
     // The authored enemy can sit on the right edge of the tactical lane,
     // immediately beside (but above) the command card. Keep the probe out of
     // the HUD while allowing that edge telegraph to be counted.
-    const telegraphLane = { x: 280, y: 210, width: 990, height: 300 };
+    const telegraphLane = { x: 280, y: 120, width: 930, height: 390 };
     peakMagenta = Math.max(peakMagenta, magentaPixels(image, telegraphLane, dpr));
   }
   expect(peakMagenta).toBeGreaterThan(24 * dpr * dpr);
@@ -655,18 +703,43 @@ test("Garden node contest publishes the red resource objective chip", async ({ p
   await expect.poll(() => page.title()).toBe("Aurora: Last Light");
   await waitForRenderedFrame(page);
   await deploySelectedMission(page);
-  await selectRosterUnit(page, 538); // Sena / Surveyor portrait chip.
+  await selectRosterUnit(page, 440); // Sena / Surveyor portrait chip.
+  await expect.poll(async () => (await readAuroraState(page)).selected_units?.[0]?.kind, {
+    timeout: 5_000,
+    intervals: [100, 250],
+  }).toBe("SURVEYOR");
 
-  // Garden node 2 is the authored contest pocket. The minimap coordinate is
-  // stable because it comes from the fixed MAP_SIZE/panel contract; clicking
-  // its center then assigns the selected Surveyor to the live resource node.
-  await page.mouse.click(130, 621);
+  // Garden node 2 is the authored contest pocket. This point is the node's
+  // screen-space location in the fixed 1280x720 minimap contract; clicking it
+  // recenters the camera, then the viewport-center click assigns the selected
+  // Surveyor to the live resource node.
+  await page.mouse.click(120, 630);
   await page.waitForTimeout(500);
   await page.mouse.click(640, 360);
-  await page.waitForTimeout(5_500);
+  // The fixed-step clock remains authoritative, so wait on its compact agent
+  // telemetry instead of repeatedly capturing expensive DPR-2 screenshots.
+  // The single capture below still proves that the red visual state rendered.
+  const contestPixels = 80 * dpr * dpr;
+  try {
+    await expect.poll(async () => (await readAuroraState(page)).resource_objective?.contested, {
+      // DPR2 SwiftShader can advance the fixed-step clock several times
+      // slower than wall time while the worker traverses the authored route.
+      // Keep the normal lane tight and give the software-rendered lane enough
+      // wall budget to reach the same deterministic contest state.
+      timeout: dpr > 1 ? 60_000 : 18_000,
+      intervals: [100, 250, 500],
+    }).toBe(true);
+  } catch (error) {
+    const state = await readAuroraState(page);
+    throw new Error(`${error.message}\nLast Light resource telemetry: ${JSON.stringify({
+      mission_time: state.mission_time,
+      selected_units: state.selected_units,
+      resource_objective: state.resource_objective,
+    })}`);
+  }
   const contested = await capture(page, testInfo.project.name, "garden-node-contested", dpr);
   expect(redHudPixels(contested, safeZones.hud_regions.objective, dpr))
-    .toBeGreaterThan(80 * dpr * dpr);
+    .toBeGreaterThan(contestPixels);
   // Garden's reactor beam pulses through this region. Sample one pulse window
   // so the assertion measures authored scene presence rather than one phase of
   // the animation; the red chip above still carries the objective-state check.
@@ -796,4 +869,51 @@ test("Mission eight opens the Hollow Orbit branch and three-role objective HUD",
     .toBeGreaterThan(400 * dpr * dpr);
   expect(brightPixels(deployed, safeZones.protected_playfield, dpr))
     .toBeGreaterThan(300 * dpr * dpr);
+});
+
+test.describe("compact browser layout", () => {
+  test.use({ viewport: { width: 615, height: 814 } });
+
+  test("keeps campaign surfaces readable through deployment", async ({ page }, testInfo) => {
+    const dpr = testInfo.project.use.deviceScaleFactor;
+    const viewport = { width: 615, height: 814 };
+    await page.goto("/");
+    await expect(page.locator("#aurora-canvas")).toBeVisible();
+    await waitForRenderedFrame(page);
+    await expect.poll(async () => (await readAuroraState(page)).screen).toBe("mission_select");
+
+    const missionSelect = await captureResponsive(
+      page,
+      testInfo.project.name,
+      "compact-mission-select",
+      dpr,
+      viewport,
+    );
+    expect(brightPixels(missionSelect, { x: 0, y: 0, ...viewport }, dpr))
+      .toBeGreaterThan(900 * dpr * dpr);
+
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await readAuroraState(page)).screen).toBe("briefing");
+    const briefing = await captureResponsive(
+      page,
+      testInfo.project.name,
+      "compact-briefing",
+      dpr,
+      viewport,
+    );
+    expect(brightPixels(briefing, { x: 0, y: 0, ...viewport }, dpr))
+      .toBeGreaterThan(900 * dpr * dpr);
+
+    await page.keyboard.press("Space");
+    await expect.poll(async () => (await readAuroraState(page)).screen).toBe("tactical");
+    const tactical = await captureResponsive(
+      page,
+      testInfo.project.name,
+      "compact-tactical",
+      dpr,
+      viewport,
+    );
+    expect(brightPixels(tactical, { x: 0, y: 0, ...viewport }, dpr))
+      .toBeGreaterThan(900 * dpr * dpr);
+  });
 });

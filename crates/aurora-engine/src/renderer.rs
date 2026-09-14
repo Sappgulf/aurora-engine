@@ -141,6 +141,13 @@ impl RenderQuality {
     }
 }
 
+/// Keeps the user's post-effect preference separate from the transient
+/// quality tier. Performance mode may bypass the expensive composition pass,
+/// while a later recovery can bring it back without rewriting saved settings.
+fn post_effects_enabled(requested: bool, quality: RenderQuality) -> bool {
+    requested && quality != RenderQuality::Performance
+}
+
 /// Stable handle to a mesh uploaded with [`Renderer::upload_mesh3d`].
 #[cfg(feature = "3d")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2289,8 +2296,16 @@ impl Renderer {
             let mapped = self.screen_light(*light);
             self.screen_lights.push(mapped);
         }
+        // Performance quality keeps the authored scene and HUD intact while
+        // removing the multi-tap HDR post stack when the frame budget is
+        // under pressure. The saved/game-requested setting remains untouched
+        // so recovery can restore the full presentation automatically.
+        let mut post_settings = self.post_fx.clone();
+        if !post_effects_enabled(post_settings.enabled, self.quality) {
+            post_settings.enabled = false;
+        }
         let post_u = PostUniforms::from_settings(
-            &self.post_fx,
+            &post_settings,
             elapsed,
             self.config.width,
             self.config.height,
@@ -2755,8 +2770,8 @@ fn push_sprite_mesh(
 mod tests {
     use super::{
         admit_bounded, debug_aabb_edges, debug_ray_rect, logical_viewport, normalized_scale_factor,
-        push_sprite_mesh, sprite_in_view, stage_debug_queue, take_with_capacity, Aabb,
-        QueuedSprite, RenderBudget, RenderQuality, TextureHandle,
+        post_effects_enabled, push_sprite_mesh, sprite_in_view, stage_debug_queue,
+        take_with_capacity, Aabb, QueuedSprite, RenderBudget, RenderQuality, TextureHandle,
     };
     use crate::sprite::{Sprite, SpriteVertex};
     use glam::Vec2;
@@ -2787,6 +2802,14 @@ mod tests {
     fn quality_presets_use_bounded_light_budgets() {
         assert!(RenderQuality::Performance.light_budget() < RenderQuality::Balanced.light_budget());
         assert!(RenderQuality::Balanced.light_budget() < RenderQuality::Cinematic.light_budget());
+    }
+
+    #[test]
+    fn performance_quality_bypasses_post_fx_without_changing_the_request() {
+        assert!(post_effects_enabled(true, RenderQuality::Balanced));
+        assert!(post_effects_enabled(true, RenderQuality::Cinematic));
+        assert!(!post_effects_enabled(true, RenderQuality::Performance));
+        assert!(!post_effects_enabled(false, RenderQuality::Cinematic));
     }
 
     #[test]

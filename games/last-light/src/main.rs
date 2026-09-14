@@ -76,6 +76,11 @@ const COMBAT_CAMERA_MAX_SPEED: f32 = 720.0;
 const COMBAT_CAMERA_EXPANDED_VIEW_SCALE: f32 = 1.35;
 const THREAT_INDICATOR_PADDING: f32 = 34.0;
 const THREAT_INDICATOR_MAX: usize = 5;
+/// Keep order previews readable for large selections. The simulation still
+/// retains every queued order; this is only the maximum number of lanes shown
+/// at once in the world-space presentation.
+const ORDER_ROUTE_MAX_UNITS: usize = 6;
+const ORDER_ROUTE_MAX_STEPS: usize = 4;
 /// The shipped unit strips are authored facing the lower edge of the screen
 /// (world-space -Y). Keep that art convention explicit so movement rotation
 /// cannot silently turn every unit 180 degrees away from its travel direction.
@@ -94,6 +99,12 @@ const COMMAND_CARD_KEYS: [KeyCode; 6] = [
 const COMMAND_CARD_COMPACT_ROWS: usize = 3;
 const HUD_SCALE_MIN: f32 = 0.5;
 const HUD_SCALE_MAX: f32 = 0.82;
+/// Portrait browser windows need a larger text scale than the desktop HUD,
+/// but their lower rail has less horizontal room. The compact layout solves
+/// both constraints by using a denser geometry tier instead of shrinking
+/// every glyph below a readable size.
+const HUD_COMPACT_ASPECT: f32 = 0.9;
+const HUD_COMPACT_WIDTH: f32 = 900.0;
 /// At dense zoom levels the HUD should prioritize command clarity over
 /// always-showing telemetry, so command and info overlays compress.
 const HUD_DENSE_ZOOM: f32 = 1.45;
@@ -404,6 +415,7 @@ enum ObjectiveStage {
 struct TacticalHudLayout {
     scale: f32,
     dense: bool,
+    compact: bool,
     top_left: Vec2,
     top_right: Vec2,
     minimap_panel: Aabb,
@@ -417,6 +429,7 @@ impl TacticalHudLayout {
     fn new(renderer: &Renderer) -> Self {
         let scale = LastLight::hud_scale(renderer);
         let dense = LastLight::hud_dense_layout(renderer);
+        let compact = LastLight::hud_compact_layout(renderer);
         let top_left = renderer
             .camera
             .world_from_viewport_fraction(Vec2::new(0.0, 1.0))
@@ -432,7 +445,18 @@ impl TacticalHudLayout {
             .world_from_viewport_fraction(Vec2::new(1.0, 0.0));
         let command_card_scale = LastLight::command_card_scale(renderer);
         let command_card_width = COMMAND_CARD_PANEL_WIDTH * command_card_scale;
-        let unit_card_right = bottom_left.x + (HUD_UNIT_CARD_X + 420.0) * scale;
+        let unit_card_x = if compact { 190.0 } else { HUD_UNIT_CARD_X };
+        let minimap_center = if compact {
+            Vec2::new(70.0, HUD_BOTTOM_BASELINE + 57.0)
+        } else {
+            Vec2::new(150.0, HUD_MINIMAP_CENTER_Y)
+        };
+        let minimap_size = if compact {
+            Vec2::new(210.0, 110.0)
+        } else {
+            Vec2::new(260.0, 138.0)
+        };
+        let unit_card_right = bottom_left.x + (unit_card_x + 420.0) * scale;
         let preferred_command_card_left = unit_card_right + HUD_LAYOUT_GUTTER * scale;
         let right_safe_command_card_left =
             bottom_right.x - HUD_LAYOUT_GUTTER * scale - command_card_width;
@@ -441,19 +465,26 @@ impl TacticalHudLayout {
         Self {
             scale,
             dense,
+            compact,
             top_left,
             top_right,
             minimap_panel: Aabb::from_center_size(
-                bottom_left + Vec2::new(150.0, HUD_MINIMAP_CENTER_Y) * scale,
-                Vec2::new(260.0, 138.0) * scale,
+                bottom_left + minimap_center * scale,
+                minimap_size * scale,
             ),
-            unit_card_origin: bottom_left + Vec2::new(HUD_UNIT_CARD_X, HUD_BOTTOM_BASELINE) * scale,
+            unit_card_origin: bottom_left + Vec2::new(unit_card_x, HUD_BOTTOM_BASELINE) * scale,
             command_card_text_origin: Vec2::new(
                 command_card_left,
                 bottom_right.y + HUD_COMMAND_CARD_TEXT_Y * command_card_scale,
             ),
             pause_center: top_right + Vec2::new(-44.0, -44.0) * scale,
-            telemetry_width: if dense { 540.0 } else { 590.0 },
+            telemetry_width: if compact {
+                350.0
+            } else if dense {
+                540.0
+            } else {
+                590.0
+            },
         }
     }
 
@@ -482,12 +513,21 @@ impl TacticalHudLayout {
         self.top_right + Vec2::new(-540.0 + slide, -42.0) * self.scale
     }
 
-    fn toast_origin(self) -> Vec2 {
-        self.top_left
-            + Vec2::new(
-                self.telemetry_width * 0.5 - HUD_TELEMETRY_INSET - 238.0,
-                -112.0,
-            ) * self.scale
+    fn toast_width(self) -> f32 {
+        if self.compact {
+            (self.telemetry_width - 12.0).max(240.0)
+        } else {
+            476.0
+        }
+    }
+
+    fn toast_origin(self, width: f32) -> Vec2 {
+        let x = if self.compact {
+            4.0
+        } else {
+            self.telemetry_width * 0.5 - HUD_TELEMETRY_INSET - width * 0.5
+        };
+        self.top_left + Vec2::new(x, -112.0) * self.scale
     }
 }
 
@@ -1892,8 +1932,14 @@ impl LastLight {
         // portrait card.
         let column = index / 5;
         let row = index % 5;
+        let compact = scale < 0.7;
+        let column_origin = if compact { -210.0 } else { -120.0 };
+        let column_spacing = 420.0;
         let center = camera_position
-            + Vec2::new(-120.0 + column as f32 * 420.0, 36.0 - row as f32 * 40.0) * scale;
+            + Vec2::new(
+                column_origin + column as f32 * column_spacing,
+                36.0 - row as f32 * 40.0,
+            ) * scale;
         Aabb::from_center_size(center, Vec2::new(392.0, 34.0) * scale)
     }
 
@@ -1987,7 +2033,13 @@ impl LastLight {
         let zoom_scale = zoom.max(f32::EPSILON).recip();
         let normalized_view = (view.x / REFERENCE_VIEW.x).min(view.y / REFERENCE_VIEW.y);
         let view_scale = normalized_view.clamp(0.55, 1.0);
-        (zoom_scale * view_scale).clamp(HUD_SCALE_MIN, HUD_SCALE_MAX)
+        let compact_portrait = view.x < HUD_COMPACT_WIDTH && view.x / view.y < HUD_COMPACT_ASPECT;
+        let minimum = if compact_portrait {
+            0.62
+        } else {
+            HUD_SCALE_MIN
+        };
+        (zoom_scale * view_scale).clamp(minimum, HUD_SCALE_MAX)
     }
 
     fn hud_dense_layout(renderer: &Renderer) -> bool {
@@ -2004,6 +2056,11 @@ impl LastLight {
 
     fn should_auto_minimize_hud(renderer: &Renderer) -> bool {
         Self::hud_dense_layout(renderer)
+    }
+
+    fn hud_compact_layout(renderer: &Renderer) -> bool {
+        let view = renderer.camera.visible_world_size();
+        view.x < HUD_COMPACT_WIDTH && view.x / view.y < HUD_COMPACT_ASPECT
     }
 
     fn hud_scale(renderer: &Renderer) -> f32 {
@@ -4999,6 +5056,26 @@ impl LastLight {
             .renderer
             .camera
             .screen_to_world(ctx.input.mouse_position);
+        // `handle_command_keys` owns roster-chip selection. Consume the same
+        // press here as well so it cannot fall through into a world drag or a
+        // terrain order during this frame and immediately restore the mixed
+        // squad. UI hit-testing must be exclusive before world hit-testing.
+        if ctx.input.mouse_pressed(MouseButton::Left)
+            && self.simulation.world.selection().ids().len() > 1
+            && self
+                .simulation
+                .world
+                .selection()
+                .ids()
+                .iter()
+                .take(5)
+                .enumerate()
+                .any(|(index, _)| {
+                    Self::selection_chip_rect(ctx.renderer, index).contains_point(mouse_world)
+                })
+        {
+            return;
+        }
         let pointer_over_command_card = self.point_over_command_card(ctx.renderer, mouse_world);
         if ctx.input.mouse_pressed(MouseButton::Left) {
             if pointer_over_command_card {
@@ -6300,6 +6377,13 @@ impl LastLight {
         fitted
     }
 
+    /// Convert a panel's upper-left padding into the top-left origin expected
+    /// by `BitmapText`. This is y-up aware: using `bounds.min.y` for text
+    /// would place the final glyph row on or below the panel edge.
+    fn panel_text_origin(bounds: Aabb, left: f32, top: f32, pixel: f32) -> Vec2 {
+        bounds.min + Vec2::new(left, bounds.size().y - top - pixel)
+    }
+
     /// Gives screen-pinned HUD surfaces one shared visual grammar without
     /// baking the frame into an atlas texture. The rails are sized in camera
     /// pixels, so a tactical panel keeps the same apparent edge weight when
@@ -6421,11 +6505,15 @@ impl LastLight {
     /// The hard cap prevents BitmapText from bleeding into the upgrade grid
     /// on narrow browser viewports.
     fn briefing_story_chunks(text: &str) -> [String; 3] {
-        const LIMIT: usize = 62;
+        Self::briefing_story_chunks_with_limit(text, 62)
+    }
+
+    fn briefing_story_chunks_with_limit(text: &str, limit: usize) -> [String; 3] {
+        let limit = limit.max(1);
         let mut lines = [String::new(), String::new(), String::new()];
         let mut line = 0;
         for word in text.split_whitespace() {
-            if !lines[line].is_empty() && lines[line].len() + 1 + word.len() > LIMIT {
+            if !lines[line].is_empty() && lines[line].len() + 1 + word.len() > limit {
                 line += 1;
                 if line >= lines.len() {
                     break;
@@ -6438,8 +6526,8 @@ impl LastLight {
                 lines[line].push_str(word);
             }
         }
-        if line == lines.len() - 1 && lines[line].len() >= LIMIT {
-            lines[line] = lines[line].chars().take(LIMIT.saturating_sub(2)).collect();
+        if line == lines.len() - 1 && lines[line].len() >= limit {
+            lines[line] = lines[line].chars().take(limit.saturating_sub(2)).collect();
             lines[line].push_str("..");
         }
         lines
@@ -6564,7 +6652,11 @@ impl LastLight {
     fn draw_full_screen_backdrop(&self, ctx: &mut FrameCtx<'_>, tint: Color) {
         let center = ctx.renderer.camera.position;
         let view = ctx.renderer.camera.visible_world_size();
-        let texture = self.environment_texture();
+        let texture = if self.mission_select {
+            self.tex_mission_cover
+        } else {
+            self.environment_texture()
+        };
         // Oversize slightly so panning/aspect changes never show a seam.
         let cover = view * 1.05;
         ctx.renderer.draw_sprite(
@@ -6585,7 +6677,9 @@ impl LastLight {
     /// Keeping a single scale for drawing and hit-testing prevents clipped
     /// headings and “dead” click rows on either platform.
     fn mission_select_scale(view: Vec2) -> f32 {
-        (view.x / 1280.0).min(view.y / 720.0).clamp(0.5, 1.0)
+        let compact_portrait = view.x < HUD_COMPACT_WIDTH && view.x / view.y < HUD_COMPACT_ASPECT;
+        let minimum = if compact_portrait { 0.68 } else { 0.5 };
+        (view.x / 1280.0).min(view.y / 720.0).clamp(minimum, 1.0)
     }
 
     fn mission_menu_cover_size(view: Vec2) -> Vec2 {
@@ -6669,10 +6763,11 @@ impl LastLight {
     }
 
     fn draw_mission_select(&self, ctx: &mut FrameCtx<'_>) {
-        self.draw_full_screen_backdrop(ctx, Color::rgba(0.01, 0.02, 0.045, 0.82));
+        self.draw_full_screen_backdrop(ctx, Color::rgba(0.01, 0.02, 0.045, 0.68));
         let center = ctx.renderer.camera.position;
-        let menu_scale = Self::mission_select_scale(ctx.renderer.camera.visible_world_size());
-        let cover_size = Self::mission_menu_cover_size(ctx.renderer.camera.visible_world_size());
+        let view = ctx.renderer.camera.visible_world_size();
+        let menu_scale = Self::mission_select_scale(view);
+        let cover_size = Self::mission_menu_cover_size(view);
         let cover_position = center + Vec2::new(-300.0, 155.0) * menu_scale;
         ctx.renderer.draw_sprite(
             self.tex_mission_cover,
@@ -6684,7 +6779,11 @@ impl LastLight {
             ctx.renderer,
             "AURORA: LAST LIGHT",
             center + Vec2::new(-320.0, 330.0) * menu_scale,
-            7.5 * menu_scale,
+            if menu_scale < 0.8 {
+                6.6 * menu_scale
+            } else {
+                7.5 * menu_scale
+            },
             Color::rgb(0.32, 1.55, 1.35),
             11.0,
         );
@@ -6712,18 +6811,22 @@ impl LastLight {
             .filter(|mission| self.save_data.campaign.unlocked_mission >= mission.required_tier)
             .count()
             .max(1);
+        let focus_hint = if menu_scale < 0.8 {
+            "KEYS"
+        } else if self.controller_mode {
+            "D-PAD / STICK"
+        } else {
+            "ARROWS OR POINTER"
+        };
+        let focus_copy = format!(
+            "FOCUS  {:02} / {:02}  //  {}",
+            focus_slot,
+            unlocked_count.max(1),
+            focus_hint
+        );
         self.draw_text_shadowed(
             ctx.renderer,
-            &format!(
-                "FOCUS  {:02} / {:02}  //  {}",
-                focus_slot,
-                unlocked_count.max(1),
-                if self.controller_mode {
-                    "D-PAD / STICK"
-                } else {
-                    "ARROWS OR POINTER"
-                }
-            ),
+            &Self::fit_bitmap_text(&focus_copy, 1.55 * menu_scale, view.x * 0.38),
             center + Vec2::new(90.0, 210.0) * menu_scale,
             1.55 * menu_scale,
             Color::rgba(0.52, 0.78, 0.84, 0.9),
@@ -6799,7 +6902,12 @@ impl LastLight {
             self.draw_text_shadowed(
                 ctx.renderer,
                 &format!("{marker} {label}"),
-                rect.min + Vec2::new(24.0, 22.0) * menu_scale,
+                Self::panel_text_origin(
+                    rect,
+                    24.0 * menu_scale,
+                    12.0 * menu_scale,
+                    3.4 * menu_scale,
+                ),
                 3.4 * menu_scale,
                 color,
                 11.0,
@@ -6829,7 +6937,12 @@ impl LastLight {
             self.draw_text_shadowed(
                 ctx.renderer,
                 &preview_line,
-                preview.min + Vec2::new(18.0, 27.0) * menu_scale,
+                Self::panel_text_origin(
+                    preview,
+                    18.0 * menu_scale,
+                    7.0 * menu_scale,
+                    1.55 * menu_scale,
+                ),
                 1.55 * menu_scale,
                 Color::rgba(0.4, 1.12, 1.08, 0.98),
                 10.4,
@@ -6842,7 +6955,12 @@ impl LastLight {
             self.draw_text_shadowed(
                 ctx.renderer,
                 &objective_line,
-                preview.min + Vec2::new(18.0, 11.0) * menu_scale,
+                Self::panel_text_origin(
+                    preview,
+                    18.0 * menu_scale,
+                    25.0 * menu_scale,
+                    1.28 * menu_scale,
+                ),
                 1.28 * menu_scale,
                 Color::rgba(0.78, 0.86, 0.9, 0.94),
                 10.4,
@@ -6869,7 +6987,12 @@ impl LastLight {
             } else {
                 "DEPLOY SELECTED  //  CLICK A ROW  OR  SPACE / ENTER"
             },
-            footer.min + Vec2::new(18.0, 11.0) * menu_scale,
+            Self::panel_text_origin(
+                footer,
+                18.0 * menu_scale,
+                7.0 * menu_scale,
+                2.05 * menu_scale,
+            ),
             2.05 * menu_scale,
             Color::rgb(1.25, 0.78, 0.28),
             11.0,
@@ -7463,6 +7586,117 @@ impl LastLight {
             );
         }
     }
+
+    fn order_waypoint(&self, order: UnitOrder) -> Option<Vec2> {
+        match order {
+            UnitOrder::Move(position)
+            | UnitOrder::AttackMove(position)
+            | UnitOrder::Interact(position) => Some(position),
+            UnitOrder::Patrol(_, destination) => Some(destination),
+            UnitOrder::Attack(target) | UnitOrder::Follow(target) => self
+                .simulation
+                .world
+                .unit(target)
+                .filter(|unit| unit.alive())
+                .map(|unit| unit.position),
+            UnitOrder::Idle | UnitOrder::Hold => None,
+        }
+    }
+
+    fn order_route_color(order: UnitOrder, active: bool) -> Color {
+        let alpha = if active { 0.66 } else { 0.38 };
+        match order {
+            UnitOrder::Move(_) | UnitOrder::Interact(_) | UnitOrder::Follow(_) => {
+                Color::rgba(0.16, 1.35, 1.2, alpha)
+            }
+            UnitOrder::AttackMove(_) | UnitOrder::Patrol(_, _) => {
+                Color::rgba(1.35, 0.72, 0.18, alpha)
+            }
+            UnitOrder::Attack(_) => Color::rgba(1.55, 0.18, 0.62, alpha),
+            UnitOrder::Idle | UnitOrder::Hold => Color::rgba(0.5, 0.7, 0.74, alpha),
+        }
+    }
+
+    fn draw_order_route_segment(
+        &self,
+        renderer: &mut Renderer,
+        start: Vec2,
+        end: Vec2,
+        color: Color,
+    ) {
+        let delta = end - start;
+        let length = delta.length();
+        if length <= 1.0 || !length.is_finite() {
+            return;
+        }
+        renderer.draw_sprite(
+            self.tex_ui,
+            Sprite::new(start + delta * 0.5, Vec2::new(length, 2.5))
+                .with_color(color)
+                .with_rotation(delta.y.atan2(delta.x))
+                .with_z(2.12),
+        );
+    }
+
+    fn draw_order_route_marker(
+        &self,
+        renderer: &mut Renderer,
+        position: Vec2,
+        color: Color,
+        active: bool,
+    ) {
+        let size = if active { 16.0 } else { 11.0 };
+        let thickness = if active { 3.0 } else { 2.0 };
+        for (offset, dimensions) in [
+            (Vec2::new(0.0, size), Vec2::new(size * 1.4, thickness)),
+            (Vec2::new(0.0, -size), Vec2::new(size * 1.4, thickness)),
+            (Vec2::new(size, 0.0), Vec2::new(thickness, size * 1.4)),
+            (Vec2::new(-size, 0.0), Vec2::new(thickness, size * 1.4)),
+        ] {
+            renderer.draw_sprite(
+                self.tex_ui,
+                Sprite::new(position + offset, dimensions)
+                    .with_color(color)
+                    .with_z(2.16),
+            );
+        }
+    }
+
+    /// Makes queued RTS intent visible without changing the simulation. Units
+    /// without a queued plan skip this presentation pass so active combat
+    /// keeps its frame budget; the active leg is brighter and later legs use
+    /// smaller markers so the planned chain stays readable at a glance.
+    fn draw_selected_order_routes(&self, renderer: &mut Renderer) {
+        let selected_ids = self.simulation.world.selection().ids();
+        for id in selected_ids.iter().take(ORDER_ROUTE_MAX_UNITS) {
+            let Some(unit) = self.simulation.world.unit(*id) else {
+                continue;
+            };
+            if unit.faction != PLAYER || !unit.alive() {
+                continue;
+            }
+            if unit.queued_orders.is_empty() {
+                continue;
+            }
+
+            let mut previous = unit.position;
+            let mut draw_leg = |order: UnitOrder, active: bool, previous: &mut Vec2| {
+                let Some(next) = self.order_waypoint(order).filter(|point| point.is_finite())
+                else {
+                    return;
+                };
+                let color = Self::order_route_color(order, active);
+                self.draw_order_route_segment(renderer, *previous, next, color);
+                self.draw_order_route_marker(renderer, next, color, active);
+                *previous = next;
+            };
+
+            draw_leg(unit.order, true, &mut previous);
+            for order in unit.queued_orders.iter().take(ORDER_ROUTE_MAX_STEPS) {
+                draw_leg(*order, false, &mut previous);
+            }
+        }
+    }
 }
 
 impl Game for LastLight {
@@ -7472,6 +7706,24 @@ impl Game for LastLight {
 
     fn asset_manifest(&self) -> Option<AssetManifest> {
         Some(assets::manifest())
+    }
+
+    fn continuous_redraw(&self) -> bool {
+        let static_surface =
+            self.mission_select || self.briefing || self.paused || self.victory || self.defeat;
+        if !static_surface {
+            return true;
+        }
+        self.controller_mode
+            || self.controls_hint_remaining > 0.0
+            || self
+                .status
+                .as_ref()
+                .is_some_and(|(_, remaining)| *remaining > 0.0)
+            || self
+                .target_feedback
+                .as_ref()
+                .is_some_and(|(_, _, remaining)| *remaining > 0.0)
     }
 
     fn agent_state(&self) -> Option<serde_json::Value> {
@@ -7512,6 +7764,40 @@ impl Game for LastLight {
                     "velocity": [attacker.velocity.x, attacker.velocity.y],
                 }))
             });
+        let selected_units = self
+            .simulation
+            .world
+            .selection()
+            .ids()
+            .iter()
+            .filter_map(|id| {
+                let unit = self.simulation.world.unit(*id)?;
+                let kind = self.simulation.kinds.get(id).copied()?;
+                Some(serde_json::json!({
+                    "id": id.0,
+                    "kind": kind.label(),
+                    "order": Self::order_label(unit.order),
+                    "position": [unit.position.x, unit.position.y],
+                }))
+            })
+            .collect::<Vec<_>>();
+        let resource_objective =
+            self.simulation
+                .resource_objective_contract()
+                .and_then(|(objective, target)| {
+                    self.simulation.resource_objective_state().map(|state| {
+                        serde_json::json!({
+                            "node_index": objective.node_index,
+                            "worker_kind": objective.worker_kind.label(),
+                            "support_kind": objective.support_kind.map(UnitKind::label),
+                            "target": [target.x, target.y],
+                            "progress_seconds": state.progress_seconds,
+                            "contested_seconds": state.contested_seconds,
+                            "contested": state.contested,
+                            "completed": state.completed,
+                        })
+                    })
+                });
         Some(serde_json::json!({
             "screen": screen,
             "mission": self.mission.id,
@@ -7523,6 +7809,8 @@ impl Game for LastLight {
             "controller_command_page": self.command_card_visible_page(),
             "settings_open": self.settings_open,
             "settings_cursor": self.settings_cursor,
+            "selected_units": selected_units,
+            "resource_objective": resource_objective,
             "settings": {
                 "cursor_sensitivity": self.profile_snapshot.controller.cursor_sensitivity,
                 "dead_zone": self.profile_snapshot.controller.dead_zone,
@@ -7666,7 +7954,7 @@ impl Game for LastLight {
                 Texture::solid(&gpu, Color::WHITE),
                 Texture::from_bytes(
                     &gpu,
-                    include_bytes!("../assets/cover/aurora-last-light-cover-v002.png"),
+                    include_bytes!("../assets/reactor-sector-hollow-v002.png"),
                     "menu.cover.aurora-last-light",
                 )
                 .expect("cover texture should decode"),
@@ -7769,6 +8057,7 @@ impl Game for LastLight {
 
         if self.mission_select {
             self.handle_mission_select(ctx);
+            self.update_status_timer(dt);
             return;
         }
         if self.briefing {
@@ -7793,6 +8082,7 @@ impl Game for LastLight {
                 ctx.audio.start();
                 ctx.input.rumble_first(0.24, 0.42, 0.12);
             }
+            self.update_status_timer(dt);
             return;
         }
         if ctx.input.key_pressed(KeyCode::Escape) {
@@ -7853,6 +8143,7 @@ impl Game for LastLight {
                     break;
                 }
             }
+            self.update_status_timer(dt);
             return;
         }
         if !self.paused && !self.victory && !self.defeat && ctx.input.key_pressed(KeyCode::F2) {
@@ -7862,6 +8153,7 @@ impl Game for LastLight {
         if self.paused {
             if self.settings_open {
                 self.handle_settings_input(ctx);
+                self.update_status_timer(dt);
                 return;
             }
             if ctx.input.key_pressed(KeyCode::F2)
@@ -7881,6 +8173,7 @@ impl Game for LastLight {
                 self.status = Some(("TACTICAL LINK RESUMED".to_owned(), 1.4));
                 ctx.input.rumble_first(0.06, 0.12, 0.05);
             }
+            self.update_status_timer(dt);
             return;
         }
 
@@ -8627,6 +8920,7 @@ impl Game for LastLight {
             );
         }
 
+        self.draw_selected_order_routes(ctx.renderer);
         self.draw_detonation_fx(ctx);
         self.draw_offscreen_threat_indicators(ctx, t);
 
@@ -8972,6 +9266,7 @@ impl Game for LastLight {
 
         let hud_scale = hud_layout.scale;
         let dense_hud = hud_layout.dense;
+        let compact_hud = hud_layout.compact;
         let top_left = hud_layout.top_left;
         let telemetry_text_width = hud_layout.telemetry_text_width();
         if !self.briefing && !self.victory && !self.defeat && !hud_minimal {
@@ -9182,23 +9477,34 @@ impl Game for LastLight {
                     Color::rgb(0.96, 0.72, 0.28),
                     8.0,
                 );
-                let income_line = format!(
-                    "IN +{income}/S  POWER {}/{}  SUPPLY {}/{}",
-                    active_relays + 1,
-                    self.simulation.relays.len() + 1,
-                    self.simulation.supply.used(),
-                    self.simulation.supply.capacity()
-                );
+                let income_line = if compact_hud {
+                    format!(
+                        "+{income}/S  PWR {}/{}  SUP {}/{}",
+                        active_relays + 1,
+                        self.simulation.relays.len() + 1,
+                        self.simulation.supply.used(),
+                        self.simulation.supply.capacity()
+                    )
+                } else {
+                    format!(
+                        "IN +{income}/S  POWER {}/{}  SUPPLY {}/{}",
+                        active_relays + 1,
+                        self.simulation.relays.len() + 1,
+                        self.simulation.supply.used(),
+                        self.simulation.supply.capacity()
+                    )
+                };
+                let income_pixel = if compact_hud { 1.8 } else { 2.35 } * hud_scale;
                 self.draw_text(
                     ctx.renderer,
-                    &Self::fit_bitmap_text(&income_line, 2.35 * hud_scale, telemetry_text_width),
+                    &Self::fit_bitmap_text(&income_line, income_pixel, telemetry_text_width),
                     top_left + Vec2::new(0.0, -75.0) * hud_scale,
-                    2.35 * hud_scale,
+                    income_pixel,
                     Color::rgb(0.96, 0.72, 0.28),
                     8.0,
                 );
             }
-            if !dense_hud {
+            if !dense_hud && !compact_hud {
                 if let Some(idle_copy) = self.idle_surveyor_hud_copy() {
                     // This chip lives in the unused right side of the telemetry
                     // panel. Its bounded copy keeps the global resource line
@@ -9305,7 +9611,7 @@ impl Game for LastLight {
                     }
                 }
                 if let Some(unit) = self.simulation.world.unit(*selected) {
-                    let compact_unit_card = dense_hud;
+                    let compact_unit_card = dense_hud || compact_hud;
                     let identity = self.unit_identity_label(*selected, kind);
                     self.draw_text(
                         ctx.renderer,
@@ -9388,6 +9694,22 @@ impl Game for LastLight {
                         Color::rgba(0.55, 0.75, 0.78, 0.9),
                         8.1,
                     );
+                    if compact_unit_card && count == 1 {
+                        if let Some(next_order) = unit.queued_orders.front().copied() {
+                            self.draw_text(
+                                ctx.renderer,
+                                &format!(
+                                    "QUEUE {:02} // NEXT {}",
+                                    unit.queued_orders.len().min(99),
+                                    Self::order_label(next_order)
+                                ),
+                                unit_card + Vec2::new(122.0, 24.0) * hud_scale,
+                                1.2 * hud_scale,
+                                Color::rgba(1.12, 0.76, 0.24, 0.92),
+                                8.1,
+                            );
+                        }
+                    }
                     if count > 1 && !compact_unit_card {
                         let mut role_counts = [0_u32; 3];
                         for id in self.simulation.world.selection().ids() {
@@ -9740,10 +10062,14 @@ impl Game for LastLight {
                     .flatten()
             });
         if let Some(message) = transient_message.as_deref() {
-            let toast_origin = hud_layout.toast_origin();
+            let toast_width = hud_layout.toast_width();
+            let toast_origin = hud_layout.toast_origin(toast_width);
+            let toast_pixel = if compact_hud { 1.35 } else { 1.65 } * hud_scale;
+            let toast_copy =
+                Self::fit_bitmap_text(message, toast_pixel, (toast_width - 24.0) * hud_scale);
             let toast_bounds = Aabb::from_center_size(
-                toast_origin + Vec2::new(238.0, 0.0) * hud_scale,
-                Vec2::new(476.0, 28.0) * hud_scale,
+                toast_origin + Vec2::new(toast_width * 0.5, 0.0) * hud_scale,
+                Vec2::new(toast_width, 28.0) * hud_scale,
             );
             ctx.renderer.draw_sprite(
                 self.tex_ui,
@@ -9760,9 +10086,9 @@ impl Game for LastLight {
             );
             self.draw_text(
                 ctx.renderer,
-                message,
+                &toast_copy,
                 toast_origin + Vec2::new(12.0, -5.0) * hud_scale,
-                1.65 * hud_scale,
+                toast_pixel,
                 Color::rgb(0.95, 0.82, 0.42),
                 8.5,
             );
@@ -9774,7 +10100,8 @@ impl Game for LastLight {
             && !self.defeat
             && self.command_card_visible()
         {
-            let compact_card = self.command_card_compact || self.minimal_hud || dense_hud;
+            let compact_card =
+                self.command_card_compact || self.minimal_hud || dense_hud || compact_hud;
             let card_scale = Self::command_card_scale(ctx.renderer);
             let card_text = Self::command_card_text_origin(ctx.renderer);
             let visible_rows = self.visible_command_card_rows_for_display(ctx.renderer);
@@ -10246,8 +10573,11 @@ impl Game for LastLight {
                     10.3,
                 );
 
-                let [line_one, line_two, line_three] =
-                    Self::briefing_story_chunks(self.briefing_story_copy());
+                let [line_one, line_two, line_three] = if overlay_scale < 0.7 {
+                    Self::briefing_story_chunks_with_limit(self.briefing_story_copy(), 42)
+                } else {
+                    Self::briefing_story_chunks(self.briefing_story_copy())
+                };
                 let story_origin = header_origin + Vec2::new(150.0, -75.0) * overlay_scale;
                 self.draw_text_shadowed(
                     ctx.renderer,
@@ -10283,11 +10613,17 @@ impl Game for LastLight {
                 );
             }
             if !self.briefing {
+                let prompt_pixel = if self.settings_open {
+                    1.55 * overlay_scale
+                } else {
+                    3.2 * overlay_scale
+                };
+                let prompt_copy = Self::fit_bitmap_text(&prompt, prompt_pixel, view.x * 0.84);
                 self.draw_text_shadowed(
                     ctx.renderer,
-                    &prompt,
+                    &prompt_copy,
                     center + Vec2::new(-view.x * 0.42, -view.y * 0.4),
-                    3.2 * overlay_scale,
+                    prompt_pixel,
                     Color::rgb(1.25, 0.78, 0.28),
                     11.0,
                 );
@@ -10622,6 +10958,54 @@ mod tests {
         assert!(state["selected"].as_u64().unwrap_or_default() > 0);
         assert_eq!(state["combat"]["pulses"], 0);
         assert_eq!(state["combat"]["active_shots"], 0);
+    }
+
+    #[test]
+    fn static_surfaces_throttle_until_feedback_or_controller_input_needs_frames() {
+        let mut game = LastLight::new();
+        assert!(!game.continuous_redraw());
+
+        game.status = Some(("INPUT ACK".to_owned(), 1.0));
+        assert!(game.continuous_redraw());
+
+        game.status = None;
+        game.controller_mode = true;
+        assert!(game.continuous_redraw());
+
+        game.controller_mode = false;
+        game.mission_select = false;
+        game.briefing = false;
+        game.paused = false;
+        assert!(game.continuous_redraw());
+    }
+
+    #[test]
+    fn order_route_preview_resolves_active_and_queued_destinations() {
+        let mut game = LastLight::new();
+        game.start_mission(missions::reclaim_the_reactor());
+        let destination = Vec2::new(240.0, -180.0);
+        assert_eq!(
+            game.order_waypoint(UnitOrder::Move(destination)),
+            Some(destination)
+        );
+        assert_eq!(
+            game.order_waypoint(UnitOrder::Patrol(Vec2::ZERO, destination)),
+            Some(destination)
+        );
+        assert_eq!(game.order_waypoint(UnitOrder::Idle), None);
+
+        let target = game
+            .simulation
+            .world
+            .units()
+            .iter()
+            .find(|unit| unit.faction == CHOIR && unit.alive())
+            .expect("reclaim starts with a visible hostile contact");
+        let target_position = target.position;
+        assert_eq!(
+            game.order_waypoint(UnitOrder::Attack(target.id)),
+            Some(target_position)
+        );
     }
 
     #[test]
@@ -12945,9 +13329,13 @@ mod tests {
         let left = LastLight::briefing_row_rect(Vec2::ZERO, 0, 1.0);
         let right = LastLight::briefing_row_rect(Vec2::ZERO, 5, 1.0);
         let second_left = LastLight::briefing_row_rect(Vec2::ZERO, 1, 1.0);
+        let compact_left = LastLight::briefing_row_rect(Vec2::ZERO, 0, 0.62);
+        let compact_right = LastLight::briefing_row_rect(Vec2::ZERO, 5, 0.62);
         assert!(right.center().x > left.center().x);
         assert!(second_left.center().y < left.center().y);
         assert!(!left.intersects(right));
+        assert!(compact_left.min.x >= -280.0);
+        assert!(compact_right.max.x <= 280.0);
     }
 
     #[test]
@@ -12970,6 +13358,10 @@ mod tests {
         );
         let compact = LastLight::mission_select_scale(Vec2::new(640.0, 360.0));
         assert_eq!(compact, 0.5);
+        assert_eq!(
+            LastLight::mission_select_scale(Vec2::new(559.0, 740.0)),
+            0.68
+        );
         let first = LastLight::mission_entry_rect(Vec2::ZERO, 0, compact);
         let last = LastLight::mission_entry_rect(Vec2::ZERO, 6, compact);
         assert!(first.center().y > last.center().y);
@@ -13027,6 +13419,10 @@ mod tests {
         assert_eq!(
             LastLight::hud_scale_for_view(Vec2::new(640.0, 360.0), 1.1),
             0.5
+        );
+        assert_eq!(
+            LastLight::hud_scale_for_view(Vec2::new(559.0, 740.0), 1.1),
+            0.62
         );
     }
 

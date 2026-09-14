@@ -3,11 +3,16 @@
 use glam::Vec2;
 use std::fmt;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
+
+#[cfg(target_arch = "wasm32")]
+use web_time::Duration;
 
 use crate::assets::AssetManifest;
 use crate::audio::Audio;
@@ -53,6 +58,16 @@ pub trait Game: 'static {
 
     /// Whether the presentation layer may adapt quality from frame headroom.
     fn adaptive_quality(&self) -> bool {
+        true
+    }
+
+    /// Whether the app should request a fresh presentation frame continuously.
+    ///
+    /// Static menus, pause surfaces, and terminal screens can return `false`
+    /// to let the runner use a low-frequency wake-up instead of spending a
+    /// full frame budget while no pixels are changing. Input, resize, focus,
+    /// and agent events still request an immediate redraw.
+    fn continuous_redraw(&self) -> bool {
         true
     }
 
@@ -133,6 +148,20 @@ impl fmt::Display for EngineStartError {
             Self::WindowCreate(error) => write!(f, "failed to create window: {error}"),
         }
     }
+}
+
+fn event_needs_redraw(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::KeyboardInput { .. }
+            | WindowEvent::MouseInput { .. }
+            | WindowEvent::CursorMoved { .. }
+            | WindowEvent::MouseWheel { .. }
+            | WindowEvent::Touch(_)
+            | WindowEvent::Focused(_)
+            | WindowEvent::Resized(_)
+            | WindowEvent::ScaleFactorChanged { .. }
+    )
 }
 
 impl std::error::Error for EngineStartError {}
@@ -507,6 +536,12 @@ fn apply_window_profile(window: &Window, profile: EngineProfile, previous: Engin
 }
 
 impl<G: Game> EngineApp<G> {
+    fn request_redraw(&self) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     fn emit_lifecycle(&mut self, event: LifecycleEvent) {
         record_lifecycle_transition(&mut self.diagnostics, &self.lifecycle);
         if let Some(game) = self.game.as_mut() {
@@ -626,7 +661,10 @@ impl<G: Game> EngineApp<G> {
             return;
         }
 
-        let Ok(actuator) = actuators.get(0).dyn_into::<web_sys::GamepadHapticActuator>() else {
+        let Ok(actuator) = actuators
+            .get(0)
+            .dyn_into::<web_sys::GamepadHapticActuator>()
+        else {
             return;
         };
         let intensity = ((request.low + request.high) * 0.5).min(1.0) as f64;
@@ -764,6 +802,7 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                 );
                 prevent_context_menu.forget();
             }
+            crate::web_agent::set_wake(&window);
         }
 
         self.start_renderer(window.clone());
@@ -864,8 +903,15 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
 
         if let Some(game) = self.game.as_mut() {
             if game.on_event(&event) {
+                if event_needs_redraw(&event) {
+                    self.request_redraw();
+                }
                 return;
             }
+        }
+
+        if event_needs_redraw(&event) {
+            self.request_redraw();
         }
 
         match event {
@@ -1123,9 +1169,12 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
                         self.diagnostics.runtime_status(),
                     ));
                 if game.adaptive_quality() {
-                    if let Some(quality) =
-                        self.quality_controller.observe(render_stats.cpu_frame_ms)
-                    {
+                    // `queue.submit()` may return before a browser has
+                    // finished presenting a high-DPI frame. Use the larger
+                    // of the measured encode cost and wall-frame pacing so
+                    // adaptive quality can react to GPU/present pressure too.
+                    let frame_budget_ms = render_stats.cpu_frame_ms.max(self.time.delta * 1_000.0);
+                    if let Some(quality) = self.quality_controller.observe(frame_budget_ms) {
                         renderer.set_quality(quality);
                     }
                 }
@@ -1137,12 +1186,36 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if self.renderer.is_some() && !self.lifecycle.suspended() {
-            if let Some(window) = &self.window {
-                window.request_redraw();
-            }
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let continuous = self
+            .game
+            .as_ref()
+            .map(Game::continuous_redraw)
+            .unwrap_or(true);
+        if continuous {
+            event_loop.set_control_flow(ControlFlow::Poll);
+        } else {
+            // Keep static surfaces responsive to hardware/agent input while
+            // avoiding a 60 Hz render loop. An input event requests an
+            // immediate frame; this cadence is only the safety-net poll.
+            event_loop.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(250)));
         }
+
+        if self.renderer.is_some() && !self.lifecycle.suspended() {
+            self.request_redraw();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redraw_trigger_covers_visual_input_and_ignores_non_visual_events() {
+        assert!(event_needs_redraw(&WindowEvent::Focused(true)));
+        assert!(!event_needs_redraw(&WindowEvent::Occluded(true)));
+        assert!(!event_needs_redraw(&WindowEvent::RedrawRequested));
     }
 }
 
