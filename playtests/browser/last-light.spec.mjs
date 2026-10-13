@@ -149,6 +149,27 @@ async function waitForAgentInputFrame(page) {
   }));
 }
 
+// DOM key transitions must span rendered frames, just like agent/pad input.
+// A visible canvas can precede WASM readiness/focus after navigation.
+// Keep true zero-delay tap coverage separate below so this helper cannot
+// substitute for the real user-visible quick-keypress flow.
+async function pressKeyboard(page, key) {
+  await expect.poll(async () => page.evaluate(() => {
+    if (typeof window.auroraState !== "function") return null;
+    return JSON.parse(window.auroraState())?.screen ?? null;
+  }), { timeout: 20_000 }).not.toBeNull();
+  const canvas = page.locator("#aurora-canvas");
+  await canvas.focus();
+  await expect(canvas).toBeFocused();
+  await page.keyboard.down(key);
+  try {
+    await waitForAgentInputFrame(page);
+  } finally {
+    await page.keyboard.up(key);
+  }
+  await waitForAgentInputFrame(page);
+}
+
 async function pressPad(page, button) {
   await page.evaluate(name => {
     if (typeof window.auroraInjectPad !== "function") {
@@ -215,12 +236,12 @@ async function callAgentGame(page, action, args = {}) {
 }
 
 async function deploySelectedMission(page) {
-  await page.keyboard.press("Enter");
+  await pressKeyboard(page, "Enter");
   await expect.poll(async () => (await readAuroraState(page)).screen, {
     timeout: 20_000,
     intervals: [100, 250, 500],
   }).toBe("briefing");
-  await page.keyboard.press("Space");
+  await pressKeyboard(page, "Space");
   await expect.poll(async () => (await readAuroraState(page)).screen, {
     timeout: 20_000,
     intervals: [100, 250, 500],
@@ -272,12 +293,12 @@ async function selectRosterUnitViaAgent(page, portraitX) {
 }
 
 async function deployReclaim(page) {
-  await page.keyboard.press("Enter");
+  await pressKeyboard(page, "Enter");
   await expect.poll(async () => (await readAuroraState(page)).screen, {
     timeout: 20_000,
     intervals: [100, 250, 500],
   }).toBe("briefing");
-  await page.keyboard.press("Enter");
+  await pressKeyboard(page, "Enter");
   await expect.poll(async () => (await readAuroraState(page)).screen, {
     timeout: 20_000,
     intervals: [100, 250, 500],
@@ -286,6 +307,29 @@ async function deployReclaim(page) {
 
 test.beforeAll(async () => {
   await mkdir(screenshotRoot, { recursive: true });
+});
+
+
+test("ready menu accepts quick DOM Enter and Space press/release", async ({ page }) => {
+  await page.goto("/");
+  const canvas = page.locator("#aurora-canvas");
+  await expect(canvas).toBeVisible();
+  await expect.poll(async () => (await readAuroraState(page))?.screen, {
+    timeout: 20_000,
+  }).toBe("mission_select");
+  // Focus the actual game surface, then use zero-delay DOM taps deliberately.
+  // Keep this separate from pressKeyboard so frame-held test input cannot
+  // hide a dropped quick tap in the app's user-visible deployment flow.
+  await canvas.focus();
+  await expect(canvas).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect.poll(async () => (await readAuroraState(page)).screen, {
+    timeout: 20_000,
+  }).toBe("briefing");
+  await page.keyboard.press("Space");
+  await expect.poll(async () => (await readAuroraState(page)).screen, {
+    timeout: 20_000,
+  }).toBe("tactical");
 });
 
 test("controller deploys, pauses, and opens tactical command focus", async ({ page }, testInfo) => {
@@ -336,7 +380,7 @@ test("control deck edits persisted input and accessibility preferences", async (
 
   // The pause CTA is screen-pinned, so this click also exercises the same
   // layout geometry used by the native-facing HUD rather than a DOM shortcut.
-  await page.keyboard.press("Escape");
+  await pressKeyboard(page, "Escape");
   await expect.poll(async () => (await readAuroraState(page)).screen).toBe("paused");
   await page.mouse.click(640, 540);
   await expect.poll(async () => (await readAuroraState(page)).screen).toBe("settings");
@@ -349,23 +393,23 @@ test("control deck edits persisted input and accessibility preferences", async (
   expect(brightPixels(panel, { x: 260, y: 150, width: 760, height: 420 }, dpr))
     .toBeGreaterThan(120 * dpr * dpr);
 
-  await page.keyboard.press("ArrowRight");
+  await pressKeyboard(page, "ArrowRight");
   await expect.poll(async () => (await readAuroraState(page)).settings.cursor_sensitivity)
     .toBeCloseTo(1.25, 3);
-  await page.keyboard.press("ArrowDown");
+  await pressKeyboard(page, "ArrowDown");
   await expect.poll(async () => (await readAuroraState(page)).settings_cursor).toBe(1);
-  await page.keyboard.press("ArrowLeft");
+  await pressKeyboard(page, "ArrowLeft");
   await expect.poll(async () => (await readAuroraState(page)).settings.dead_zone)
     .toBeCloseTo(0.15, 3);
   for (let index = 2; index <= 5; index += 1) {
-    await page.keyboard.press("ArrowDown");
+    await pressKeyboard(page, "ArrowDown");
     await expect.poll(async () => (await readAuroraState(page)).settings_cursor).toBe(index);
   }
-  await page.keyboard.press("Enter");
+  await pressKeyboard(page, "Enter");
   await expect.poll(async () => (await readAuroraState(page)).settings.reduced_motion)
     .toBe(true);
 
-  await page.keyboard.press("Escape");
+  await pressKeyboard(page, "Escape");
   await expect.poll(async () => (await readAuroraState(page)).screen).toBe("paused");
   const closed = await readAuroraState(page);
   expect(closed.settings_open).toBe(false);
@@ -464,7 +508,7 @@ test("Reclaim checkpoints preserve the playfield at fixed DPR", async ({ page },
 
   await capture(page, testInfo.project.name, "mission-select", dpr);
   await deployReclaim(page);
-  await page.keyboard.press("Escape");
+  await pressKeyboard(page, "Escape");
   await page.waitForTimeout(1_000);
   await capture(page, testInfo.project.name, "tactical-pause", dpr);
 
@@ -474,23 +518,23 @@ test("Reclaim checkpoints preserve the playfield at fixed DPR", async ({ page },
   // Exercise the RTS command vocabulary before production: attack-move,
   // patrol, and a queued waypoint must all be accepted without a browser-side
   // exception even when the click lands on open terrain.
-  await page.keyboard.press("KeyA");
+  await pressKeyboard(page, "KeyA");
   await page.mouse.click(820, 360, { button: "right" });
-  await page.keyboard.press("KeyP");
+  await pressKeyboard(page, "KeyP");
   await page.mouse.click(640, 300, { button: "right" });
   await page.keyboard.down("Shift");
   await page.mouse.click(720, 420, { button: "right" });
   await page.keyboard.up("Shift");
   // The contextual card must expose and execute the selected specialist's
   // signature action, and Space should re-center the most recent comms ping.
-  await page.keyboard.press("KeyY");
+  await pressKeyboard(page, "KeyY");
   await page.waitForTimeout(250);
-  await page.keyboard.press("Space");
+  await pressKeyboard(page, "Space");
   await page.waitForTimeout(250);
   await page.waitForTimeout(500);
-  await page.keyboard.press("KeyQ");
+  await pressKeyboard(page, "KeyQ");
   await page.waitForTimeout(2_000);
-  await page.keyboard.press("KeyQ");
+  await pressKeyboard(page, "KeyQ");
   await page.waitForTimeout(500);
   const production = await capture(page, testInfo.project.name, "production-active", dpr);
   // Compact bitmap headers and browser anti-aliasing vary slightly by DPR;
@@ -573,12 +617,12 @@ test("Tier-five campaign exposes the Verdant chapter without HUD overflow", asyn
   const screenshot = await capture(page, testInfo.project.name, "mission-select-tier5", dpr);
   expect(brightPixels(screenshot, { x: 210, y: 170, width: 860, height: 360 }, dpr))
     .toBeGreaterThan(2_000 * dpr * dpr);
-  await page.keyboard.press("Enter");
+  await pressKeyboard(page, "Enter");
   await page.waitForTimeout(500);
   const briefing = await capture(page, testInfo.project.name, "garden-briefing", dpr);
   expect(brightPixels(briefing, { x: 120, y: 80, width: 1_000, height: 520 }, dpr))
     .toBeGreaterThan(2_000 * dpr * dpr);
-  await page.keyboard.press("Space");
+  await pressKeyboard(page, "Space");
   await page.waitForTimeout(750);
   const deployed = await capture(page, testInfo.project.name, "garden-deployed", dpr);
   expect(brightPixels(deployed, safeZones.protected_playfield, dpr))
@@ -615,7 +659,7 @@ test("Terms ridge progress and attack-move telegraph stay visible", async ({ pag
   await waitForRenderedFrame(page);
   await deploySelectedMission(page);
   await selectRosterUnitViaAgent(page, 480); // Mara / Warden portrait chip.
-  await page.keyboard.press("KeyR");
+  await pressKeyboard(page, "KeyR");
   await page.waitForTimeout(500);
   // Terms' Warden Hold objective focuses the ridge; the center click is the
   // authored high-ground destination after that camera focus.
@@ -637,7 +681,7 @@ test("Terms ridge progress and attack-move telegraph stay visible", async ({ pag
   await clickAgentMouse(page, 120, 614);
   await page.waitForTimeout(600);
   const pulsesBeforeOrder = (await readAuroraState(page)).combat.pulses;
-  await page.keyboard.press("KeyA");
+  await pressKeyboard(page, "KeyA");
   await page.waitForTimeout(150);
   await clickAgentMouse(page, 640, 360, "Right");
   // Attack-move validates the stance and route first. The domain-level agent
@@ -787,13 +831,13 @@ test("Mission seven opens the Vesper Gate branch and tactical gate HUD", async (
   expect(brightPixels(missionSelect, { x: 210, y: 170, width: 860, height: 420 }, dpr))
     .toBeGreaterThan(2_500 * dpr * dpr);
 
-  await page.keyboard.press("Enter");
+  await pressKeyboard(page, "Enter");
   await page.waitForTimeout(500);
   const briefing = await capture(page, testInfo.project.name, "vesper-gate-briefing", dpr);
   expect(brightPixels(briefing, { x: 120, y: 80, width: 1_000, height: 520 }, dpr))
     .toBeGreaterThan(2_500 * dpr * dpr);
 
-  await page.keyboard.press("Space");
+  await pressKeyboard(page, "Space");
   await page.waitForTimeout(900);
   const deployed = await capture(page, testInfo.project.name, "vesper-gate-deployed", dpr);
   expect(brightPixels(deployed, safeZones.hud_regions.objective, dpr))
@@ -845,7 +889,7 @@ test("Mission eight opens the Hollow Orbit branch and three-role objective HUD",
   expect(brightPixels(missionSelect, { x: 210, y: 170, width: 860, height: 460 }, dpr))
     .toBeGreaterThan(2_500 * dpr * dpr);
 
-  await page.keyboard.press("Enter");
+  await pressKeyboard(page, "Enter");
   await page.waitForTimeout(500);
   const briefing = await capture(page, testInfo.project.name, "hollow-orbit-briefing", dpr);
   // The title, speaker card, and three-line Hollow Orbit briefing occupy this
@@ -853,7 +897,7 @@ test("Mission eight opens the Hollow Orbit branch and three-role objective HUD",
   expect(brightPixels(briefing, { x: 120, y: 80, width: 1_000, height: 520 }, dpr))
     .toBeGreaterThan(2_500 * dpr * dpr);
 
-  await page.keyboard.press("Space");
+  await pressKeyboard(page, "Space");
   await page.waitForTimeout(900);
   const deployed = await capture(page, testInfo.project.name, "hollow-orbit-deployed", dpr);
   // Mission 8 opens on the Warden's eastern-ridge hold; the Surveyor cache
@@ -892,7 +936,7 @@ test.describe("compact browser layout", () => {
     expect(brightPixels(missionSelect, { x: 0, y: 0, ...viewport }, dpr))
       .toBeGreaterThan(900 * dpr * dpr);
 
-    await page.keyboard.press("Enter");
+    await pressKeyboard(page, "Enter");
     await expect.poll(async () => (await readAuroraState(page)).screen).toBe("briefing");
     const briefing = await captureResponsive(
       page,
@@ -904,7 +948,7 @@ test.describe("compact browser layout", () => {
     expect(brightPixels(briefing, { x: 0, y: 0, ...viewport }, dpr))
       .toBeGreaterThan(900 * dpr * dpr);
 
-    await page.keyboard.press("Space");
+    await pressKeyboard(page, "Space");
     await expect.poll(async () => (await readAuroraState(page)).screen).toBe("tactical");
     const tactical = await captureResponsive(
       page,
