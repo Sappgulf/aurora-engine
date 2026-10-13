@@ -1,95 +1,80 @@
 {
   "schema_version": 1,
-  "iteration": "ENGINE-017",
-  "title": "Engine upgrade galore: culling, atlas packing, speed lines, debug shapes, collision events, water, emitters, themes, power-ups, boss, authoring loop",
+  "iteration": "DOCS-VALIDATION-20261013",
+  "title": "Restore local validation and shipping budgets; clarify project documentation",
   "status": "passed",
-  "date": "2026-08-29",
+  "date": "2026-10-13",
+  "baseline": "ab436ec82fafce5c277f0e05b01d74910218e89c",
   "acceptance": {
-    "sprite_culling_tested_with_stats": true,
-    "atlas_packer_tested_no_overlap_deterministic": true,
-    "speed_streaks_post_pass": true,
-    "debug_shapes_api": true,
-    "collision_event_stream_tested": true,
-    "water_buoyancy_tested": true,
-    "rate_emitters_tested": true,
-    "level_themes_applied_all_levels": true,
-    "powerups_double_jump_long_dash_tested": true,
-    "boss_arena_bot_verified": true,
-    "five_levels_replay_identical": true,
-    "mcp_level_author_and_gallery": true,
-    "browser_specs_passed": true,
-    "canonical_hash_contract_preserved": true
+    "strict_local_release_gate": true,
+    "unchanged_budget_limits": true,
+    "quick_dom_deployment_at_dpr_1_and_2": true,
+    "native_and_browser_screenshots_reviewed": true,
+    "detailed_project_guide_retained": true
   },
   "evidence": {
-    "cargo_fmt_check": "passed",
-    "cargo_clippy_all_targets_all_features": "passed",
-    "cargo_test_workspace": {
-      "status": "passed",
-      "tests": 431
+    "command": "CI=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 ./scripts/validate-local.sh",
+    "exit_code": 0,
+    "cargo_fmt": "passed",
+    "native_clippy_all_targets_all_features": "passed with -D warnings",
+    "workspace_tests": {
+      "passed": 492,
+      "ignored": 1,
+      "existing_ignored_test": "mesh_demo::tests::export_test_cube_asset"
     },
-    "engine_tests": 215,
-    "platformer_tests": 32,
     "wasm_workspace_check": "passed",
-    "trunk_release_build_platformer": "passed",
-    "platformer_web_budget": {
-      "wasm_bytes": 695439,
-      "budget_bytes": 3145728
+    "wasm_clippy_all_targets": "passed with -D warnings",
+    "canonical_victory_replay": "passed; each test compares two clean final state hashes through victory; supplemental exact test repeat also passed",
+    "trunk_release_builds": [
+      "last-light passed",
+      "platformer passed"
+    ],
+    "browser_tests": {
+      "passed": 27,
+      "failed": 0,
+      "retries_observed": 0,
+      "dpr": [
+        1,
+        2
+      ],
+      "zero_delay_dom_test": "ready menu accepts quick DOM Enter and Space press/release; independent of frame-held helper"
     },
-    "mcp_stdio_smoke_test": "passed",
-    "mcp_tools": 12,
-    "renderer": {
-      "sprite_culling": "half-diagonal circle test, culled_sprites stat",
-      "atlas_pack": "shelf packer, pow2, deterministic, half-texel uvs",
-      "speed_streaks": "radial hash streaks keyed off dash state",
-      "debug_shapes": "aabb/ray/grid queue, cleared per frame"
+    "budgets": {
+      "last_light_wasm_bytes": 18561483,
+      "last_light_wasm_limit": 18874368,
+      "tracked_source_png_bytes": 18772111,
+      "source_png_limit": 20971520,
+      "platformer_wasm_bytes": 768902,
+      "platformer_wasm_limit": 3145728
     },
-    "simulation": {
-      "collision_events": "physics_step_events: floor/wall/ceiling x world/platform/oneway/slope",
-      "water": "gravity 0.35x, drag 2.5/s, terminal 240, in_water flag",
-      "emitters": "RateEmitter deterministic accumulation + emit_single"
+    "mcp_protocol": "five helper checks plus stdio handshake passed",
+    "native_last_light": "scripted mission select → briefing → tactical; task-local AURORA_SAVE_DIR; screenshots reviewed; owned process group cleaned up",
+    "native_platformer": "bounded start-and-move scenario passed; captured screenshot reviewed",
+    "documentation_links": {
+      "relative_targets": 24,
+      "status": "passed"
     },
-    "gameplay": {
-      "themes": "5 authored palettes (navy/teal/violet/dusk/crimson)",
-      "powerups": "double_jump + long_dash with air-jump budget",
-      "boss": "CORE arena: hp 3, speed ramp per hit, bounce-to-shelf loop, bot-verified 10.0s",
-      "levels": 5
-    },
-    "platformer_playthroughs": {
-      "crystal_run": {
-        "won": true
-      },
-      "conduit_climb": {
-        "won": true
-      },
-      "windlift": {
-        "won": true
-      },
-      "skyline": {
-        "won": true
-      },
-      "core": {
-        "won": true,
-        "sim_seconds": 10.0
-      },
-      "replay_bit_identical": [
-        "crystal-run",
-        "conduit-climb",
-        "windlift",
-        "skyline",
-        "core"
-      ]
-    },
-    "browser": {
-      "agent_specs": "2 passed",
-      "browser": "Chromium headless with WebGPU"
+    "environment": {
+      "os": "macOS",
+      "cargo": "1.93.1",
+      "trunk": "0.21.14",
+      "browser": "installed Google Chrome via checked-in config",
+      "resource_flags": "Only local debug-symbol generation and incremental caches disabled to fit disk. Assertions, warnings, gate scripts, release optimization and size limits unchanged."
     }
   },
-  "known_gaps": [
-    "GitHub-hosted CI execution remains unobserved",
-    "crates.io publish pending account credentials",
-    "IBL on the 3D path remains open",
-    "in-engine level editor preview remains open",
-    "water surface rendering is flat tint (no waves)"
+  "changes": {
+    "rust": "Move test module after public items; no runtime input or simulation code changes.",
+    "assets": "Normalize reactor-sector-v001 and reactor-sector-hollow-v002 at unchanged 1672×941 dimensions and opaque alpha; Hollow retains RGB PNG. Remove unreferenced superseded garden/terms/vesper v002 plates. All other assets restored to exact baseline bytes.",
+    "browser_fixture": "Require ready game state and canvas focus; synchronize transitions across rendered frames. Independent zero-delay DOM flow guards against masking quick-keypress app defects."
+  },
+  "learnings": [
+    "Canvas visibility alone precedes WASM readiness after navigation; keep real quick-keyboard regressions separate from synchronized synthetic input.",
+    "Preserve role-specific PNG encoding contracts during budget normalization.",
+    "Retire superseded unreferenced source payloads before considering any limit change."
   ],
-  "next_task": "ENGINE-018"
+  "known_gaps": [
+    "These are local validation results; inspect the exact PR commit for hosted CI/Vercel status.",
+    "No working public hosted demo has been verified.",
+    "One pre-existing Rust export utility test remains intentionally ignored by the repository."
+  ]
 }
