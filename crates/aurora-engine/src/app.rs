@@ -1207,18 +1207,6 @@ impl<G: Game> ApplicationHandler<UserEvent> for EngineApp<G> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn redraw_trigger_covers_visual_input_and_ignores_non_visual_events() {
-        assert!(event_needs_redraw(&WindowEvent::Focused(true)));
-        assert!(!event_needs_redraw(&WindowEvent::Occluded(true)));
-        assert!(!event_needs_redraw(&WindowEvent::RedrawRequested));
-    }
-}
-
 /// Built-in minimal demo (M0 triangle path).
 pub struct TriangleDemo {
     pub title: String,
@@ -1245,5 +1233,17 @@ impl Game for TriangleDemo {
         let hue = (ctx.time.elapsed * 0.05) % 1.0;
         let clear = Color::from_hue(hue).night_blend(0.82);
         ctx.renderer.set_clear_color(clear);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redraw_trigger_covers_visual_input_and_ignores_non_visual_events() {
+        assert!(event_needs_redraw(&WindowEvent::Focused(true)));
+        assert!(!event_needs_redraw(&WindowEvent::Occluded(true)));
+        assert!(!event_needs_redraw(&WindowEvent::RedrawRequested));
     }
 }
